@@ -100,6 +100,11 @@ shimmie2-tools/
 
 ## 🗄️ Database files
 
+I have provided pre-built database files that are current as of April 19, 2025 that used [nyanko7/danbooru2023 posts.json](https://huggingface.co/datasets/nyanko7/danbooru2023/blob/main/metadata/posts.json) and Danbooru API.
+You are free to use them. Place them into tools/data. They are archived pretty tighly so the final sizes are 4.1GB for posts_cache.db and 89.6MB for danbooru_wiki_cache.db.
+
+[Database files on Google Drive](https://drive.google.com/drive/folders/106pn_tpW4QgpPj-kwHC4x6cvdiqw5MaH?usp=drive_link)
+
 ## 📜 License
 
 This project is licensed under the GNU General Public License v3.0.
