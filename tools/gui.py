@@ -1,0 +1,549 @@
+from pathlib import Path
+from tkinter import ttk, filedialog, messagebox
+from tkinter.scrolledtext import ScrolledText
+from datetime import datetime
+import getpass
+import multiprocessing
+import os
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+
+
+class ShimmieToolsGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Shimmie Tools GUI")
+        self.geometry("900x600")
+        self._resizing = False
+        self._resize_timer = None
+        self._log_queue = []
+        self._log_lock = threading.Lock()
+        self._create_widgets()
+        self.active_proc = None
+        self.abort_button = ttk.Button(self, text="❌ Abort", command=self._abort_process, state="disabled")
+        self.abort_button.pack(pady=5)
+
+    def _create_widgets(self):
+        self.bind("<Configure>", self._on_configure_event)
+
+        # Root layout: vertical paned window
+        paned = tk.PanedWindow(self, orient=tk.VERTICAL)
+        paned.pack(fill='both', expand=True)
+
+        # Frame for notebook + progress bar
+        top_frame = ttk.Frame(paned)
+        top_frame.columnconfigure(0, weight=1)
+        top_frame.rowconfigure(0, weight=1)
+        top_frame.rowconfigure(1, weight=0)
+
+        # Notebook
+        self.notebook = ttk.Notebook(top_frame)
+        self.notebook.grid(row=0, column=0, sticky='nsew')
+
+        self.booru_tab = self._create_booru_tab(self.notebook)
+        self.precache_tab = self._create_precache_tab(self.notebook)
+        self.wiki_tab = self._create_wiki_tab(self.notebook)
+
+
+        # Progress bar
+        self.progress = ttk.Progressbar(top_frame, mode='indeterminate')
+        self.progress.grid(row=1, column=0, sticky='ew', padx=5, pady=(5, 0))
+
+        # Add top_frame to the paned window
+        paned.add(top_frame, minsize=300)
+
+        # Bottom log section
+        bottom_frame = ttk.Frame(paned)
+        bottom_frame.columnconfigure(0, weight=1)
+        bottom_frame.rowconfigure(0, weight=1)
+
+        self.log_output = ScrolledText(bottom_frame, height=10, state='disabled', wrap='word', bg="#1e1e1e", fg="#d4d4d4")
+        self.log_output.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
+
+        # Add log to paned window
+        paned.add(bottom_frame, minsize=100)
+
+        # Style tags
+        self.log_output.tag_config("ncurses", foreground="#00cccc")
+        self.log_output.tag_config("error", foreground="#ff5555")
+        self.log_output.tag_config("bold", font=("Courier", 10, "bold"))
+
+        self.bind_all("<Control-a>", self._select_all)
+
+    def _set_tabs_enabled(self, enabled: bool):
+        def set_state_recursive(widget, state):
+            try:
+                widget.configure(state=state)
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                set_state_recursive(child, state)
+
+        for tab in [self.booru_tab, self.precache_tab, self.wiki_tab]:
+            set_state_recursive(tab, "normal" if enabled else "disabled")
+
+    def _create_booru_tab(self, notebook):
+        import multiprocessing
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text="Tag Images")
+
+        # Allow column 1 to expand for entries
+        frame.columnconfigure(1, weight=1)
+
+        self.booru_args = {}
+        row = 0
+
+        # Helper: Add labeled entry + optional Browse
+        def add_entry(label, key, default="", browse_func=None):
+            nonlocal row
+            self.booru_args[key] = tk.StringVar(value=default)
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w')
+            container = ttk.Frame(frame)
+            ttk.Entry(container, textvariable=self.booru_args[key], width=50).pack(side='left', fill='x', expand=True)
+            if browse_func:
+                ttk.Button(container, text="Browse", command=browse_func).pack(side='right')
+            container.grid(row=row, column=1, sticky='ew', padx=2, pady=2)
+            row += 1
+
+        # Folder/Image input
+        add_entry("Input Folder/Image", "image_or_images", "", lambda: self._select_path_for("image_or_images"))
+
+        # Cache input
+        default_cache = str(Path("tools/data/posts_cache.db").resolve())
+        add_entry("Input Cache File", "input_cache", default_cache, lambda: self._select_path_for("input_cache", filetypes=[("SQLite DB", "*.db")]))
+
+        # Batch size
+        self.booru_args["batch_size"] = tk.IntVar(value=10)
+        ttk.Label(frame, text="Batch Size").grid(row=row, column=0, sticky='w')
+        ttk.Spinbox(frame, from_=1, to=99, textvariable=self.booru_args["batch_size"], width=5).grid(row=row, column=1, sticky='w')
+        row += 1
+
+        # Model selector
+        self.booru_args["model"] = tk.StringVar(value="vit-large")
+        ttk.Label(frame, text="Model").grid(row=row, column=0, sticky='w')
+        model_options = ["vit", "vit-large", "swinv2", "convnext"]
+        ttk.Combobox(frame, textvariable=self.booru_args["model"], values=model_options, state="readonly").grid(row=row, column=1, sticky='w')
+        row += 1
+
+        # Thresholds
+        for label, key, default in [("General Threshold", "gen_threshold", 0.50),
+                                    ("Rating Threshold", "rating_threshold", 0.35),
+                                    ("Character Threshold", "char_threshold", 0.30)]:
+            self.booru_args[key] = tk.DoubleVar(value=default)
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w')
+            ttk.Spinbox(frame, from_=0.0, to=1.0, increment=0.01,
+                        textvariable=self.booru_args[key], format="%.2f", width=6).grid(row=row, column=1, sticky='w')
+            row += 1
+
+        # Threads
+        max_threads = multiprocessing.cpu_count()
+        step = 2 if max_threads <= 24 else 4
+        thread_options = list(range(step, max_threads + 1, step))
+        default_threads = max_threads if max_threads <= 24 else 24
+        self.booru_args["threads"] = tk.IntVar(value=default_threads)
+        ttk.Label(frame, text="Threads").grid(row=row, column=0, sticky='w')
+        ttk.Combobox(frame, textvariable=self.booru_args["threads"],
+                    values=thread_options, state="readonly", width=5).grid(row=row, column=1, sticky='w')
+        row += 1
+
+        # Checkboxes
+        for label, key, default in [("Include Subfolders", "subfolder", False),
+                                    ("Shimmie Mode", "shimmie", True),
+                                    ("No Prune", "no_prune", False)]:
+            self.booru_args[key] = tk.BooleanVar(value=default)
+            ttk.Checkbutton(frame, text=label, variable=self.booru_args[key]).grid(row=row, columnspan=2, sticky='w')
+            row += 1
+
+        # Run button
+        ttk.Button(frame, text="Run Tagger", command=self.run_booru).grid(row=row, column=0, columnspan=2, pady=10)
+
+        return frame
+
+    def _create_precache_tab(self, notebook):
+        import multiprocessing
+
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text="Precache Posts")
+        frame.columnconfigure(1, weight=1)
+
+        self.precache_args = {}
+
+        default_input = str(Path("input/posts.json").resolve())
+        default_output = str(Path("tools/data/posts_cache.db").resolve())
+
+        def add_entry(label, key, default, browse_func=None):
+            nonlocal row
+            self.precache_args[key] = tk.StringVar(value=default)
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w')
+            container = ttk.Frame(frame)
+            ttk.Entry(container, textvariable=self.precache_args[key], width=50).pack(side='left', fill='x', expand=True)
+            if browse_func:
+                ttk.Button(container, text="Browse", command=browse_func).pack(side='right')
+            container.grid(row=row, column=1, sticky='ew', padx=2, pady=2)
+            row += 1
+
+        row = 0
+        add_entry("posts.json path", "posts_json", default_input,
+          lambda: self._select_path_for("posts_json", filetypes=[("JSON files", "*.json")]))
+        add_entry("Output DB Path", "output", default_output,
+          lambda: self._select_path_for("output", filetypes=[("SQLite DB", "*.db")], save=True, default_ext=".db"))
+
+        max_threads = multiprocessing.cpu_count()
+        step = 2 if max_threads <= 24 else 4
+        thread_options = list(range(step, max_threads + 1, step))
+        default_threads = max_threads if max_threads <= 24 else 24
+        self.precache_args["threads"] = tk.IntVar(value=default_threads)
+
+        ttk.Label(frame, text="Threads").grid(row=row, column=0, sticky='w')
+        ttk.Combobox(frame, textvariable=self.precache_args["threads"],
+                    values=thread_options, state="readonly", width=5).grid(row=row, column=1, sticky='w')
+        row += 1
+
+        ttk.Button(frame, text="Run Precache", command=self.run_precache).grid(row=row, column=0, columnspan=2, pady=10)
+
+        return frame
+
+    def _create_wiki_tab(self, notebook):
+
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text="Import Wikis")
+        frame.columnconfigure(1, weight=1)
+
+        default_user = getpass.getuser()
+        default_db = "shimmiedb"
+
+        self.wiki_args = {
+            "user": tk.StringVar(value=default_user),
+            "db": tk.StringVar(value=default_db),
+            "start_page": tk.IntVar(value=1),
+            "pages": tk.IntVar(value=200),
+            "convert": tk.StringVar(value="shimmie"),
+            "update_existing": tk.BooleanVar(),
+            "update_cache": tk.BooleanVar(),
+            "clear_cache": tk.BooleanVar()
+        }
+
+        row = 0
+
+        def add_text_entry(label, var):
+            nonlocal row
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w')
+            ttk.Entry(frame, textvariable=var, width=50).grid(row=row, column=1, sticky='ew', padx=2, pady=2)
+            row += 1
+
+        add_text_entry("Database User", self.wiki_args["user"])
+        add_text_entry("Database Name", self.wiki_args["db"])
+        add_text_entry("Start Page", self.wiki_args["start_page"])
+        add_text_entry("Page Count", self.wiki_args["pages"])
+
+        ttk.Label(frame, text="Convert Mode").grid(row=row, column=0, sticky='w')
+        convert_modes = ["raw", "markdown", "html", "shimmie"]
+        ttk.Combobox(frame, textvariable=self.wiki_args["convert"],
+                    values=convert_modes, state="readonly", width=48).grid(row=row, column=1, sticky='w')
+        row += 1
+
+        for label, key in [("Update Existing", "update_existing"),
+                        ("Update Cache", "update_cache"),
+                        ("Clear Cache", "clear_cache")]:
+            ttk.Checkbutton(frame, text=label, variable=self.wiki_args[key]).grid(row=row, columnspan=2, sticky='w')
+            row += 1
+
+        ttk.Button(frame, text="Import Wikis", command=self.run_wiki).grid(row=row, column=0, columnspan=2, pady=10)
+
+        return frame
+
+    def run_booru(self):
+        args = ["python", "-u", "booru_csv_maker.py"]
+        for key, entry in self.booru_args.items():
+            if isinstance(entry, tk.BooleanVar):
+                if entry.get():
+                    args.append(f"--{key}")
+            elif isinstance(entry, tk.StringVar) or isinstance(entry, tk.IntVar) or isinstance(entry, tk.DoubleVar):
+                val = entry.get()
+                if val not in ("", None):
+                    args.append(f"--{key}={val}")
+        lines = [
+            f"Input:        {self.booru_args['image_or_images'].get()}",
+            f"Batch Size:   {self.booru_args['batch_size'].get()}",
+            f"Model:        {self.booru_args['model'].get()}",
+            f"Gen Thresh:   {self.booru_args['gen_threshold'].get():.2f}",
+            f"Rating:       {self.booru_args['rating_threshold'].get():.2f}",
+            f"Char Thresh:  {self.booru_args['char_threshold'].get():.2f}",
+            f"Threads:      {self.booru_args['threads'].get()}",
+            f"Shimmie:      {'Yes' if self.booru_args['shimmie'].get() else 'No'}",
+            f"No Prune:     {'Yes' if self.booru_args['no_prune'].get() else 'No'}",
+            f"Input Cache:  {self.booru_args['input_cache'].get()}"
+        ]
+        self.render_summary("Tagger Run Summary", lines)
+        self._run_script(args)
+
+    def run_precache(self):
+        args = ["python", "-u", "precache_posts_sqlite.py"]
+        args.append(self.precache_args["posts_json"].get())
+        args += ["-o", self.precache_args["output"].get(),
+                "--threads", str(self.precache_args["threads"].get())]
+
+        lines = [
+            f"Input File:   {self.precache_args['posts_json'].get()}",
+            f"Output DB:    {self.precache_args['output'].get()}",
+            f"Threads:      {self.precache_args['threads'].get()}",
+        ]
+        self.render_summary("Precache Run Summary", lines)
+        self._run_script(args)
+
+    def run_wiki(self):
+        args = ["python", "-u", "import_danbooru_wikis.py"]
+        for key, val in self.wiki_args.items():
+            if isinstance(val, tk.BooleanVar):
+                if val.get():
+                    args.append(f"--{key.replace('_', '-')}")
+            else:
+                args.append(f"--{key.replace('_', '-')}={val.get()}")
+
+        lines = [
+            f"Database:     {self.wiki_args['db'].get()}",
+            f"User:         {self.wiki_args['user'].get()}",
+            f"Start Page:   {self.wiki_args['start_page'].get()}",
+            f"Page Count:   {self.wiki_args['pages'].get()}",
+            f"Convert Mode: {self.wiki_args['convert'].get()}",
+            f"Update Cache: {'Yes' if self.wiki_args['update_cache'].get() else 'No'}",
+            f"Clear Cache:  {'Yes' if self.wiki_args['clear_cache'].get() else 'No'}",
+            f"Update Exist: {'Yes' if self.wiki_args['update_existing'].get() else 'No'}",
+        ]
+        self.render_summary("Wiki Import Summary", lines)
+        self._run_script(args)
+
+    def _run_script(self, cmd):
+        def run():
+            self._set_tabs_enabled(False)
+            self.abort_button.config(state="normal")
+            self.progress.start(10)
+            self.log(f"$ {' '.join(cmd)}\n")
+
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"  # 👈 Unbuffered output
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True,
+                    cwd="tools",
+                    env=env
+                )
+                self.abort_button.config(state="normal")  # Enable abort
+                self.active_proc = proc  # Save to self for aborting
+
+                def enqueue_output():
+                    for line in iter(proc.stdout.readline, ''):
+                        if line:
+                            self.after(0, self.log, line.rstrip())
+
+                reader_thread = threading.Thread(target=enqueue_output, daemon=True)
+                reader_thread.start()
+
+                # Wait in background (non-blocking main thread)
+                while proc.poll() is None:
+                    time.sleep(0.1)
+
+            except Exception as e:
+                self.after(0, self.log, f"[ERROR] {e}")
+            finally:
+                self.after(0, self._on_script_complete)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_script_complete(self):
+        self.progress.stop()
+        self._set_tabs_enabled(True)
+        self.abort_button.config(state="disabled")
+        self.active_proc = None
+
+    def _abort_process(self):
+        if self.active_proc and self.active_proc.poll() is None:
+            # Optional: add check for safe-to-abort here
+            try:
+                self.active_proc.terminate()
+                self.log("⚠️ Process aborted by user.")
+            except Exception as e:
+                self.log(f"[ERROR] Failed to abort: {e}")
+            finally:
+                self.abort_button.config(state="disabled")
+                self.progress.stop()
+
+    def _select_path_for(self, key: str, filetypes=None, folder=False, save=False, default_ext=None):
+        if not hasattr(self, "_last_dir"):
+            self._last_dir = str(Path.home())  # fallback to home directory
+
+        path = None
+
+        if folder:
+            path = filedialog.askdirectory(
+                title="Select Folder",
+                initialdir=self._last_dir
+            )
+        elif save:
+            path = filedialog.asksaveasfilename(
+                title="Save File",
+                defaultextension=default_ext,
+                filetypes=filetypes or [("All files", "*.*")],
+                initialdir=self._last_dir
+            )
+        else:
+            path = filedialog.askopenfilename(
+                title="Select File",
+                filetypes=filetypes or [("All files", "*.*")],
+                initialdir=self._last_dir
+            )
+
+        if path:
+            # Store last-used directory
+            self._last_dir = str(Path(path).parent)
+
+            # Append extension if saving and missing
+            if save and default_ext:
+                ext = default_ext if default_ext.startswith(".") else f".{default_ext}"
+                if not path.lower().endswith(ext):
+                    path += ext
+
+            if key in self.booru_args:
+                self.booru_args[key].set(path)
+            elif key in self.precache_args:
+                self.precache_args[key].set(path)
+            elif key in self.wiki_args:
+                self.wiki_args[key].set(path)
+
+    def check_sd_tag_editor(self):
+        sdt_path = Path("tools/data/SD-Tag-Editor")
+        install_flag = sdt_path / ".installed"
+
+        if not sdt_path.exists():
+            self.log("[ERROR] SD-Tag-Editor not found!")
+            messagebox.showerror(
+                "Missing Dependency",
+                "SD-Tag-Editor was not found.\nPlease re-run the setup or check your submodules."
+            )
+            return False
+
+        if not install_flag.exists():
+            self.log("[WARN] SD-Tag-Editor does not appear initialized.")
+            response = messagebox.askyesno(
+                "SD-Tag-Editor Setup",
+                "SD-Tag-Editor is not yet installed.\nWould you like to open the installer in a terminal?"
+            )
+            if response:
+                try:
+                    if sys.platform.startswith("win"):
+                        subprocess.Popen(["start", "tools\\data\\SD-Tag-Editor\\run.bat"], shell=True)
+                    else:
+                        # Try multiple terminal fallback options
+                        terminals = [
+                            ["konsole", "--hold", "-e", "bash", "tools/data/SD-Tag-Editor/run.sh"],
+                            ["x-terminal-emulator", "-e", "bash", "tools/data/SD-Tag-Editor/run.sh"],
+                            ["gnome-terminal", "--", "bash", "tools/data/SD-Tag-Editor/run.sh"],
+                            ["xterm", "-e", "bash", "tools/data/SD-Tag-Editor/run.sh"]
+                        ]
+                        for terminal in terminals:
+                            try:
+                                subprocess.Popen(terminal)
+                                break
+                            except FileNotFoundError:
+                                continue
+                        else:
+                            raise FileNotFoundError("No compatible terminal emulator found.")
+                except Exception as e:
+                    messagebox.showerror("Failed to launch terminal", f"Error: {e}")
+                    return False
+
+            messagebox.showinfo(
+                "Restart Required",
+                "After running the installer, please restart this GUI to continue."
+            )
+            return False  # 🛑 Correct location for early exit
+
+        return True  # ✅ Only reached if everything is okay
+
+    def _select_all(self, event):
+        widget = event.widget
+        if isinstance(widget, (tk.Entry, ttk.Entry)):
+            widget.selection_range(0, 'end')
+            return "break"
+
+    def render_summary(self, title: str, lines: list[str], tag="ncurses"):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        full_title = f"{title}  •  {timestamp}"
+        width = max(len(line) for line in lines + [full_title]) + 4
+
+        border = "┌" + "─" * (width - 2) + "┐"
+        divider = "├" + "─" * (width - 2) + "┤"
+        bottom = "└" + "─" * (width - 2) + "┘"
+
+        content = [
+            border,
+            f"│ {full_title.center(width - 4)} │",
+            divider,
+            *[f"│ {line.ljust(width - 4)} │" for line in lines],
+            bottom,
+            "",  # extra newline
+            "⌛ Starting script...\n"
+        ]
+
+        for line in content:
+            self._append_log(line, tag=tag)
+
+    def log(self, text):
+        self._append_log(text)
+
+    def _should_autoscroll(self):
+        # Returns True if the log is scrolled to bottom
+        return self.log_output.yview()[1] == 1.0
+
+
+    def _append_log(self, text, tag=None):
+        self.log_output.configure(state='normal')
+        is_at_bottom = self._should_autoscroll()
+
+        self.log_output.insert(tk.END, text + '\n', tag or ())
+
+        if is_at_bottom:
+            self.log_output.see(tk.END)
+
+        self.log_output.configure(state='disabled')
+
+    def _flush_log_queue(self):
+        with self._log_lock:
+            while self._log_queue:
+                self._append_log(self._log_queue.pop(0))
+
+    def _on_configure_event(self, event):
+        self._resizing = True
+        if self._resize_timer:
+            self.after_cancel(self._resize_timer)
+        self._resize_timer = self.after(500, self._on_resize_done)
+
+    def _on_resize_done(self):
+        self._resizing = False
+        self._flush_log_queue()
+
+if __name__ == "__main__":
+    app = ShimmieToolsGUI()
+
+    class StdoutRedirector:
+        def __init__(self, log_func):
+            self.log_func = log_func
+        def write(self, text):
+            if text.strip():
+                self.log_func(text.strip())
+        def flush(self):
+            pass
+
+    sys.stdout = StdoutRedirector(lambda msg: app.log(msg))
+    sys.stderr = sys.stdout
+
+    app.mainloop()
