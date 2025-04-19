@@ -27,7 +27,7 @@ A modular suite of utilities and scripts designed to extend and enhance the func
 
 Save `run.sh` or `run.bat` to the directory of your choosing and run it. It won't work unless the directory is empty.
 
-### 📦 Manual Installation
+## 💿 Manual Installation
 
 ```bash
 git clone https://github.com/Miyuutsu/shimmie2-tools.git
@@ -62,6 +62,7 @@ All scripts are located in the `tools/` directory. Examples:
 ```bash
 # Create CSV from various data
 python tools/booru_csv_maker.py --batch_size=20 --model=vit-large --gen_threshold=0.35 --rating_threshold=0.35 --char_threshold=0.75 --subfolder=True --shimmie=True --no_prune=True --threads=16 --input_cache=tools/data/posts_cache.db
+
 # Precache posts.json into SQLite
 python tools/precache_posts_sqlite.py input/posts.json -o tools/data/posts_cache.db --threads 8
 
@@ -97,6 +98,8 @@ shimmie2-tools/
 - Tags, metadata, and thresholds are configurable in GUI mode
 - `.gitignore` excludes all runtime cache files and submodule-generated artifacts
 
+## 🗄️ Database files
+
 ## 📜 License
 
 This project is licensed under the GNU General Public License v3.0.
@@ -109,7 +112,7 @@ See the [License](LICENSE) for details.
 💖 Credits
 - [Danbooru](https://danbooru.donmai.us/) for their rich metadata and API
 - [Shimmie2](https://github.com/shish/shimmie2) for the core imageboard framework
-- [SD-Tag-Editor](https://github.com/derrian-distro/SD-Tag-Editor)
+- [SD-Tag-Editor](https://github.com/derrian-distro/SD-Tag-Editor) for their wonderful tagger that is used as backend fallback
 - All contributors and users 💜
 
-🛠 Built with care and plenty of caffeinated determination.
+❤️☕ Built with care and plenty of caffeinated determination.
