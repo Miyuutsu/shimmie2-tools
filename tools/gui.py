@@ -11,7 +11,6 @@ import threading
 import time
 import tkinter as tk
 
-
 class ShimmieToolsGUI(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -332,7 +331,7 @@ class ShimmieToolsGUI(tk.Tk):
             env["PYTHONUNBUFFERED"] = "1"  # 👈 Unbuffered output
 
             # Choose the correct venv path
-            venv_base = Path(__file__).resolve().parent / "data" / "venv"
+            venv_base = Path(__file__).resolve().parent / "venv"
             venv_py = venv_base / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
             if venv_py.exists() and Path(cmd[0]).name.startswith("python"):

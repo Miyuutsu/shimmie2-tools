@@ -5,7 +5,7 @@ setlocal
 cd /d %~dp0
 
 set "REPO_URL=https://github.com/Miyuutsu/shimmie2-tools.git"
-set "VENV_DIR=tools\data\venv"
+set "VENV_DIR=tools\venv"
 
 :: Check if python3.11 is available
 where python3.11 >nul 2>&1
@@ -42,7 +42,10 @@ if not exist "tools\SD-Tag-Editor\run.bat" (
 :: Install SD-Tag-Editor if needed
 if not exist "tools\SD-Tag-Editor\.installed" (
     echo ⚙️ Installing SD-Tag-Editor...
-    call tools\SD-Tag-Editor\install.bat
+    pushd "tools\SD-Tag-Editor"
+    call install.bat
+    popd
+    type nul > "tools\SD-Tag-Editor\.installed"
 )
 
 :: Create venv using Python 3.11

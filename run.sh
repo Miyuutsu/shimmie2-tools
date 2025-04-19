@@ -3,7 +3,7 @@
 cd "$(dirname "$0")"
 
 REPO_URL="https://github.com/Miyuutsu/shimmie2-tools.git"
-VENV_DIR="tools/data/venv"
+VENV_DIR="tools/venv"
 PYTHON=$(command -v python3.11)
 
 # Ensure python3.11 is available
@@ -39,7 +39,8 @@ fi
 # Run SD-Tag-Editor install if needed
 if [ ! -f "tools/SD-Tag-Editor/.installed" ]; then
   echo "⚙️ Installing SD-Tag-Editor..."
-  bash tools/SD-Tag-Editor/install.sh
+  bash -c "cd tools/SD-Tag-Editor && ./install.sh"
+  touch tools/SD-Tag-Editor/.installed
 fi
 
 # Create venv using Python 3.11 if missing
