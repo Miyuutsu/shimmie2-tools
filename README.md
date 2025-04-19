@@ -118,6 +118,7 @@ See the [License](LICENSE) for details.
 - [Danbooru](https://danbooru.donmai.us/) for their rich metadata and API
 - [Shimmie2](https://github.com/shish/shimmie2) for the core imageboard framework
 - [SD-Tag-Editor](https://github.com/derrian-distro/SD-Tag-Editor) for their wonderful tagger that is used as backend fallback
+- [ChatGPT](https://chatgpt.com) because odds are good I couldn't have done this without you
 - All contributors and users 💜
 
 ❤️☕ Built with care and plenty of caffeinated determination.
