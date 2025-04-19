@@ -111,7 +111,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Pre-cache Danbooru posts.json directly into an SQLite DB.")
     parser.add_argument("posts_json", nargs="?", default="input/posts.json", help="Path to posts.json")
-    parser.add_argument("-o", "--output", default="tools/data/posts_cache.db", help="Where to write the SQLite DB")
+    parser.add_argument("-o", "--output", default="tools/posts_cache.db", help="Where to write the SQLite DB")
     parser.add_argument("--threads", type=int, default=8, help="Number of threads to use")
     args = parser.parse_args()
 

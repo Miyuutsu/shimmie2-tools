@@ -1,0 +1,10 @@
+pydantic==2.7.1
+timm
+pillow
+torch
+torchvision
+huggingface-hub
+numpy==1.26.4
+simple_parsing
+pandas
+orjson

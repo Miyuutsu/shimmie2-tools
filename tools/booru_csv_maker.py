@@ -27,14 +27,6 @@ import timm
 import torch
 import tqdm
 
-# Add SD-Tag-Editor path
-sdt_path = Path(__file__).resolve().parent / "data" / "SD-Tag-Editor"
-if sdt_path.exists():
-    sys.path.insert(0, str(sdt_path))
-else:
-    print("[WARN] SD-Tag-Editor not found — required for tag tree functions.")
-
-
 Image.MAX_IMAGE_PIXELS = None
 torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -50,7 +42,7 @@ MD5_RE = re.compile(r"[a-fA-F0-9]{32}")
 
 @dataclass
 class ScriptOptions:
-    image_or_images: str = field(positional=True, default="NO_INPUT")
+    image_or_images: str = field(default="NO_INPUT")
     batch_size: int = field(default=8)
     model: str = field(default="vit")
     gen_threshold: float = field(default=0.35)
@@ -211,7 +203,7 @@ def flatten_all_tags(char, gen, artist, series, rating, group_tree, no_prune):
 def main(opts: ScriptOptions):
     print("=== Tagger Run Summary ===")
     print(f"📁  Input:           {opts.image_or_images}")
-    print(f"📥  Input Cache:     {opts.input_cache or 'tools/data/posts_cache.db'}")
+    print(f"📥  Input Cache:     {opts.input_cache or 'tools/posts_cache.db'}")
     print(f"📦  Batch Size:      {opts.batch_size}")
     print(f"🧠  Model:           {opts.model}")
     print(f"✨  Gen Threshold:   {opts.gen_threshold:.2f}")
@@ -223,7 +215,7 @@ def main(opts: ScriptOptions):
     print(f"🧹  No Prune:        {'Yes' if opts.no_prune else 'No'}")
     print()
     conn = None
-    sqlite_path = Path(opts.input_cache) if opts.input_cache else Path("tools/data/posts_cache.db")
+    sqlite_path = Path(opts.input_cache) if opts.input_cache else Path("tools/posts_cache.db")
     conn = None
     if sqlite_path.exists():
         conn = sqlite3.connect(sqlite_path)
@@ -232,11 +224,12 @@ def main(opts: ScriptOptions):
     if sqlite_path.exists():
         conn = sqlite3.connect(sqlite_path)
 
-    image_path = Path(opts.image_or_images.strip(' "')).resolve()
+    if not opts.image_or_images or opts.image_or_images.strip().upper() == "NO_INPUT":
+        opts.image_or_images = input("Input Folder or Image: ").strip(' "')
+
+    image_path = Path(opts.image_or_images.strip()).resolve()
     if not image_path.exists():
-        image_path = Path(input("Input Folder or Image: ").strip(' "')).resolve()
-        if not image_path.exists():
-            raise FileNotFoundError(f"Path not found: {image_path}")
+        raise FileNotFoundError(f"Path not found: {image_path}")
 
     images = [f for f in (image_path.rglob("*") if opts.subfolder else image_path.iterdir()) if f.suffix.lower() in ALLOWED_EXTS and f.is_file()] if image_path.is_dir() else [image_path]
 

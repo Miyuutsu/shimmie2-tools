@@ -1,4 +1,5 @@
-tools/data/danbooru_wiki_cache.db
-tools/data/venv
-tools/data/posts_cache.db
+tools/danbooru_wiki_cache.db
+tools/venv
+tools/posts_cache.db
 input
+tools/__pycache__

@@ -18,8 +18,7 @@ A modular suite of utilities and scripts designed to extend and enhance the func
 
 ## 🧠 Requirements
 
-- Python 3.11 for tagger submodule
-- Python 3.8+ for everything else
+- Python 3.11 because managing two python versions is pain
 - Linux, Windows (partial support, not regularly maintained), or WSL
 - Git (to clone the SD-Tag-Editor submodule)
 
@@ -61,10 +60,10 @@ All scripts are located in the `tools/` directory. Examples:
 
 ```bash
 # Create CSV from various data
-python tools/booru_csv_maker.py --batch_size=20 --model=vit-large --gen_threshold=0.35 --rating_threshold=0.35 --char_threshold=0.75 --subfolder=True --shimmie=True --no_prune=True --threads=16 --input_cache=tools/data/posts_cache.db
+python tools/booru_csv_maker.py --batch_size=20 --model=vit-large --gen_threshold=0.35 --rating_threshold=0.35 --char_threshold=0.75 --subfolder=True --shimmie=True --no_prune=True --threads=16 --input_cache=tools/posts_cache.db
 
 # Precache posts.json into SQLite
-python tools/precache_posts_sqlite.py input/posts.json -o tools/data/posts_cache.db --threads 8
+python tools/precache_posts_sqlite.py input/posts.json -o tools/posts_cache.db --threads 8
 
 # Import Danbooru wikis
 python tools/import_danbooru_wikis.py --user={dbuser} --db={shimmiedb} --pages=20 --convert=shimmie
@@ -77,11 +76,10 @@ shimmie2-tools/
 ├── input/
 │   └──  posts.json
 ├── tools/
-│   ├── data/
-│   │   ├── danbooru_character_webui.csv
-│   │   ├── danbooru_wiki_cache.db
-│   │   ├── posts_cache.db
-│   │   └── SD-Tag-Editor/
+│   ├── danbooru_character_webui.csv
+│   ├── danbooru_wiki_cache.db
+│   ├── posts_cache.db
+│   └── SD-Tag-Editor/
 │   ├── booru_csv_maker.py
 │   ├── gui.py
 │   ├── import_danbooru_wikis.py
@@ -101,7 +99,7 @@ shimmie2-tools/
 ## 🗄️ Database files
 
 I have provided pre-built database files that are current as of April 19, 2025 that used [nyanko7/danbooru2023 posts.json](https://huggingface.co/datasets/nyanko7/danbooru2023/blob/main/metadata/posts.json) and Danbooru API.
-You are free to use them. Place them into tools/data. They are archived pretty tighly so the final sizes are 4.1GB for posts_cache.db and 89.6MB for danbooru_wiki_cache.db.
+You are free to use them. Place them into tools/. They are archived pretty tighly so the final sizes are 4.1GB for posts_cache.db and 89.6MB for danbooru_wiki_cache.db.
 
 [Database files on Google Drive](https://drive.google.com/drive/folders/106pn_tpW4QgpPj-kwHC4x6cvdiqw5MaH?usp=drive_link)
 

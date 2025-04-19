@@ -112,7 +112,7 @@ class ShimmieToolsGUI(tk.Tk):
         add_entry("Input Folder/Image", "image_or_images", "", lambda: self._select_path_for("image_or_images", folder=True))
 
         # Cache input
-        default_cache = str(Path("tools/data/posts_cache.db").resolve())
+        default_cache = str(Path("tools/posts_cache.db").resolve())
         add_entry("Input Cache File", "input_cache", default_cache, lambda: self._select_path_for("input_cache", filetypes=[("SQLite DB", "*.db")]))
 
         # Batch size
@@ -172,7 +172,7 @@ class ShimmieToolsGUI(tk.Tk):
         self.precache_args = {}
 
         default_input = str(Path("input/posts.json").resolve())
-        default_output = str(Path("tools/data/posts_cache.db").resolve())
+        default_output = str(Path("tools/posts_cache.db").resolve())
 
         def add_entry(label, key, default, browse_func=None):
             nonlocal row
@@ -256,6 +256,11 @@ class ShimmieToolsGUI(tk.Tk):
         return frame
 
     def run_booru(self):
+        # Sanity check for image input
+        img_path = self.booru_args["image_or_images"].get().strip()
+        if not img_path or img_path.upper() == "NO_INPUT":
+            messagebox.showerror("Missing Input", "Please select an image or folder to process.")
+            return
         args = ["python", "-u", "booru_csv_maker.py"]
         for key, entry in self.booru_args.items():
             if isinstance(entry, tk.BooleanVar):
@@ -266,7 +271,7 @@ class ShimmieToolsGUI(tk.Tk):
                 if val not in ("", None):
                     args.append(f"--{key}={val}")
         lines = [
-            f"Input:        {self.booru_args['image_or_images'].get()}",
+            f"Input:        {img_path}",
             f"Batch Size:   {self.booru_args['batch_size'].get()}",
             f"Model:        {self.booru_args['model'].get()}",
             f"Gen Thresh:   {self.booru_args['gen_threshold'].get():.2f}",
@@ -325,6 +330,15 @@ class ShimmieToolsGUI(tk.Tk):
 
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"  # 👈 Unbuffered output
+
+            # Choose the correct venv path
+            venv_base = Path(__file__).resolve().parent / "data" / "venv"
+            venv_py = venv_base / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+            if venv_py.exists() and Path(cmd[0]).name.startswith("python"):
+                cmd[0] = str(venv_py)
+            else:
+                self.log("[WARN] Virtual environment not found. Falling back to system Python.")
 
             try:
                 proc = subprocess.Popen(
@@ -413,14 +427,14 @@ class ShimmieToolsGUI(tk.Tk):
                     path += ext
 
             if key in self.booru_args:
-                self.booru_args[key].set(path)
+                self.booru_args[key].set(path.strip())
             elif key in self.precache_args:
-                self.precache_args[key].set(path)
+                self.precache_args[key].set(path.strip())
             elif key in self.wiki_args:
-                self.wiki_args[key].set(path)
+                self.wiki_args[key].set(path.strip())
 
     def check_sd_tag_editor(self):
-        sdt_path = Path("tools/data/SD-Tag-Editor")
+        sdt_path = Path("tools/SD-Tag-Editor")
         install_flag = sdt_path / ".installed"
 
         if not sdt_path.exists():
@@ -440,14 +454,14 @@ class ShimmieToolsGUI(tk.Tk):
             if response:
                 try:
                     if sys.platform.startswith("win"):
-                        subprocess.Popen(["start", "tools\\data\\SD-Tag-Editor\\run.bat"], shell=True)
+                        subprocess.Popen(["start", "tools\\SD-Tag-Editor\\install.bat"], shell=True)
                     else:
                         # Try multiple terminal fallback options
                         terminals = [
-                            ["konsole", "--hold", "-e", "bash", "tools/data/SD-Tag-Editor/run.sh"],
-                            ["x-terminal-emulator", "-e", "bash", "tools/data/SD-Tag-Editor/run.sh"],
-                            ["gnome-terminal", "--", "bash", "tools/data/SD-Tag-Editor/run.sh"],
-                            ["xterm", "-e", "bash", "tools/data/SD-Tag-Editor/run.sh"]
+                            ["konsole", "--hold", "-e", "bash", "tools/SD-Tag-Editor/install.sh"],
+                            ["x-terminal-emulator", "-e", "bash", "tools/SD-Tag-Editor/install.sh"],
+                            ["gnome-terminal", "--", "bash", "tools/SD-Tag-Editor/install.sh"],
+                            ["xterm", "-e", "bash", "tools/SD-Tag-Editor/install.sh"]
                         ]
                         for terminal in terminals:
                             try:
