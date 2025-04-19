@@ -109,7 +109,7 @@ class ShimmieToolsGUI(tk.Tk):
             row += 1
 
         # Folder/Image input
-        add_entry("Input Folder/Image", "image_or_images", "", lambda: self._select_path_for("image_or_images"))
+        add_entry("Input Folder/Image", "image_or_images", "", lambda: self._select_path_for("image_or_images", folder=True))
 
         # Cache input
         default_cache = str(Path("tools/data/posts_cache.db").resolve())
