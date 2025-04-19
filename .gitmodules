@@ -1,0 +1,3 @@
+[submodule "tools/data/SD-Tag-Editor"]
+	path = tools/data/SD-Tag-Editor
+	url = https://github.com/derrian-distro/SD-Tag-Editor
