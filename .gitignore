@@ -3,3 +3,4 @@ tools/venv
 tools/posts_cache.db
 input
 tools/__pycache__
+tools/tag_rating_dominant.db
