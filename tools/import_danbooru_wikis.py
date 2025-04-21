@@ -1,8 +1,9 @@
+import argparse
+import getpass
+import psycopg2
+import re
 import requests
 import sqlite3
-import psycopg2
-import argparse
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -38,10 +39,6 @@ def clear_cache():
     else:
         print("ℹ️ No cache found to clear.")
 
-import re
-
-import re
-
 def clean_wiki_body(text: str, title: str) -> str:
     """
     Sanitize and convert Danbooru wiki body content to Shimmie2-friendly BBCode-like format.
@@ -73,21 +70,23 @@ def clean_wiki_body(text: str, title: str) -> str:
                 # Process ToC lines
                 toc_processed = ["[h3][b]Table of Contents[/b][/h3]"]
                 for toc_line in toc_lines:
-                    match = re.match(r'\*\s*([\dA-Za-z]+(?:\.[\dA-Za-z]+)*)\.\s*"(.+?)":#([^\s]+)', toc_line.strip())
+                    match = re.match(r'^(\*+)\s*(?:([\dA-Za-z.]+)\.\s*)?"(.+?)":#([^\s]+)', toc_line.strip())
                     if match:
-                        number = match.group(1)
-                        label = match.group(2)
-                        anchor = match.group(3)
+                        stars = match.group(1)
+                        number = match.group(2) or ''
+                        label = match.group(3)
+                        anchor = match.group(4)
                         # Determine the indentation level based on the number format
-                        indentation = ''
+                        nesting_level = len(stars) - 1
+                        indentation = '\u00A0' * nesting_level
                         separator = '.'
                         if '.' in number:
-                            # If the number contains a decimal, add a space for indentation
-                            indentation = ' ' * (number.count('.') - 1)  # Adjust based on the number of decimal points
+                            # If top level nesting then don't use dot
+                            #indentation = '' * (number.count('.') - 1)  # Adjust based on the number of decimal points
                             separator = ''
                         # Filter out '-dtext' from the anchor
-                        if '-dtext' in anchor:
-                            anchor = anchor.replace('-dtext', '')
+                        if 'dtext-' in anchor:
+                            anchor = anchor.replace('dtext-', '')
                         formatted_entry = f"{indentation}• {number}{separator} [url=site://wiki/{title}#bb-{anchor}]{label}[/url]"
                         #toc_processed.append(f"•{number}. [url=site://wiki/{title}#bb-{anchor}]{label}[/url]")
                         toc_processed.append(formatted_entry)
@@ -306,6 +305,7 @@ def main(args):
     cache_cur = cache_conn.cursor()
 
     pg_conn = psycopg2.connect(**DB_CONFIG)
+    pg_conn.set_client_encoding('UTF8')
     pg_cur = pg_conn.cursor()
     existing_titles = get_existing_titles(pg_cur)
 
@@ -341,21 +341,37 @@ if __name__ == "__main__":
     parser.add_argument("--convert", choices=["raw", "markdown", "html", "shimmie"], default="shimmie", help="Content formatting mode")
     parser.add_argument("--update-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
-    parser.add_argument("--user", type=str, default="miyuu", help="PostgreSQL user")
+    parser.add_argument("--user", type=str, default=getpass.getuser(), help="PostgreSQL user")
     parser.add_argument("--db", type=str, default="shimmiedb", help="PostgreSQL database name")
+    parser.add_argument("--dbl", dest="password", type=str, help="Use a password with your database user. (Default: None)")
     args = parser.parse_args()
 
     # Set DB_CONFIG after parsing
-    DB_CONFIG = {
-        "dbname": args.db,
-        "user": args.user,
-        "host": "localhost",
-        "port": 5432
-    }
+    if args.password is None:
+        # If no password is provided, use passwordless authentication
+        DB_CONFIG = {
+            "dbname": args.db,
+            "user": args.user,
+            "host": "localhost",
+            "port": 5432
+        }
+    else:
+        # If a password is provided, use it
+        DB_CONFIG = {
+            "dbname": args.db,
+            "user": args.user,
+            "password": args.password,
+            "host": "localhost",
+            "port": 5432
+        }
 
     print("=== Import Summary ===")
     print(f"📚  Database:       {DB_CONFIG['dbname']}")
     print(f"👤  User:           {DB_CONFIG['user']}")
+    if args.password is None:
+        print(f"🔓 Password:       None")
+    else:
+        print(f"🔒 Password:       Hidden")
     print(f"📄  Start Page:     {args.start_page}")
     print(f"📄  Page Count:     {args.pages}")
     print(f"🔄  Update Cache:   {'Yes' if args.update_cache else 'No'}")

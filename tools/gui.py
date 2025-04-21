@@ -2,8 +2,10 @@ from pathlib import Path
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from datetime import datetime
+import ctypes
 import getpass
 import multiprocessing
+import platform
 import os
 import subprocess
 import sys
@@ -11,35 +13,63 @@ import threading
 import time
 import tkinter as tk
 
+
+
 class ShimmieToolsGUI(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Shimmie Tools GUI")
-        self.geometry("900x600")
+        self.geometry("1280x720")
+        # configure colors
+        colors = {'background_color': '#1e1e2c', 'text_color': '#E8E8EC', 'window_color': '#1e1e2c', 'window_text_color': '#E8E8EC'}
+        self.configure(bg=colors['window_color'])
+        # Set the style for ttk widgets
+        style = ttk.Style()
+        style.theme_use('clam')  # 'clam' theme allows more customization
+        style.configure("TButton", background=colors['background_color'], foreground=colors['text_color'])
+        style.configure("TFrame", background=colors['background_color'], foreground=colors['text_color'])
+        style.configure("TLabel", background=colors['background_color'], foreground=colors['text_color'])
+        style.configure("TEntry", background=colors['background_color'], foreground="#000000")
+        style.configure("TCombobox", background=colors['background_color'], foreground=colors['text_color'])
+        style.configure("Custom.TCheckbutton",     background=colors['background_color'], foreground=colors['text_color'], indicatorbackground=colors['background_color'], indicatorcolor=colors['text_color'], selectcolor=colors['background_color'])
+        style.map('Custom.TCheckbutton', background=[('active', colors['window_color'])], foreground=[('disabled', 'gray')], indicatorbackground=[('selected', colors['text_color']), ('!selected', colors['background_color'])])
+        # Create a main frame with the background color
+        main_frame = tk.Frame(self, bg=colors['background_color'])
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        self.label = tk.Label(self, text="Welcome to Shimmie Tools!", bg=colors['background_color'], fg=colors['text_color'])
+        self.label.pack(pady=20)
         self._resizing = False
         self._resize_timer = None
         self._log_queue = []
         self._log_lock = threading.Lock()
-        self._create_widgets()
         self.active_proc = None
         self.abort_button = ttk.Button(self, text="❌ Abort", command=self._abort_process, state="disabled")
         self.abort_button.pack(pady=5)
 
-    def _create_widgets(self):
+
+        self._create_widgets(main_frame, colors)
+
+    def _create_widgets(self, parent, colors):
         self.bind("<Configure>", self._on_configure_event)
+
+        # Configure styles for ttk widgets
+        style = ttk.Style()
+        style.configure("TNotebook", background=colors['background_color'], bordercolor=colors['background_color'])
+        style.configure("TNotebook.Tab", background=colors['background_color'], foreground=colors['text_color'], padding=[10, 5])
+        style.map("TNotebook.Tab", background=[("selected", colors['window_color'])], foreground=[("selected", colors['window_text_color'])])
 
         # Root layout: vertical paned window
         paned = tk.PanedWindow(self, orient=tk.VERTICAL)
         paned.pack(fill='both', expand=True)
 
         # Frame for notebook + progress bar
-        top_frame = ttk.Frame(paned)
+        top_frame = ttk.Frame(paned, style="TFrame")
         top_frame.columnconfigure(0, weight=1)
         top_frame.rowconfigure(0, weight=1)
         top_frame.rowconfigure(1, weight=0)
 
         # Notebook
-        self.notebook = ttk.Notebook(top_frame)
+        self.notebook = ttk.Notebook(top_frame, style="TNotebook")
         self.notebook.grid(row=0, column=0, sticky='nsew')
 
         self.booru_tab = self._create_booru_tab(self.notebook)
@@ -59,30 +89,21 @@ class ShimmieToolsGUI(tk.Tk):
         bottom_frame.columnconfigure(0, weight=1)
         bottom_frame.rowconfigure(0, weight=1)
 
+        # Set the background color for the bottom frame
+        #bottom_frame.configure(bg=colors['background_color'])
+
         self.log_output = ScrolledText(bottom_frame, height=10, state='disabled', wrap='word', bg="#1e1e1e", fg="#d4d4d4")
         self.log_output.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
 
         # Add log to paned window
         paned.add(bottom_frame, minsize=100)
 
-        # Style tags
+        # Style tags for ScrolledText
         self.log_output.tag_config("ncurses", foreground="#00cccc")
         self.log_output.tag_config("error", foreground="#ff5555")
         self.log_output.tag_config("bold", font=("Courier", 10, "bold"))
 
         self.bind_all("<Control-a>", self._select_all)
-
-    def _set_tabs_enabled(self, enabled: bool):
-        def set_state_recursive(widget, state):
-            try:
-                widget.configure(state=state)
-            except Exception:
-                pass
-            for child in widget.winfo_children():
-                set_state_recursive(child, state)
-
-        for tab in [self.booru_tab, self.precache_tab, self.wiki_tab]:
-            set_state_recursive(tab, "normal" if enabled else "disabled")
 
     def _create_booru_tab(self, notebook):
         import multiprocessing
@@ -124,7 +145,7 @@ class ShimmieToolsGUI(tk.Tk):
         self.booru_args["model"] = tk.StringVar(value="vit-large")
         ttk.Label(frame, text="Model").grid(row=row, column=0, sticky='w')
         model_options = ["vit", "vit-large", "swinv2", "convnext"]
-        ttk.Combobox(frame, textvariable=self.booru_args["model"], values=model_options, state="readonly").grid(row=row, column=1, sticky='w')
+        ttk.Combobox(frame, textvariable=self.booru_args["model"], values=model_options, state="readonly", style="TEntry").grid(row=row, column=1, sticky='w')
         row += 1
 
         # Thresholds
@@ -145,7 +166,7 @@ class ShimmieToolsGUI(tk.Tk):
         self.booru_args["threads"] = tk.IntVar(value=default_threads)
         ttk.Label(frame, text="Threads").grid(row=row, column=0, sticky='w')
         ttk.Combobox(frame, textvariable=self.booru_args["threads"],
-                    values=thread_options, state="readonly", width=5).grid(row=row, column=1, sticky='w')
+                    values=thread_options, state="readonly", width=5, style="TEntry").grid(row=row, column=1, sticky='w')
         row += 1
 
         # Checkboxes
@@ -153,7 +174,7 @@ class ShimmieToolsGUI(tk.Tk):
                                     ("Shimmie Mode", "shimmie", True),
                                     ("No Prune", "no_prune", False)]:
             self.booru_args[key] = tk.BooleanVar(value=default)
-            ttk.Checkbutton(frame, text=label, variable=self.booru_args[key]).grid(row=row, columnspan=2, sticky='w')
+            ttk.Checkbutton(frame, text=label, variable=self.booru_args[key], style="Custom.TCheckbutton").grid(row=row, columnspan=2, sticky='w')
             row += 1
 
         # Run button
@@ -176,9 +197,9 @@ class ShimmieToolsGUI(tk.Tk):
         def add_entry(label, key, default, browse_func=None):
             nonlocal row
             self.precache_args[key] = tk.StringVar(value=default)
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w')
+            ttk.Label(frame, text=label, style="TLabel").grid(row=row, column=0, sticky='w')
             container = ttk.Frame(frame)
-            ttk.Entry(container, textvariable=self.precache_args[key], width=50).pack(side='left', fill='x', expand=True)
+            ttk.Entry(container, textvariable=self.precache_args[key], width=50, style="TEntry").pack(side='left', fill='x', expand=True)
             if browse_func:
                 ttk.Button(container, text="Browse", command=browse_func).pack(side='right')
             container.grid(row=row, column=1, sticky='ew', padx=2, pady=2)
@@ -198,7 +219,7 @@ class ShimmieToolsGUI(tk.Tk):
 
         ttk.Label(frame, text="Threads").grid(row=row, column=0, sticky='w')
         ttk.Combobox(frame, textvariable=self.precache_args["threads"],
-                    values=thread_options, state="readonly", width=5).grid(row=row, column=1, sticky='w')
+                    values=thread_options, state="readonly", width=5, style="TEntry").grid(row=row, column=1, sticky='w')
         row += 1
 
         ttk.Button(frame, text="Run Precache", command=self.run_precache).grid(row=row, column=0, columnspan=2, pady=10)
@@ -212,10 +233,12 @@ class ShimmieToolsGUI(tk.Tk):
         frame.columnconfigure(1, weight=1)
 
         default_user = getpass.getuser()
+        default_password = None
         default_db = "shimmiedb"
 
         self.wiki_args = {
             "user": tk.StringVar(value=default_user),
+            "dbl": tk.StringVar(value=default_password),
             "db": tk.StringVar(value=default_db),
             "start_page": tk.IntVar(value=1),
             "pages": tk.IntVar(value=200),
@@ -227,13 +250,14 @@ class ShimmieToolsGUI(tk.Tk):
 
         row = 0
 
-        def add_text_entry(label, var):
+        def add_text_entry(label, var, hide=False):
             nonlocal row
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky='w')
-            ttk.Entry(frame, textvariable=var, width=50).grid(row=row, column=1, sticky='ew', padx=2, pady=2)
+            ttk.Label(frame, text=label, style="TLabel").grid(row=row, column=0, sticky='w')
+            ttk.Entry(frame, textvariable=var, width=50, show='•' if hide else '', style="TEntry").grid(row=row, column=1, sticky='ew', padx=2, pady=2)
             row += 1
 
         add_text_entry("Database User", self.wiki_args["user"])
+        add_text_entry("Database Password", self.wiki_args["dbl"], hide=True)
         add_text_entry("Database Name", self.wiki_args["db"])
         add_text_entry("Start Page", self.wiki_args["start_page"])
         add_text_entry("Page Count", self.wiki_args["pages"])
@@ -241,16 +265,16 @@ class ShimmieToolsGUI(tk.Tk):
         ttk.Label(frame, text="Convert Mode").grid(row=row, column=0, sticky='w')
         convert_modes = ["raw", "markdown", "html", "shimmie"]
         ttk.Combobox(frame, textvariable=self.wiki_args["convert"],
-                    values=convert_modes, state="readonly", width=48).grid(row=row, column=1, sticky='w')
+                    values=convert_modes, state="readonly", width=48, style="TEntry").grid(row=row, column=1, sticky='w')
         row += 1
 
         for label, key in [("Update Existing", "update_existing"),
                         ("Update Cache", "update_cache"),
                         ("Clear Cache", "clear_cache")]:
-            ttk.Checkbutton(frame, text=label, variable=self.wiki_args[key]).grid(row=row, columnspan=2, sticky='w')
+            ttk.Checkbutton(frame, text=label, variable=self.wiki_args[key], style="Custom.TCheckbutton").grid(row=row, columnspan=2, sticky='w')
             row += 1
 
-        ttk.Button(frame, text="Import Wikis", command=self.run_wiki).grid(row=row, column=0, columnspan=2, pady=10)
+        ttk.Button(frame, text="Import Wikis", command=self.run_wiki, style="TButton").grid(row=row, column=0, columnspan=2, pady=10)
 
         return frame
 
@@ -322,7 +346,6 @@ class ShimmieToolsGUI(tk.Tk):
 
     def _run_script(self, cmd):
         def run():
-            self._set_tabs_enabled(False)
             self.abort_button.config(state="normal")
             self.progress.start(10)
             self.log(f"$ {' '.join(cmd)}\n")
@@ -374,7 +397,6 @@ class ShimmieToolsGUI(tk.Tk):
 
     def _on_script_complete(self):
         self.progress.stop()
-        self._set_tabs_enabled(True)
         self.abort_button.config(state="disabled")
         self.active_proc = None
 
