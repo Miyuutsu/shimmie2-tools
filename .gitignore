@@ -6,3 +6,4 @@ tools/__pycache__
 tools/tag_rating_dominant.db
 tools/wiki_index.txt
 tools/wiki_index_sorted.txt
+tools/danbooru_wiki_cache.db-journal

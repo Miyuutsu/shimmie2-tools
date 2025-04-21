@@ -8,7 +8,7 @@ from pathlib import Path
 
 DANBOORU_URL = "https://danbooru.donmai.us/wiki_pages.json"
 WIKI_LINK_BASE = "/wiki/"
-SQLITE_DB = Path("data/danbooru_wiki_cache.db")
+SQLITE_DB = Path("danbooru_wiki_cache.db")
 SQLITE_DB.parent.mkdir(parents=True, exist_ok=True)
 DB_CONFIG = {}
 OWNER_ID = 1
@@ -38,22 +38,62 @@ def clear_cache():
     else:
         print("ℹ️ No cache found to clear.")
 
-def clean_wiki_body(text: str) -> str:
+import re
+
+import re
+
+def clean_wiki_body(text: str, title: str) -> str:
     """
-    Sanitize and convert Danbooru wiki body content to Shimmie2-friendly format.
+    Sanitize and convert Danbooru wiki body content to Shimmie2-friendly BBCode-like format.
     Preserves <!--shimmie:lock--> if present.
     """
 
     lines = []
+    previous_line_blank = False
+    in_toc = False
+    toc_lines = []
+
     for line in text.splitlines():
-        line = line.strip()
+        original_line = line  # Keep the original line for reference
+        line = line.rstrip()
 
         # Preserve hidden lock marker
         if line.strip() == "<!--shimmie:lock-->":
             lines.append(line)
             continue
 
-        # ❌ Skip meta/monetization lines
+        # Handle Table of Contents block
+        if line.strip().lower() == "[expand=table of contents]":
+            in_toc = True
+            toc_lines = []
+            continue
+        if in_toc:
+            if line.strip().lower() == "[/expand]":
+                in_toc = False
+                # Process ToC lines
+                toc_processed = ["[h4][b]Table of Contents[/b][/h4]"]
+                for toc_line in toc_lines:
+                    match = re.match(r'\*\s*([\dA-Za-z]+(?:\.[\dA-Za-z]+)*)\.\s*"(.+?)":#([^\s]+)', toc_line.strip())
+                    if match:
+                        number = match.group(1)
+                        label = match.group(2)
+                        anchor = match.group(3)
+                        # Determine the indentation level based on the number format
+                        indentation = ''
+                        if '.' in number:
+                            # If the number contains a decimal, add a space for indentation
+                            indentation = ' ' * (number.count('.') - 1)  # Adjust based on the number of decimal points
+                        formatted_entry = f"{indentation}•{number}. [url=site://wiki/{title}#bb-{anchor}]{label}[/url]"
+                        #toc_processed.append(f"•{number}. [url=site://wiki/{title}#bb-{anchor}]{label}[/url]")
+                        toc_processed.append(formatted_entry)
+                toc_processed.append("[/ul]")
+                lines.extend(toc_processed)
+                continue
+            else:
+                toc_lines.append(line)
+                continue
+
+        # Skip meta/monetization lines
         if any(substr in line.lower() for substr in (
             "/user_upgrades/new",
             "gold+ account",
@@ -63,34 +103,91 @@ def clean_wiki_body(text: str) -> str:
         )):
             continue
 
-        # 🔄 Convert <a href="/wiki/...">label</a> → [[target|label]]
+        # Convert <a href="...">label</a> to [url=...]label[/url]
         def replace_html_links(match):
             href = match.group(1).strip()
             label = match.group(2).strip()
-            if href.startswith("/wiki/"):
-                target = href[len("/wiki/"):]
-                return f"[[{target}|{label}]]"
-            return match.group(0)
+            return f"[url={href}]{label}[/url]"
 
         line = re.sub(r'<a href="([^"]+)">(.+?)</a>', replace_html_links, line)
 
-        # 🔄 Convert "text":/wiki/target → [[target|text]]
+        # Convert "text":/wiki/target to [[target|text]]
         line = re.sub(r'"([^"]+?)":/wiki/([a-zA-Z0-9_:]+)', r'[[\2|\1]]', line)
 
-        # ❌ Strip only the forum_topics links, not the whole line
+        # Strip forum_topics links
         line = re.sub(r'\[/forum_topics/\d+\]', '', line)
 
-        # 🧹 Remove empty tags like <ul></ul> or <p></p>
+        # Remove empty tags like <ul></ul> or <p></p>
         line = re.sub(r'<(ul|ol|p)>\s*</\1>', '', line)
 
-        # 🔄 Convert h3. and h4. headers
-        line = re.sub(r'^h3\.\s*(.+)', r'== \1', line)
-        line = re.sub(r'^h4\.\s*(.+)', r'== \1 ==', line)
+        # Convert headers with anchors (e.g., h2#anchor. Title)
+        header_anchor_match = re.match(r'^h([1-6])#([a-zA-Z0-9_-]+)\.\s*(.+)', line)
+        if header_anchor_match:
+            level = header_anchor_match.group(1)
+            anchor = header_anchor_match.group(2)
+            label = header_anchor_match.group(3)
+            # Should h1 be removed?
+            # Downgrade h2 to h1
+            if level in ['2']:
+                level = 1
+            # Downgrade h3 to h2
+            if level in ['3']:
+                level = 2
+            # Downgrade h4 to h3
+            if level in ['4']:
+                level = 3
+            # Downgrade h5 and h6 to h4
+            if level in ['5', '6']:
+                level = '4'
+            line = f"[anchor={anchor}][/anchor][h{level}]{label}[/h{level}]"
+        else:
+            # Convert headers without anchors (e.g., h2. Title)
+            header_match = re.match(r'^h([1-6])\.\s*(.+)', line)
+            if header_match:
+                level = header_match.group(1)
+                label = header_match.group(2)
+                # Downgrade h2 to h1
+                if level in ['2']:
+                    level = 1
+                # Downgrade h3 to h2
+                if level in ['3']:
+                    level = 2
+                # Downgrade h4 to h3
+                if level in ['4']:
+                    level = 3
+                # Downgrade h5 and h6 to h4
+                if level in ['5', '6']:
+                    level = '4'
+                line = f"[h{level}]{label}[/h{level}]"
+
+        # Replace !post #123 with >>0
+        line = re.sub(r'!post\s+#\d+', '>>0', line)
+
+        # Convert unordered list items from * to • with appropriate nesting
+        list_match = re.match(r'^(\*+)\s*(.*)', line)
+        if list_match:
+            asterisks = list_match.group(1)
+            content = list_match.group(2)
+            bullet = '•' * len(asterisks)
+            line = f"{bullet} {content}"
 
         lines.append(line)
 
-    # 🧽 Collapse 3+ blank lines into max 2
     cleaned = "\n".join(lines)
+
+    # Replace spaces with underscores in [[...]] tags
+    def replace_spaces_in_wiki_links(match):
+        content = match.group(1)
+        if '|' in content:
+            target, label = content.split('|', 1)
+            target = target.replace(' ', '_')
+            return f"[[{target}|{label}]]"
+        else:
+            return f"[[{content.replace(' ', '_')}]]"
+
+    cleaned = re.sub(r'\[\[([^\]]+)\]\]', replace_spaces_in_wiki_links, cleaned)
+
+    # Collapse 3+ blank lines into max 2
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
 
     return cleaned.strip()
@@ -155,11 +252,11 @@ def fetch_and_cache(start_page, page_count, update_cache=False, convert_mode="sh
             if not title or not body or not entry_id:
                 continue
             if convert_mode == "markdown":
-                body = markdown_to_html(body)
+                body = markdown_to_html(body, title)
             elif convert_mode == "html":
                 pass  # use as-is
             elif convert_mode == "shimmie":
-                body = clean_wiki_body(body)
+                body = clean_wiki_body(body, title)
             elif convert_mode == "raw":
                 body = body.strip()
 
@@ -190,7 +287,6 @@ def get_existing_titles(pg_cur):
 def main(args):
     if args.clear_cache:
         clear_cache()
-        return
 
     print("⏳ Loading cache...")
     cache_conn = fetch_and_cache(args.start_page, args.pages, update_cache=args.update_cache, convert_mode=args.convert)
