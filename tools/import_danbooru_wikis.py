@@ -71,7 +71,7 @@ def clean_wiki_body(text: str, title: str) -> str:
             if line.strip().lower() == "[/expand]":
                 in_toc = False
                 # Process ToC lines
-                toc_processed = ["[h4][b]Table of Contents[/b][/h4]"]
+                toc_processed = ["[h3][b]Table of Contents[/b][/h3]"]
                 for toc_line in toc_lines:
                     match = re.match(r'\*\s*([\dA-Za-z]+(?:\.[\dA-Za-z]+)*)\.\s*"(.+?)":#([^\s]+)', toc_line.strip())
                     if match:
@@ -80,13 +80,17 @@ def clean_wiki_body(text: str, title: str) -> str:
                         anchor = match.group(3)
                         # Determine the indentation level based on the number format
                         indentation = ''
+                        separator = '.'
                         if '.' in number:
                             # If the number contains a decimal, add a space for indentation
                             indentation = ' ' * (number.count('.') - 1)  # Adjust based on the number of decimal points
-                        formatted_entry = f"{indentation}•{number}. [url=site://wiki/{title}#bb-{anchor}]{label}[/url]"
+                            separator = ''
+                        # Filter out '-dtext' from the anchor
+                        if '-dtext' in anchor:
+                            anchor = anchor.replace('-dtext', '')
+                        formatted_entry = f"{indentation}• {number}{separator} [url=site://wiki/{title}#bb-{anchor}]{label}[/url]"
                         #toc_processed.append(f"•{number}. [url=site://wiki/{title}#bb-{anchor}]{label}[/url]")
                         toc_processed.append(formatted_entry)
-                toc_processed.append("[/ul]")
                 lines.extend(toc_processed)
                 continue
             else:
@@ -168,8 +172,17 @@ def clean_wiki_body(text: str, title: str) -> str:
         if list_match:
             asterisks = list_match.group(1)
             content = list_match.group(2)
-            bullet = '•' * len(asterisks)
-            line = f"{bullet} {content}"
+            #bullet = '•' * len(asterisks)
+            #line = f"{bullet} {content}"
+            # Create the new line with spaces and a bullet
+            if len(asterisks) > 1:
+                # Replace all but the last asterisk with two spaces
+                spaces = '  ' * (len(asterisks) - 1)
+                bullet = '•'
+                line = f"{spaces}{bullet} {content}"
+            else:
+                # If there's only one asterisk, replace it with a bullet
+                line = f"• {content}"
 
         lines.append(line)
 
