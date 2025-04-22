@@ -40,6 +40,7 @@ fi
 if [ ! -d "backend/sd_tag_editor/venv" ]; then
   echo "Performing installation..."
   $PYTHON backend/scripts/install.py
+  touch backend/sd_tag_editor/.installed
 fi
 
 # Launch GUI

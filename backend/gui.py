@@ -132,7 +132,7 @@ class ShimmieToolsGUI(tk.Tk):
         add_entry("Input Folder/Image", "images", "", lambda: self._select_path_for("images", folder=True))
 
         # Cache input
-        default_cache = str(Path("database/posts_cache.db").resolve())
+        default_cache = str(Path("backend/database/posts_cache.db").resolve())
         add_entry("Input Cache File", "cache", default_cache, lambda: self._select_path_for("cache", filetypes=[("SQLite DB", "*.db")]))
 
         # Batch size
@@ -282,7 +282,7 @@ class ShimmieToolsGUI(tk.Tk):
         if not img_path or img_path.upper() == "NO_INPUT":
             messagebox.showerror("Missing Input", "Please select an image or folder to process.")
             return
-        args = ["python", "-u", "booru_csv_maker.py"]
+        args = ["python", "-u", "scripts/booru_csv_maker.py"]
         for key, entry in self.booru_args.items():
             if isinstance(entry, tk.BooleanVar):
                 if entry.get():
@@ -293,19 +293,19 @@ class ShimmieToolsGUI(tk.Tk):
                     args.append(f"--{key}={val}")
         lines = [
             f"Input:        {img_path}",
-            f"Batch Size:   {self.booru_args['batch_size'].get()}",
+            f"Batch Size:   {self.booru_args['batch'].get()}",
             f"Model:        {self.booru_args['model'].get()}",
             f"Gen Thresh:   {self.booru_args['gt'].get():.2f}",
             f"Rating:       {self.booru_args['rt'].get():.2f}",
             f"Char Thresh:  {self.booru_args['ct'].get():.2f}",
             f"Threads:      {self.booru_args['threads'].get()}",
-            f"Input Cache:  {self.booru_args['input_cache'].get()}"
+            f"Input Cache:  {self.booru_args['cache'].get()}"
         ]
         self.render_summary("Tagger Run Summary", lines)
         self._run_script(args)
 
     def run_precache(self):
-        args = ["python", "-u", "precache_posts_sqlite.py"]
+        args = ["python", "-u", "scripts/precache_posts_sqlite.py"]
         args.append(self.precache_args["posts_json"].get())
         args += ["-o", self.precache_args["output"].get(),
                 "--threads", str(self.precache_args["threads"].get())]
@@ -319,7 +319,7 @@ class ShimmieToolsGUI(tk.Tk):
         self._run_script(args)
 
     def run_wiki(self):
-        args = ["python", "-u", "import_danbooru_wikis.py"]
+        args = ["python", "-u", "scripts/import_danbooru_wikis.py"]
         for key, val in self.wiki_args.items():
             if isinstance(val, tk.BooleanVar):
                 if val.get():
@@ -350,7 +350,7 @@ class ShimmieToolsGUI(tk.Tk):
             env["PYTHONUNBUFFERED"] = "1"  # 👈 Unbuffered output
 
             # Choose the correct venv path
-            venv_base = Path(__file__).resolve().parent / "venv"
+            venv_base = Path(__file__).resolve().parent / "sd_tag_editor" / "venv"
             venv_py = venv_base / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
             if venv_py.exists() and Path(cmd[0]).name.startswith("python"):
@@ -366,7 +366,7 @@ class ShimmieToolsGUI(tk.Tk):
                     text=True,
                     bufsize=1,
                     universal_newlines=True,
-                    cwd="tools",
+                    cwd="backend",
                     env=env
                 )
                 self.abort_button.config(state="normal")  # Enable abort
@@ -449,56 +449,6 @@ class ShimmieToolsGUI(tk.Tk):
                 self.precache_args[key].set(path.strip())
             elif key in self.wiki_args:
                 self.wiki_args[key].set(path.strip())
-
-    def check_sd_tag_editor(self):
-        sdt_path = Path("tools/SD-Tag-Editor")
-        install_flag = sdt_path / ".installed"
-
-        if not sdt_path.exists():
-            self.log("[ERROR] SD-Tag-Editor not found!")
-            messagebox.showerror(
-                "Missing Dependency",
-                "SD-Tag-Editor was not found.\nPlease re-run the setup or check your submodules."
-            )
-            return False
-
-        if not install_flag.exists():
-            self.log("[WARN] SD-Tag-Editor does not appear initialized.")
-            response = messagebox.askyesno(
-                "SD-Tag-Editor Setup",
-                "SD-Tag-Editor is not yet installed.\nWould you like to open the installer in a terminal?"
-            )
-            if response:
-                try:
-                    if sys.platform.startswith("win"):
-                        subprocess.Popen(["start", "tools\\SD-Tag-Editor\\install.bat"], shell=True)
-                    else:
-                        # Try multiple terminal fallback options
-                        terminals = [
-                            ["konsole", "--hold", "-e", "bash", "tools/SD-Tag-Editor/install.sh"],
-                            ["x-terminal-emulator", "-e", "bash", "tools/SD-Tag-Editor/install.sh"],
-                            ["gnome-terminal", "--", "bash", "tools/SD-Tag-Editor/install.sh"],
-                            ["xterm", "-e", "bash", "tools/SD-Tag-Editor/install.sh"]
-                        ]
-                        for terminal in terminals:
-                            try:
-                                subprocess.Popen(terminal)
-                                break
-                            except FileNotFoundError:
-                                continue
-                        else:
-                            raise FileNotFoundError("No compatible terminal emulator found.")
-                except Exception as e:
-                    messagebox.showerror("Failed to launch terminal", f"Error: {e}")
-                    return False
-
-            messagebox.showinfo(
-                "Restart Required",
-                "After running the installer, please restart this GUI to continue."
-            )
-            return False  # 🛑 Correct location for early exit
-
-        return True  # ✅ Only reached if everything is okay
 
     def _select_all(self, event):
         widget = event.widget

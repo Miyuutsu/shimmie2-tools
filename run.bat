@@ -48,6 +48,7 @@ REM Perform installation if venv doesn't exist
 if not exist "backend\sd_tag_editor\venv" (
     echo Performing installation...
     "%PYTHON%" backend\scripts\install.py
+    type nul > .installed
 )
 
 REM Activate virtual environment and launch GUI

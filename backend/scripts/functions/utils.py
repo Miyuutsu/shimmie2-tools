@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 
 def validate_float(value):
     """Validate the float value."""
@@ -24,3 +26,19 @@ model_map = {
 "swinv2": "SmilingWolf/wd-swinv2-tagger-v3",
 "convnext": "SmilingWolf/wd-convnext-tagger-v3",
 }
+
+def add_module_path(relative_path: str):
+    """
+    Adds the given relative path to sys.path if it's not already present.
+
+    Args:
+        relative_path (str): The relative path from the current script to the module folder.
+    """
+    script_dir = Path(__file__).parent.resolve()
+    module_path = (script_dir / relative_path).resolve()
+
+    if not module_path.exists():
+        raise FileNotFoundError(f"Module path does not exist: {module_path}")
+
+    if str(module_path) not in sys.path:
+        sys.path.append(str(module_path))
