@@ -343,7 +343,7 @@ if __name__ == "__main__":
     parser.add_argument("--clear-cache", action="store_true")
     parser.add_argument("--user", type=str, default=getpass.getuser(), help="PostgreSQL user")
     parser.add_argument("--db", type=str, default="shimmiedb", help="PostgreSQL database name")
-    parser.add_argument("--dbl", dest="password", type=str, help="Use a password with your database user. (Default: None)")
+    parser.add_argument("--dbl", dest="password", type=str, default=None, help="Use a password with your database user. (Default: None)")
     args = parser.parse_args()
 
     # Set DB_CONFIG after parsing
@@ -369,9 +369,9 @@ if __name__ == "__main__":
     print(f"📚  Database:       {DB_CONFIG['dbname']}")
     print(f"👤  User:           {DB_CONFIG['user']}")
     if args.password is None:
-        print(f"🔓 Password:       None")
+        print(f"🔓  Password:       None")
     else:
-        print(f"🔒 Password:       Hidden")
+        print(f"🔒  Password:       Hidden")
     print(f"📄  Start Page:     {args.start_page}")
     print(f"📄  Page Count:     {args.pages}")
     print(f"🔄  Update Cache:   {'Yes' if args.update_cache else 'No'}")

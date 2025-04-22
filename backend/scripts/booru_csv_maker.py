@@ -81,6 +81,55 @@ def resolve_post(image: Path, cache) -> tuple[Path, dict | None]:
     conn.close()
     return image, post
 
+def save_post_to_cache(image: Path, post: dict, cache: Path):
+    if not Path(cache).is_file():
+        raise FileNotFoundError(f"Cannot save to cache: {cache} does not exist.")
+
+    # Use MD5 from filename if possible
+    match = MD5_RE.search(image.stem)
+    md5 = match.group(0).lower() if match else None
+
+    # Compute fallback pixel hash
+    px_hash = compute_danbooru_pixel_hash(image)
+
+    # Extract and format each tag category
+    rating = post.get("rating", "?")
+    source = post.get("source", None)
+
+    general = ", ".join(sorted(set(post.get("general", []))))
+    character = ", ".join(sorted(set(post.get("character", []))))
+    artist = ", ".join(sorted(set(post.get("artist", []))))
+    series = ", ".join(sorted(set(post.get("series", []))))
+
+    # Connect and insert
+    conn = sqlite3.connect(cache)
+    cur = conn.cursor()
+
+    # Make sure your schema is ready
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS posts (
+            md5 TEXT PRIMARY KEY,
+            pixel_hash TEXT,
+            rating TEXT,
+            source TEXT,
+            general TEXT,
+            character TEXT,
+            artist TEXT,
+            series TEXT
+        )
+    """)
+
+    cur.execute("""
+        INSERT OR REPLACE INTO posts
+        (md5, pixel_hash, rating, source, general, character, artist, series)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        md5, px_hash, rating, source,
+        general, character, artist, series
+    ))
+
+    conn.commit()
+    conn.close()
 
 def row_to_post_dict(row: tuple) -> dict:
     return {
@@ -203,7 +252,10 @@ def main(args):
     if not Path(args.image_path).is_dir:
         raise FileNotFoundError(f"Path not found: {images}")
 
-    images = [f for f in (Path(args.image_path).rglob("*") if args.subfolder else image_path.iterdir()) if f.suffix.lower() in ALLOWED_EXTS and f.is_file()]
+    files = Path(args.image_path).rglob("*")
+
+    images = [f for f in files if f.suffix.lower() in ALLOWED_EXTS and f.is_file()]
+
 
     # Step 1: Load cache if present
     if cdb_conn:
@@ -235,6 +287,16 @@ def main(args):
     except HfHubHTTPError as e:
         raise FileNotFoundError(f"selected_tags.csv failed to download from {model_id}") from e
 
+    if cdb_path.exists():
+        cdb_cursor.execute(f"SELECT * FROM data")
+        rows = cdb_cursor.fetchall()
+        for row in rows:
+            if len(row) >= 2:
+                char, series = row[0].strip(), row[1].strip()
+                if char and series:
+                    character_series_map[char] = series
+        print(f"[INFO] Loaded {len(character_series_map):,} character→series mappings from SQLite.")
+
     for batch in tqdm.tqdm(batches, desc="Tagging images"):
 
         # Preprocess and store md5s and images
@@ -251,6 +313,7 @@ def main(args):
 
         # Get images that need tagging
         tag_needed = [img for img, post in results if post is None]
+        img_inputs = []
         if tag_needed:
             img_inputs = process_batch(tag_needed, transform)
 
@@ -258,11 +321,13 @@ def main(args):
             with torch.inference_mode():
                 batched_tensor = img_inputs.to(torch_device)
                 raw_outputs = F.sigmoid(model(batched_tensor)).cpu()
-            raw_outputs = list(torch.unbind(raw_outputs, dim=0))
+                raw_outputs = list(torch.unbind(raw_outputs, dim=0))
         else:
             raw_outputs = []
 
         out_idx = 0
+        processed_results = []
+
         for image, post in results:
             # If post is still missing, run the tagger
             if not post:
@@ -270,10 +335,12 @@ def main(args):
                     print(f"[WARN] Out-of-bounds image tensor for: {image.name}")
                     continue
                 img_tensor = img_inputs[out_idx]
-                if img_tensor is None:
+                if img_tensor is not None:
+                    probs = raw_outputs[out_idx]
+                    out_idx += 1
+                else:
                     continue  # skip if failed to load
-                probs = raw_outputs[out_idx]
-                out_idx += 1
+
 
                 char, gen, artist, series, rating = get_tags(
                     probs,
@@ -286,78 +353,79 @@ def main(args):
                 general_tags = [t[0] for t in gen.items()]
                 rating_tags = [t[0] for t in rating.items()]
 
+                rating_letter = None
+
                 if  (db_dir / "tag_rating_dominant.db").is_file():
                     rating_priority = {'e': 3, 'q': 2, 's': 1}
+
                     tag_db_path = db_dir / "tag_rating_dominant.db"
                     tag_db_conn = sqlite3.connect(tag_db_path)
                     tag_db_cursor = tag_db_conn.cursor()
                     tag_db_cursor.execute(f"SELECT * FROM dominant_tag_ratings")
                     rows = tag_db_cursor.fetchall()
-
                     for row in rows:
                         if len(row) >= 2:
                             db_tag, db_rating = row[0].strip(), row[1].strip()
                             for gen_tag in general_tags:
                                 if gen_tag in db_tag:
-                                    rating_letter = None
-                                    if db_rating == 'e' and rating_letter != 'e':
+                                    if db_rating == 'e':
                                         rating_letter = 'e'
-                                        break  # Stop further checks, as 'e' is the highest priority
-                                    elif db_rating == 'q' and rating_letter not in ['e', 'q']:
+                                        break
+                                    elif db_rating == 'q' and rating_letter not in ['e']:
                                         rating_letter = 'q'
-                                        break  # Stop further checks if 'q' is found and no 'e'
-                                    elif db_rating == 's' and rating_letter not in ['e', 'q', 's']:
+                                    elif db_rating == 's' and rating_letter not in ['e', 'q']:
                                         rating_letter = 's'
-                                        break  # Stop further checks if 's' is found and no higher priority
-                    if rating_letter:
-                        break
-
-                    else:
-                        if not rating_letter:
-                            rating_letter = "?"
-                        if "explicit" in rating:
-                            rating_letter = "e"
-                        elif "questionable" in rating or "sensitive" in rating:
-                            rating_letter = "q"
-                        elif "general" in rating:
-                            rating_letter = "s"
-
-                    post = {
-                        "character": [t[0] for t in char.items()],
-                        "general": [t[0] for t in gen.items()],
-                        "artist": [t[0] for t in artist.items()],
-                        "series": [t[0] for t in series.items()],
-                        "rating": rating_letter,
-                        "source": None
-                    }
-                    character_tags = [t[0] for t in char.items()]
-                    series_tags = set()
-
-                    for char_tag in character_tags:
-                        if char_tag in character_series_map:
-                            inferred_series = character_series_map[char_tag]
-                            series_tags.add(inferred_series)
-                            # ✅ Append inferred series to post
-                            post["series"].extend(sorted(series_tags))
-
                     tag_db_conn.close()
 
-            # Build tags from post
+                if not rating_letter:
+                    if "explicit" in rating:
+                        rating_letter = "e"
+                    elif "questionable" in rating or "sensitive" in rating:
+                        rating_letter = "q"
+                    elif "general" in rating:
+                        rating_letter = "s"
+                    else:
+                        rating_letter = "?"
+
+                post = {
+                    "character": [t[0] for t in char.items()],
+                    "general": [t[0] for t in gen.items()],
+                    "artist": [t[0] for t in artist.items()],
+                    "series": [t[0] for t in series.items()],
+                    "rating": rating_letter,
+                    "source": None
+                }
+                character_tags = [t[0] for t in char.items()]
+                series_tags = set()
+
+                for char_tag in character_tags:
+                    if char_tag in character_series_map:
+                        inferred_series = character_series_map[char_tag]
+                        series_tags.add(inferred_series)
+                        # ✅ Append inferred series to post
+                        post["series"].extend(sorted(series_tags))
+
+                processed_results.append((image, post))
+                save_post_to_cache(image, post, args.cache)
+            else:
+                processed_results.append((image, post))
+        # Build tags from post
+        for image, post in processed_results:
+            if not post:
+                continue  # skip if post is still None
+
             tags = []
             tags.extend(post.get("general", []))
             tags.extend(f"character:{t}" for t in post.get("character", []))
             tags.extend(f"series:{t}" for t in post.get("series", []))
             tags.extend(f"artist:{t}" for t in post.get("artist", []))
 
-            # Clean rating-related tags and append a single normalized one
-            tags = [t for t in tags if t not in ("general", "sensitive", "questionable", "explicit")]
-            tags = [t for t in tags if not t.startswith("rating=")]
-
             rating_letter = post.get("rating", "?")
-            tags.append(f"rating={rating_letter}")
 
             if post.get("source"):
                 tags.append(f"source:{post['source']}")
+
+            tags = [re.sub(r'\s+', ' ', tag).strip() for tag in tags]
 
             tags = sorted(set(tags))
             tag_str = ", ".join(tags)
@@ -370,33 +438,20 @@ def main(args):
                 rating_letter,
                 ""
             ])
-    print(f"[✓] Ran tagger on {out_idx} of {len(images)} images.")
-
-
-    if cdb_path.exists():
-        cdb_cursor.execute(f"SELECT * FROM {table_name}")
-        rows = cursor.fetchall()
-        for row in rows:
-            if len(row) >= 2:
-                char, series = row[0].strip(), row[1].strip()
-                if char and series:
-                    character_series_map[char] = series
-
-        print(f"[INFO] Loaded {len(character_series_map):,} character→series mappings from SQLite.")
-
+    if cdb_conn:
+        cdb_conn.close()
     if csv_rows:
-        csv_path = args.image_path / "import.csv"
+        csv_path = Path(args.image_path)
+        csv_path =  csv_path / "import.csv"
         with csv_path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f, quoting=csv.QUOTE_ALL)
             writer.writerows(csv_rows)
         print(f"[✓] Shimmie CSV written to {csv_path}")
+    if out_idx > 0:
+        print(f"[✓] Ran tagger on {out_idx} of {len(images)} images and stored them in the database.")
+    else:
+        print(f"[✓] Ran tagger on {out_idx} of {len(images)} images.")
 
-    if cache_conn or cdb_conn:
-        print("[✓] Done.")
-        if cache_conn:
-            cache_conn.close()
-        if cdb_conn:
-            cdb_conn.close()
     print(f"\n[✓] Processed {len(images)} image(s) across {len(batches)} batch(es).")
 
 
@@ -419,7 +474,7 @@ if __name__ == "__main__":
     parser.add_argument("--rating_threshold", "--rt", dest="rt", type=validate_float, default=0.3, help="Threshold to use for rating tags. Default is 0.3.")
 
     # misc actions
-    parser.add_argument("--subfolder", action="store_true", default=False)
+    #parser.add_argument("--subfolder", action="store_true", default=False)
 
     # Parse arguments
     args = parser.parse_args()
@@ -434,8 +489,8 @@ if __name__ == "__main__":
     print(f"🔞  Rating Threshold: {args.rt:.2f}")
     print(f"👤  Char Threshold:   {args.ct:.2f}")
     print(f"🧵  Threads:          {args.threads}")
-    print(f"📂  Subfolders:       {'Yes' if args.subfolder else 'No'}")
-    print(f"    Prefix:           {args.prefix}")
+    #print(f"📂  Subfolders:       {'Yes' if args.subfolder else 'No'}")
+    print(f"📂   Prefix:           {args.prefix}")
     print()
 
     if args.image_path is not None:

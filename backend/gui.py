@@ -26,12 +26,14 @@ class ShimmieToolsGUI(tk.Tk):
         # Set the style for ttk widgets
         style = ttk.Style()
         style.theme_use('clam')  # 'clam' theme allows more customization
-        style.configure("TButton", background=colors['background_color'], foreground=colors['text_color'])
+        #style.configure("TButton", background=colors['background_color'], foreground=colors['text_color'])
+        style.configure("TButton",background=colors['background_color'], foreground=colors['text_color'], indicatorbackground=colors['background_color'], indicatorcolor=colors['text_color'], selectcolor=colors['background_color'])
+        style.map('TButton', background=[('active', colors['window_color'])], foreground=[('disabled', 'gray')], indicatorbackground=[('selected', colors['text_color']), ('!selected', colors['background_color'])])
         style.configure("TFrame", background=colors['background_color'], foreground=colors['text_color'])
         style.configure("TLabel", background=colors['background_color'], foreground=colors['text_color'])
         style.configure("TEntry", background=colors['background_color'], foreground="#000000")
         style.configure("TCombobox", background=colors['background_color'], foreground=colors['text_color'])
-        style.configure("Custom.TCheckbutton",     background=colors['background_color'], foreground=colors['text_color'], indicatorbackground=colors['background_color'], indicatorcolor=colors['text_color'], selectcolor=colors['background_color'])
+        style.configure("Custom.TCheckbutton",background=colors['background_color'], foreground=colors['text_color'], indicatorbackground=colors['background_color'], indicatorcolor=colors['text_color'], selectcolor=colors['background_color'])
         style.map('Custom.TCheckbutton', background=[('active', colors['window_color'])], foreground=[('disabled', 'gray')], indicatorbackground=[('selected', colors['text_color']), ('!selected', colors['background_color'])])
         # Create a main frame with the background color
         main_frame = tk.Frame(self, bg=colors['background_color'])
@@ -169,12 +171,6 @@ class ShimmieToolsGUI(tk.Tk):
                     values=thread_options, state="readonly", width=5, style="TEntry").grid(row=row, column=1, sticky='w')
         row += 1
 
-        # Checkboxes
-        for label, key, default in [("Include Subfolders", "subfolder", False)]:
-            self.booru_args[key] = tk.BooleanVar(value=default)
-            ttk.Checkbutton(frame, text=label, variable=self.booru_args[key], style="Custom.TCheckbutton").grid(row=row, columnspan=2, sticky='w')
-            row += 1
-
         # Run button
         ttk.Button(frame, text="Run Tagger", command=self.run_booru).grid(row=row, column=0, columnspan=2, pady=10)
 
@@ -190,7 +186,7 @@ class ShimmieToolsGUI(tk.Tk):
         self.precache_args = {}
 
         default_input = str(Path("input/posts.json").resolve())
-        default_output = str(Path("tools/posts_cache.db").resolve())
+        default_output = str(Path("scripts/database/posts_cache.db").resolve())
 
         def add_entry(label, key, default, browse_func=None):
             nonlocal row
@@ -260,10 +256,10 @@ class ShimmieToolsGUI(tk.Tk):
         add_text_entry("Start Page", self.wiki_args["start_page"])
         add_text_entry("Page Count", self.wiki_args["pages"])
 
-        ttk.Label(frame, text="Convert Mode").grid(row=row, column=0, sticky='w')
-        convert_modes = ["raw", "markdown", "html", "shimmie"]
-        ttk.Combobox(frame, textvariable=self.wiki_args["convert"],
-                    values=convert_modes, state="readonly", width=48, style="TEntry").grid(row=row, column=1, sticky='w')
+        #ttk.Label(frame, text="Convert Mode").grid(row=row, column=0, sticky='w')
+        #convert_modes = ["raw", "markdown", "html", "shimmie"]
+        #ttk.Combobox(frame, textvariable=self.wiki_args["convert"],
+        #            values=convert_modes, state="readonly", width=48, style="TEntry").grid(row=row, column=1, sticky='w')
         row += 1
 
         for label, key in [("Update Existing", "update_existing"),

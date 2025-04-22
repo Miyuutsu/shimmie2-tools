@@ -5,6 +5,9 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import tqdm
 
+script_dir = Path(__file__).parent.resolve()
+db_dir = script_dir / ".." / "database"
+
 try:
     import orjson as fastjson
     def json_loads(x): return fastjson.loads(x)
@@ -111,7 +114,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Pre-cache Danbooru posts.json directly into an SQLite DB.")
     parser.add_argument("posts_json", nargs="?", default="input/posts.json", help="Path to posts.json")
-    parser.add_argument("-o", "--output", default="tools/posts_cache.db", help="Where to write the SQLite DB")
+    parser.add_argument("-o", "--output", default=str(db_dir / "posts_cache.db"), help="Where to write the SQLite DB")
     parser.add_argument("--threads", type=int, default=8, help="Number of threads to use")
     args = parser.parse_args()
 
