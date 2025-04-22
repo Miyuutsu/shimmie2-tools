@@ -374,7 +374,7 @@ def main(args):
 
 
     if cdb_path.exists():
-        cursor.execute(f"SELECT * FROM {table_name}")
+        cdb_cursor.execute(f"SELECT * FROM {table_name}")
         rows = cursor.fetchall()
         for row in rows:
             if len(row) >= 2:
