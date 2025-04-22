@@ -2,4 +2,3 @@ backend/database/danbooru_wiki_cache.db
 backend/venv
 backend/database/posts_cache.db
 backend/__pycache__
-backend/database/tag_rating_dominant.db
