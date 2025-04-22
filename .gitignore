@@ -3,4 +3,3 @@ backend/venv
 backend/database/posts_cache.db
 backend/__pycache__
 backend/scripts/functions/__pycache__
-backend/danbooru_wiki_cache.db

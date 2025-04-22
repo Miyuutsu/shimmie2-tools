@@ -9,7 +9,7 @@ from pathlib import Path
 
 DANBOORU_URL = "https://danbooru.donmai.us/wiki_pages.json"
 WIKI_LINK_BASE = "/wiki/"
-SQLITE_DB = Path("danbooru_wiki_cache.db")
+SQLITE_DB = Path("database/danbooru_wiki_cache.db")
 SQLITE_DB.parent.mkdir(parents=True, exist_ok=True)
 DB_CONFIG = {}
 OWNER_ID = 1
