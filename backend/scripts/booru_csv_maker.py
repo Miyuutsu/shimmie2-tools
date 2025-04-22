@@ -429,6 +429,8 @@ def main(args):
 
             tags = sorted(set(tags))
             tag_str = ", ".join(tags)
+            if rating_letter = "g":
+                rating_letter = "s"
 
             rel_path = image.relative_to(args.image_path)
             csv_rows.append([
