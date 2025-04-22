@@ -1,9 +1,5 @@
-tools/danbooru_wiki_cache.db
-tools/venv
-tools/posts_cache.db
-input
-tools/__pycache__
-tools/tag_rating_dominant.db
-tools/wiki_index.txt
-tools/wiki_index_sorted.txt
-tools/danbooru_wiki_cache.db-journal
+backend/database/danbooru_wiki_cache.db
+backend/venv
+backend/database/posts_cache.db
+backend/__pycache__
+backend/database/tag_rating_dominant.db

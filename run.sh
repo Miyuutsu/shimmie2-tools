@@ -3,8 +3,8 @@
 cd "$(dirname "$0")"
 
 REPO_URL="https://github.com/Miyuutsu/shimmie2-tools.git"
-VENV_DIR="tools/venv"
 PYTHON=$(command -v python3.11)
+safety="$1"
 
 # Ensure python3.11 is available
 if [ -z "$PYTHON" ]; then
@@ -12,9 +12,9 @@ if [ -z "$PYTHON" ]; then
   exit 1
 fi
 
-# Check if directory is empty and not a git repo
+# Check if directory is not a git repo AND not explicitly disabled
 if [ ! -d ".git" ]; then
-  if [ "$(ls -A)" ]; then
+  if [ "$(ls -A | grep -Ev '\.sh$|\.bat$')" ] && [ "$safety" != "off" ]; then
     echo "❌ Error: This directory is not empty and has no Git repo."
     echo "   Refusing to initialize to avoid overwriting your files."
     exit 1
@@ -31,29 +31,18 @@ if [ ! -d ".git" ]; then
 fi
 
 # Initialize submodules
-if [ ! -f "tools/SD-Tag-Editor/run.sh" ]; then
+if [ ! -f "backend/sd_tag_editor/run.sh" ]; then
   echo "📦 Initializing submodules..."
   git submodule update --init --recursive
 fi
 
-# Run SD-Tag-Editor install if needed
-if [ ! -f "tools/SD-Tag-Editor/.installed" ]; then
-  echo "⚙️ Installing SD-Tag-Editor..."
-  bash -c "cd tools/SD-Tag-Editor && ./install.sh"
-  touch tools/SD-Tag-Editor/.installed
-fi
-
-# Create venv using Python 3.11 if missing
-if [ ! -d "$VENV_DIR" ]; then
-  echo "🐍 Creating virtual environment with Python 3.11..."
-  "$PYTHON" -m venv "$VENV_DIR"
-  # Activate venv and install requirements
-  echo "📦 Installing requirements from tools/requirements.txt..."
-  source "$VENV_DIR/bin/activate"
-  pip install --upgrade pip
-  pip install -r tools/requirements.txt
+# Perform installation
+if [ ! -d "backend/sd_tag_editor/venv" ]; then
+  echo "Performing installation..."
+  $PYTHON backend/scripts/install.py
 fi
 
 # Launch GUI
+source backend/sd_tag_editor/venv/bin/activate
 echo "🚀 Launching Shimmie Tools GUI..."
-python tools/gui.py
+python backend/gui.py
