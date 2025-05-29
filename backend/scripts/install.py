@@ -55,9 +55,9 @@ def create_venv_and_install():
         sys.exit(1)
 
     # Step 2: Re-run script using the venv's Python if not already
-    if Path(sys.prefix) != venv_dir:
-        print("🔁 Re-running script inside virtual environment...")
-        os.execv(str(venv_python), [str(venv_python), *sys.argv])
+#    if Path(sys.prefix) != venv_dir:
+#        print("🔁 Re-running script inside virtual environment...")
+#        os.execv(str(venv_python), [str(venv_python), *sys.argv])
 
     # Step 3: Install requirements
     try:

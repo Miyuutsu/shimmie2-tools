@@ -3,12 +3,12 @@
 cd "$(dirname "$0")"
 
 REPO_URL="https://github.com/Miyuutsu/shimmie2-tools.git"
-PYTHON=$(command -v python3.11)
+PYTHON=$(command -v python3.12)
 safety="$1"
 
-# Ensure python3.11 is available
+# Ensure python3.12 is available
 if [ -z "$PYTHON" ]; then
-  echo "❌ Python 3.11 not found. Please install Python 3.11 and try again."
+  echo "❌ Python 3.12 not found. Please install Python 3.12 and try again."
   exit 1
 fi
 

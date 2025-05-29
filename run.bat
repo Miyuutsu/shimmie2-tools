@@ -7,14 +7,14 @@ cd /d "%~dp0"
 REM Set repository URL
 set REPO_URL=https://github.com/Miyuutsu/shimmie2-tools.git
 
-REM Try to locate python 3.11
-for /f "delims=" %%i in ('where python3.11 2^>nul') do set PYTHON=%%i
+REM Try to locate python 3.12
+for /f "delims=" %%i in ('where python3.12 2^>nul') do set PYTHON=%%i
 
 set "safety=%~1"
 
-REM Ensure Python 3.11 is available
+REM Ensure Python 3.12 is available
 if not defined PYTHON (
-    echo ❌ Python 3.11 not found. Please install Python 3.11 and try again.
+    echo ❌ Python 3.12 not found. Please install Python 3.12 and try again.
     exit /b 1
 )
 
