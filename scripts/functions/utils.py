@@ -50,7 +50,7 @@ def convert_cdn_links(image_url):
     pixiv_pattern = r"i\.pximg\.net/img-original/img/\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/(\d+)_p\d{1,3}\.(?:jpg|jpeg|png|webp)"
     pixiv_match = re.search(pixiv_pattern, image_url)
     if pixiv_match:
-        artwork_id = match.group(1)
+        artwork_id = pixiv_match.group(1)
         return f"https://www.pixiv.net/en/artworks/{artwork_id}"
 
     # Check for Fantia CDN link
