@@ -1,8 +1,7 @@
 from PIL import Image, UnidentifiedImageError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from functions.utils import validate_float, get_cpu_threads, model_map, add_module_path
-
+from functions.utils import validate_float, get_cpu_threads, model_map, add_module_path, convert_pixiv_link
 add_module_path("../../sd_tag_editor")
 from tag_tree_functions import flatten_tags, load_groups, GroupTree, prune
 
@@ -297,7 +296,7 @@ def main(args):
                     character_series_map[char] = series
         print(f"[INFO] Loaded {len(character_series_map):,} character→series mappings from SQLite.")
 
-    for batch in tqdm.tqdm(batches, desc="Tagging images"):
+    for batch in tqdm.tqdm(batches, desc="\nTagging images"):
 
         # Preprocess and store md5s and images
         # === Multi-threaded post resolution ===
@@ -305,7 +304,7 @@ def main(args):
             results = list(tqdm.tqdm(
                 executor.map(lambda img: resolve_post(img, args.cache), batch),
                 total=len(batch),
-                desc="Resolving posts"
+                desc="\nResolving posts"
             ))
 
         transform = create_transform(**resolve_data_config(model.pretrained_cfg, model=model))

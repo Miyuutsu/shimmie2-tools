@@ -44,6 +44,7 @@ def add_module_path(relative_path: str):
         sys.path.append(str(module_path))
 
 def convert_pixiv_link(image_url):
+    import re
     #Converts a Pixiv CDN image URL to its corresponding artwork page URL.
     pattern = r"i\.pximg\.net/img-original/img/\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/(\d+)_p\d{1,3}\.(?:jpg|jpeg|png|webp)"
     match = re.search(pattern, image_url)

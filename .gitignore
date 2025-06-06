@@ -1,5 +1,4 @@
-backend/database/danbooru_wiki_cache.db
-backend/venv
-backend/database/posts_cache.db
-backend/__pycache__
-backend/scripts/functions/__pycache__
+database/danbooru_wiki_cache.db
+database/posts_cache.db
+__pycache__
+scripts/functions/__pycache__
