@@ -42,3 +42,13 @@ def add_module_path(relative_path: str):
 
     if str(module_path) not in sys.path:
         sys.path.append(str(module_path))
+
+def convert_pixiv_link(image_url):
+    #Converts a Pixiv CDN image URL to its corresponding artwork page URL.
+    pattern = r"i\.pximg\.net/img-original/img/\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/(\d+)_p\d{1,3}\.(?:jpg|jpeg|png|webp)"
+    match = re.search(pattern, image_url)
+    if match:
+        artwork_id = match.group(1)
+        return f"https://www.pixiv.net/en/artworks/{artwork_id}"
+    else:
+        return image_url  # return the original if no match

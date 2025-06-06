@@ -423,7 +423,9 @@ def main(args):
             rating_letter = post.get("rating", "?")
 
             if post.get("source"):
-                tags.append(f"source:{post['source']}")
+                source = post["source"]
+                source = convert_pixiv_link(source)
+                tags.append(f"source:{source}")
 
             tags = [re.sub(r'\s+', ' ', tag).strip() for tag in tags]
 
