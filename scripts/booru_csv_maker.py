@@ -1,7 +1,7 @@
 from PIL import Image, UnidentifiedImageError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from functions.utils import validate_float, get_cpu_threads, model_map, add_module_path, convert_pixiv_link
+from functions.utils import validate_float, get_cpu_threads, model_map, add_module_path, convert_cdn_links
 add_module_path("../../sd_tag_editor")
 from tag_tree_functions import flatten_tags, load_groups, GroupTree, prune
 
@@ -423,7 +423,7 @@ def main(args):
 
             if post.get("source"):
                 source = post["source"]
-                source = convert_pixiv_link(source)
+                source = convert_cdn_links(source)
                 tags.append(f"source:{source}")
 
             tags = [re.sub(r'\s+', ' ', tag).strip() for tag in tags]

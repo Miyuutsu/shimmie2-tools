@@ -16,23 +16,13 @@ A modular suite of utilities and scripts designed to extend and enhance the func
   Leverages advanced taggers to annotate images using fallback caches, external `.txt` files, or Danbooru metadata.
   Includes `--shimmie` export mode for CSV compatibility.
 
-- **🪟 Unified GUI**
-  Launch tools, monitor logs, and manage processes safely — all from a Tkinter-based desktop interface.
-
 ---
 
 ## 🧠 Requirements
 
-- Python 3.11 (managing two Python versions is a pain)
+- Python 3.12
 - Linux, Windows (partial support, not regularly maintained), or WSL
 - Git (to clone the SD-Tag-Editor submodule)
-
----
-
-## 📦 Installation
-
-Save `run.sh` or `run.bat` to the directory of your choosing and run it.
-**Note:** It won’t work unless the directory is empty.
 
 ---
 
@@ -41,35 +31,16 @@ Save `run.sh` or `run.bat` to the directory of your choosing and run it.
 ```bash
 git clone https://github.com/Miyuutsu/shimmie2-tools.git
 cd shimmie2-tools
-chmod +x run.sh
 ```
+Create a venv and install the requirements.
 
 ---
 
 ## 🚀 Usage
 
-### 🖥 GUI Mode
-
-```bash
-./run.sh
-```
-
-On Windows:
-
-```bat
-run.bat
-```
-
-This will:
-- Install required dependencies (if missing)
-- Initialize the SD-Tag-Editor submodule (if missing)
-- Launch the Tkinter GUI
-
----
-
 ### 🛠 CLI Tools
 
-All scripts are located in the `backend/scripts/` directory.
+All scripts are located in the `scripts/` directory.
 
 #### Create CSV from various data
 
@@ -100,23 +71,17 @@ python backend/scripts/import_danbooru_wikis.py --user={dbuser} \
 
 ```
 shimmie2-tools/
-├── input/
-│   └── posts.json
-├── backend/
-│   ├── scripts/
-│   │   ├── booru_csv_maker.py
-│   │   ├── import_danbooru_wikis.py
-│   │   └── precache_posts_sqlite.py
-│   ├── database/
-│   │   ├── characters.db
-│   │   ├── danbooru_wiki_cache.db
-│   │   ├── posts_cache.db
-│   │   └── tag_rating_dominant.db
-│   ├── sd_tag_editor/
-│   ├── gui.py
-│   └── requirements.txt
-├── run.sh
-└── run.bat
+├── database/
+│   ├── characters.db
+│   ├── danbooru_wiki_cache.db
+│   ├── posts_cache.db
+│   └── tag_rating_dominant.db
+├── scripts/
+│   ├── booru_csv_maker.py
+│   ├── import_danbooru_wikis.py
+│   └── precache_posts_sqlite.py
+├── requirements.txt
+└── sd_tag_editor/
 ```
 
 ---
