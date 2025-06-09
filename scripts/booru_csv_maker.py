@@ -48,6 +48,15 @@ class LabelData:
     copyright: list[int]
 
 ### I forgot all of these, they still need the rewrite
+
+def compute_md5(image_path: Path) -> str:
+    """Compute the MD5 hash of the entire image file as a fallback."""
+    hash_md5 = hashlib.md5()
+    with open(image_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
 def resolve_post(image: Path, cache: str, nodb: bool = False) -> tuple[Path, dict | None]:
     if nodb:
         # skip DB lookups entirely.
@@ -85,19 +94,20 @@ def resolve_post(image: Path, cache: str, nodb: bool = False) -> tuple[Path, dic
     conn.close()
     return image, post
 
-def save_post_to_cache(image: Path, post: dict, cache: Path):
+def save_post_to_cache(image: Path, post: dict, cache: Path, rating_letter):
     if not Path(cache).is_file():
         raise FileNotFoundError(f"Cannot save to cache: {cache} does not exist.")
 
     # Use MD5 from filename if possible
     match = MD5_RE.search(image.stem)
-    md5 = match.group(0).lower() if match else None
+    md5 = match.group(0).lower() if match else compute_md5(image)
 
     # Compute fallback pixel hash
     px_hash = compute_danbooru_pixel_hash(image)
 
     # Extract and format each tag category
-    rating = post.get("rating", "?")
+    #rating = post.get("rating", "?")
+    rating = rating_letter
     source = post.get("source", None)
 
     general = ", ".join(sorted(set(post.get("general", []))))
@@ -346,6 +356,9 @@ def main(args):
                     tag_rating_map[row[0].strip()] = row[1].strip()
             tag_db_conn.close()
 
+        rating_letter = None
+        tagger_ran = 0
+
         # Process each image once, assign ratings individually
         for image, post in results:
             if not post:
@@ -360,6 +373,7 @@ def main(args):
 
                 probs = raw_outputs[out_idx]
                 out_idx += 1
+                tagger_ran + 1
 
                 char, gen, artist, series, rating = get_tags(
                     probs,
@@ -410,10 +424,10 @@ def main(args):
                         post["series"].extend(sorted(series_tags))
 
                 processed_results.append((image, post))
-                save_post_to_cache(image, post, args.cache)
+                save_post_to_cache(image, post, args.cache, rating_letter)
             else:
                 processed_results.append((image, post))
-        # Build tags from post
+            # Build tags from post
         for image, post in processed_results:
             if not post:
                 continue  # skip if post is still None
@@ -455,10 +469,10 @@ def main(args):
             writer = csv.writer(f, quoting=csv.QUOTE_ALL)
             writer.writerows(csv_rows)
         print(f"[✓] Shimmie CSV written to {csv_path}")
-    if out_idx > 0:
-        print(f"[✓] Ran tagger on {out_idx} of {len(images)} images and stored them in the database.")
+    if tagger_ran > 0:
+        print(f"[✓] Ran tagger on {tagger_ran} of {len(images)} images and stored them in the database.")
     else:
-        print(f"[✓] Ran tagger on {out_idx} of {len(images)} images.")
+        print(f"[✓] Ran tagger on {tagger_ran} of {len(images)} images.")
 
     print(f"\n[✓] Processed {len(images)} image(s) across {len(batches)} batch(es).")
 
@@ -478,8 +492,8 @@ if __name__ == "__main__":
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Number of threads to use (default is half of the detected CPU threads)")
     # input thresholds
     parser.add_argument("--character_threshold", "--ct", dest="ct", type=validate_float, default=0.35, help="Threshold to use for character tags. Default is 0.35.")
-    parser.add_argument("--general_threshold", "--gt", dest="gt", type=validate_float, default=0.5, help="Threshold to use for general tags. Default is 0.5.")
-    parser.add_argument("--rating_threshold", "--rt", dest="rt", type=validate_float, default=0.3, help="Threshold to use for rating tags. Default is 0.3.")
+    parser.add_argument("--general_threshold", "--gt", dest="gt", type=validate_float, default=0.3, help="Threshold to use for general tags. Default is 0.5.")
+    parser.add_argument("--rating_threshold", "--rt", dest="rt", type=validate_float, default=0.5, help="Threshold to use for rating tags. Default is 0.3.")
     parser.add_argument("--nodb", action="store_true", help="If set, disables returning database data")
 
     # misc actions
