@@ -48,26 +48,31 @@ class LabelData:
     copyright: list[int]
 
 ### I forgot all of these, they still need the rewrite
-def resolve_post(image: Path, cache) -> tuple[Path, dict | None]:
-    if Path(cache).is_file:
+def resolve_post(image: Path, cache: str, nodb: bool = False) -> tuple[Path, dict | None]:
+    if nodb:
+        # skip DB lookups entirely.
+        return image, None
+
+    if Path(cache).is_file():
         path = Path(cache)
         conn = sqlite3.connect(path)
         cur = conn.cursor()
     else:
-        raise FileNotFoundError(f"Warning: Dabase cache not found. Database cache is considered mandatory due to speed and resource requirements.")
+        raise FileNotFoundError(f"Warning: Database cache not found. Database cache is considered mandatory due to speed and resource requirements.")
+
+    post = None
 
     # Try MD5 from filename
     match = MD5_RE.search(image.stem)
     md5 = match.group(0).lower() if match else None
-    post = None
 
-    if cur and md5:
+    if md5:
         cur.execute("SELECT * FROM posts WHERE md5 = ?", (md5,))
         row = cur.fetchone()
         if row:
             post = row_to_post_dict(row)
 
-    if not post and cur:
+    if not post:
         try:
             px_hash = compute_danbooru_pixel_hash(image)
             cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
@@ -302,7 +307,7 @@ def main(args):
         # === Multi-threaded post resolution ===
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
             results = list(tqdm.tqdm(
-                executor.map(lambda img: resolve_post(img, args.cache), batch),
+                executor.map(lambda img: resolve_post(img, args.cache, args.nodb), batch),
                 total=len(batch),
                 desc="\nResolving posts"
             ))
@@ -326,20 +331,35 @@ def main(args):
 
         out_idx = 0
         processed_results = []
+        rating_priority = {'e': 3, 'q': 2, 's': 1}
 
+        # Load tag rating DB once, if it exists
+        tag_rating_map = {}
+        db_path = db_dir / "tag_rating_dominant.db"
+        if db_path.is_file():
+            tag_db_conn = sqlite3.connect(db_path)
+            tag_db_cursor = tag_db_conn.cursor()
+            tag_db_cursor.execute("SELECT * FROM dominant_tag_ratings")
+            rows = tag_db_cursor.fetchall()
+            for row in rows:
+                if len(row) >= 2:
+                    tag_rating_map[row[0].strip()] = row[1].strip()
+            tag_db_conn.close()
+
+        # Process each image once, assign ratings individually
         for image, post in results:
-            # If post is still missing, run the tagger
             if not post:
                 if out_idx >= len(img_inputs):
                     print(f"[WARN] Out-of-bounds image tensor for: {image.name}")
                     continue
-                img_tensor = img_inputs[out_idx]
-                if img_tensor is not None:
-                    probs = raw_outputs[out_idx]
-                    out_idx += 1
-                else:
-                    continue  # skip if failed to load
 
+                img_tensor = img_inputs[out_idx]
+                if img_tensor is None:
+                    out_idx += 1  # keep the index aligned even if skipped
+                    continue
+
+                probs = raw_outputs[out_idx]
+                out_idx += 1
 
                 char, gen, artist, series, rating = get_tags(
                     probs,
@@ -350,31 +370,16 @@ def main(args):
                 )
 
                 general_tags = [t[0] for t in gen.items()]
-                rating_tags = [t[0] for t in rating.items()]
 
                 rating_letter = None
-
-                if  (db_dir / "tag_rating_dominant.db").is_file():
-                    rating_priority = {'e': 3, 'q': 2, 's': 1}
-
-                    tag_db_path = db_dir / "tag_rating_dominant.db"
-                    tag_db_conn = sqlite3.connect(tag_db_path)
-                    tag_db_cursor = tag_db_conn.cursor()
-                    tag_db_cursor.execute(f"SELECT * FROM dominant_tag_ratings")
-                    rows = tag_db_cursor.fetchall()
-                    for row in rows:
-                        if len(row) >= 2:
-                            db_tag, db_rating = row[0].strip(), row[1].strip()
-                            for gen_tag in general_tags:
-                                if gen_tag in db_tag:
-                                    if db_rating == 'e':
-                                        rating_letter = 'e'
-                                        break
-                                    elif db_rating == 'q' and rating_letter not in ['e']:
-                                        rating_letter = 'q'
-                                    elif db_rating == 's' and rating_letter not in ['e', 'q']:
-                                        rating_letter = 's'
-                    tag_db_conn.close()
+                for gen_tag in general_tags:
+                    db_rating = tag_rating_map.get(gen_tag)
+                    if db_rating:
+                        # Pick highest rating per priority
+                        if (rating_letter is None) or (rating_priority[db_rating] > rating_priority[rating_letter]):
+                            rating_letter = db_rating
+                            if rating_letter == 'e':
+                                break  # highest rating, no need to continue
 
                 if not rating_letter:
                     if "explicit" in rating:
@@ -475,6 +480,7 @@ if __name__ == "__main__":
     parser.add_argument("--character_threshold", "--ct", dest="ct", type=validate_float, default=0.35, help="Threshold to use for character tags. Default is 0.35.")
     parser.add_argument("--general_threshold", "--gt", dest="gt", type=validate_float, default=0.5, help="Threshold to use for general tags. Default is 0.5.")
     parser.add_argument("--rating_threshold", "--rt", dest="rt", type=validate_float, default=0.3, help="Threshold to use for rating tags. Default is 0.3.")
+    parser.add_argument("--nodb", action="store_true", help="If set, disables returning database data")
 
     # misc actions
     #parser.add_argument("--subfolder", action="store_true", default=False)
@@ -493,7 +499,8 @@ if __name__ == "__main__":
     print(f"👤  Char Threshold:   {args.ct:.2f}")
     print(f"🧵  Threads:          {args.threads}")
     #print(f"📂  Subfolders:       {'Yes' if args.subfolder else 'No'}")
-    print(f"📂   Prefix:           {args.prefix}")
+    print(f"📂  Prefix:           {args.prefix}")
+    print(f"📂  No DB:            {args.nodb}")
     print()
 
     if args.image_path is not None:
