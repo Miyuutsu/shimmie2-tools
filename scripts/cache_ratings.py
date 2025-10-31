@@ -40,6 +40,7 @@ def apply_dominant_ratings_to_posts(db_path: Path, tag_ratings: dict):
 
                 elif tag_rating == "q" and dominant_rating != "e":
                     dominant_rating = "q"
+                    break  # Once we find a 'q', no need to continue
 
                 elif tag_rating == "s" and dominant_rating not in ["e", "q"]:
                     dominant_rating = "s"

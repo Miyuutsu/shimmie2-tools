@@ -297,6 +297,21 @@ def get_existing_titles(pg_cur):
     return {row[0] for row in pg_cur.fetchall()}
 
 def main(args):
+    print("=== Import Summary ===")
+    print(f"📚  Database:       {DB_CONFIG['dbname']}")
+    print(f"👤  User:           {DB_CONFIG['user']}")
+    if args.password is None:
+        print(f"🔓  Password:       None")
+    else:
+        print(f"🔒  Password:       Hidden")
+    print(f"📄  Start Page:     {args.start_page}")
+    print(f"📄  Page Count:     {args.pages}")
+    print(f"🔄  Update Cache:   {'Yes' if args.update_cache else 'No'}")
+    print(f"📝  Update Existing:{'Yes' if args.update_existing else 'No'}")
+    print(f"🧼  Clear Cache:    {'Yes' if args.clear_cache else 'No'}")
+    print(f"🎨  Convert Mode:   {args.convert}")
+    print()
+
     if args.clear_cache:
         clear_cache()
 
@@ -364,20 +379,5 @@ if __name__ == "__main__":
             "host": "localhost",
             "port": 5432
         }
-
-    print("=== Import Summary ===")
-    print(f"📚  Database:       {DB_CONFIG['dbname']}")
-    print(f"👤  User:           {DB_CONFIG['user']}")
-    if args.password is None:
-        print(f"🔓  Password:       None")
-    else:
-        print(f"🔒  Password:       Hidden")
-    print(f"📄  Start Page:     {args.start_page}")
-    print(f"📄  Page Count:     {args.pages}")
-    print(f"🔄  Update Cache:   {'Yes' if args.update_cache else 'No'}")
-    print(f"📝  Update Existing:{'Yes' if args.update_existing else 'No'}")
-    print(f"🧼  Clear Cache:    {'Yes' if args.clear_cache else 'No'}")
-    print(f"🎨  Convert Mode:   {args.convert}")
-    print()
 
     main(args)

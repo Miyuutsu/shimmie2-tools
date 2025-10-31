@@ -38,7 +38,6 @@ def csv_to_sqlite(csv_file, sqlite_file, table_name="data", drop_table=False):
     conn.close()
     print(f"✅ Converted '{csv_file}' to '{sqlite_file}'")
 
-# Example usage:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Converts any valid CSV file into an SQLite Database.")
     parser.add_argument("--csv_file", "--csv", dest="csv", default="", help="Path to CSV")

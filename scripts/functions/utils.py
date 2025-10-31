@@ -18,15 +18,6 @@ def validate_float(value):
 def get_cpu_threads():
     return os.cpu_count()
 
-
-# Dictionaries
-model_map = {
-"vit": "SmilingWolf/wd-vit-tagger-v3",
-"vit-large": "SmilingWolf/wd-vit-large-tagger-v3",
-"swinv2": "SmilingWolf/wd-swinv2-tagger-v3",
-"convnext": "SmilingWolf/wd-convnext-tagger-v3",
-}
-
 def add_module_path(relative_path: str):
     """
     Adds the given relative path to sys.path if it's not already present.
@@ -47,7 +38,7 @@ def convert_cdn_links(image_url):
     import re
 
     # Check for Pixiv CDN link
-    pixiv_pattern = r"i\.pximg\.net/img-original/img/\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/(\d+)_p\d{1,3}\.(?:jpg|jpeg|png|webp)"
+    pixiv_pattern = r"(?:i|img)\d{0,2}\.(?:pximg|pixiv)\.net/(?:(?:img-original|img\d{1,2})/img/|img/)(?:\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/)?(?:[^/]+/)?(\d+)(?:_p\d{1,3})?\.(?:jpg|jpeg|png|webp)"
     pixiv_match = re.search(pixiv_pattern, image_url)
     if pixiv_match:
         artwork_id = pixiv_match.group(1)

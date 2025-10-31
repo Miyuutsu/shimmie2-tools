@@ -2,3 +2,4 @@ database/danbooru_wiki_cache.db
 database/posts_cache.db
 __pycache__
 scripts/functions/__pycache__
+scripts/venv
