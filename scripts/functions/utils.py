@@ -38,7 +38,7 @@ def convert_cdn_links(image_url):
     import re
 
     # Check for Pixiv CDN link
-    pixiv_pattern = r"(?:i|img)\d{0,2}\.(?:pximg|pixiv)\.net/(?:(?:img-original|img\d{1,2})/img/|img/)(?:\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/)?(?:[^/]+/)?(\d+)(?:_p\d{1,3})?\.(?:jpg|jpeg|png|webp)"
+    pixiv_pattern = r"(?:i|img)\d{0,2}\.(?:pximg|pixiv)\.net/(?:(?:img-original|img\d{1,2})/img/|img/)(?:\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/)?(?:[^/]+/)?(\d+)(?:_[\w]*_p\d{1,3})?\.(?:jpg|jpeg|png|webp)"
     pixiv_match = re.search(pixiv_pattern, image_url)
     if pixiv_match:
         artwork_id = pixiv_match.group(1)
@@ -55,3 +55,10 @@ def convert_cdn_links(image_url):
 
     # If no match, return the original URL
     return image_url  # return the original if no match
+
+def compute_md5(image_path: Path) -> str:
+    hash_md5 = hashlib.md5()
+    with open(image_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()

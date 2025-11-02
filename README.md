@@ -12,17 +12,12 @@ A modular suite of utilities and scripts designed to extend and enhance the func
 - **⚡ Metadata Caching**
   Parses Danbooru `posts.json` into a fast SQLite lookup for tag fallback and offline support.
 
-- **🖼️ Tagger Interface**
-  Leverages advanced taggers to annotate images using fallback caches, external `.txt` files, or Danbooru metadata.
-  Includes `--shimmie` export mode for CSV compatibility.
-
 ---
 
 ## 🧠 Requirements
 
 - Python 3.12
 - Linux, Windows (partial support, not regularly maintained), or WSL
-- Git (to clone the SD-Tag-Editor submodule)
 
 ---
 
@@ -45,10 +40,9 @@ All scripts are located in the `scripts/` directory.
 #### Create CSV from various data
 
 ```bash
-python backend/scripts/booru_csv_maker.py --batch_size=20 \
---model=vit-large --gen_threshold=0.35 --rating_threshold=0.35 \
---char_threshold=0.75 --subfolder=True --shimmie=True --no_prune=True \
---threads=16 --input_cache=backend/database/posts_cache.db
+python scripts/booru_csv_maker.py --batch_size=20 \
+--threads=8 --cache=database/posts_cache.db \
+--character_db=database/characters.db
 ```
 
 #### Precache posts.json into SQLite
@@ -81,7 +75,6 @@ shimmie2-tools/
 │   ├── import_danbooru_wikis.py
 │   └── precache_posts_sqlite.py
 ├── requirements.txt
-└── sd_tag_editor/
 ```
 
 ---
@@ -90,10 +83,7 @@ shimmie2-tools/
 
 ### 🧪 Development Notes
 
-- GUI supports safe abortion of long-running processes
 - Wiki imports support resume and smart `--update-existing`
-- Tags, metadata, and thresholds are configurable in GUI mode
-- `.gitignore` excludes all runtime cache files and submodule-generated artifacts
 
 ### 🗄️ Database Files
 
@@ -103,7 +93,7 @@ and the Danbooru API.
 
 - `posts_cache.db`: 4.1GB
 - `danbooru_wiki_cache.db`: 89.6MB
-Place them into `tools/`.
+Place them into `database/`.
 
 🔗 [Database files on Google Drive](https://drive.google.com/drive/folders/106pn_tpW4QgpPj-kwHC4x6cvdiqw5MaH?usp=drive_link)
 
@@ -121,7 +111,6 @@ See the [License](LICENSE) for details.
 
 - [Danbooru](https://danbooru.donmai.us/) — for their rich metadata and API
 - [Shimmie2](https://github.com/shish/shimmie2) — for the core imageboard framework
-- [SD-Tag-Editor](https://github.com/derrian-distro/SD-Tag-Editor) — for their wonderful tagger backend
 - [ChatGPT](https://chatgpt.com) — because odds are good I couldn't have done this without you
 - [Babyforce](https://github.com/Babyforce) - For the tag_rating_dominant.db that was used
 - All contributors and users 💜

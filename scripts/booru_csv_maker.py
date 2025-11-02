@@ -1,13 +1,11 @@
 from PIL import Image, UnidentifiedImageError
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from functions.utils import validate_float, get_cpu_threads, add_module_path, convert_cdn_links
+from functions.utils import validate_float, get_cpu_threads, add_module_path, convert_cdn_links, compute_md5
 
 from io import BytesIO
 from pathlib import Path
 from pyvips import Image as VipsImage
 from simple_parsing import field, parse_known_args
-from tempfile import NamedTemporaryFile
 from typing import Optional, Tuple
 import argparse
 import csv
@@ -19,73 +17,50 @@ import pyvips
 import re
 import sqlite3
 import sys
-import tempfile
 import tqdm
 
 Image.MAX_IMAGE_PIXELS = None
-ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".jxl", ".avif"}
 MD5_RE = re.compile(r"[a-fA-F0-9]{32}")
 
 script_dir = Path(__file__).parent.resolve()
 db_dir = script_dir / ".." / "database"
 
-@dataclass
-class LabelData:
-    names: list[str]
-    rating: list[int]
-    general: list[int]
-    character: list[int]
-    artist: list[int]
-    copyright: list[int]
-
-### I forgot all of these, they still need the rewrite
-
-def compute_md5(image_path: Path) -> str:
-    """Compute the MD5 hash of the entire image file as a fallback."""
-    hash_md5 = hashlib.md5()
-    with open(image_path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
-
 def resolve_post(image: Path, cache: str) -> tuple[Path, dict | None]:
     if Path(cache).is_file():
         path = Path(cache)
-        conn = sqlite3.connect(path)
-        cur = conn.cursor()
+        with sqlite3.connect(cache) as conn:
+            cur = conn.cursor()
+            post = None
+
+            # Try MD5 from filename
+            match = MD5_RE.search(image.stem)
+            md5 = match.group(0).lower() if match else compute_md5(image)
+
+            if md5:
+                cur.execute("SELECT * FROM posts WHERE md5 = ?", (md5,))
+                row = cur.fetchone()
+                if row:
+                    post = row_to_post_dict(row)
+
+            if not post:
+                try:
+                    px_hash = compute_danbooru_pixel_hash(image)
+                    cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
+                    row = cur.fetchone()
+                    if row:
+                        post = row_to_post_dict(row)
+                    else:
+                        add_post_to_cache(image, args.cache)
+                        cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
+                        row = cur.fetchone()
+                        post = row_to_post_dict(row)
+
+                except Exception as e:
+                    print(f"[WARN] Pixel hash failed for {image.name}: {e}")
+            return image, post
     else:
         raise FileNotFoundError(f"Warning: Database cache not found. Database cache is considered mandatory due to speed and resource requirements.")
-
-    post = None
-
-    # Try MD5 from filename
-    match = MD5_RE.search(image.stem)
-    md5 = match.group(0).lower() if match else compute_md5(image)
-
-    if md5:
-        cur.execute("SELECT * FROM posts WHERE md5 = ?", (md5,))
-        row = cur.fetchone()
-        if row:
-            post = row_to_post_dict(row)
-
-    if not post:
-        try:
-            px_hash = compute_danbooru_pixel_hash(image)
-            cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
-            row = cur.fetchone()
-            if row:
-                post = row_to_post_dict(row)
-            else:
-                add_post_to_cache(image, args.cache)
-                cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
-                row = cur.fetchone()
-                post = row_to_post_dict(row)
-
-        except Exception as e:
-            print(f"[WARN] Pixel hash failed for {image.name}: {e}")
-
-    conn.close()
-    return image, post
 
 def add_post_to_cache(image: Path, cache: Path):
     if not Path(cache).is_file():
@@ -99,64 +74,50 @@ def add_post_to_cache(image: Path, cache: Path):
     px_hash = compute_danbooru_pixel_hash(image)
 
     # Extract and format each tag category
-
-    txt_path = image.with_suffix(".txt")
-    if txt_path.is_file():
-        try:
-            with txt_path.open("r", encoding="utf-8") as f:
-                extra_tags = [
-                    line.strip() for line in f.readlines()
-                    if line.strip() and not line.startswith("#")
-                ]
-                general = ", ".join(extra_tags)
-                rating = "?"
-                source = ""
-                character = ""
-                artist = ""
-                series = ""
-        except Exception as e:
-            print(f"[WARN] Failed to read tags from {txt_path.name}: {e}")
-    else:
-        general = "tagme"
-        rating = "?"
-        source = ""
-        character = ""
-        artist = ""
-        series = ""
+    general = ""
+    rating = "?"
+    source = ""
+    character = ""
+    artist = ""
+    series = ""
 
     # Connect and insert
-    conn = sqlite3.connect(cache)
-    cur = conn.cursor()
+    with sqlite3.connect(cache) as conn:
+        cur = conn.cursor()
 
-    # Make sure your schema is ready
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            md5 TEXT PRIMARY KEY,
-            pixel_hash TEXT,
-            rating TEXT,
-            source TEXT,
-            general TEXT,
-            character TEXT,
-            artist TEXT,
-            series TEXT
-        )
-    """)
+        # Make sure your schema is ready
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                md5 TEXT PRIMARY KEY,
+                pixel_hash TEXT,
+                rating TEXT,
+                source TEXT,
+                general TEXT,
+                character TEXT,
+                artist TEXT,
+                series TEXT
+            )
+        """)
 
-    cur.execute("""
-        INSERT OR REPLACE INTO posts
-        (md5, pixel_hash, rating, source, general, character, artist, series)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        md5, px_hash, rating, source,
-        general, character, artist, series
-    ))
+        cur.execute("""
+            INSERT OR REPLACE INTO posts
+            (md5, pixel_hash, rating, source, general, character, artist, series)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            md5, px_hash, rating, source,
+            general, character, artist, series
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
-def save_post_to_cache(image: Path, post: dict, cache: Path, rating_letter):
+def save_post_to_cache(image: Path, post: dict, cache: Path, rating_letter, tags: list[str]):
     if not Path(cache).is_file():
         raise FileNotFoundError(f"Cannot save to cache: {cache} does not exist.")
+
+    # Ensure tags is a proper list
+    if isinstance(tags, str):
+        tags = [tags]
+    tags = [str(t).strip() for t in tags if t is not None]
 
     # Use MD5 from filename if possible
     match = MD5_RE.search(image.stem)
@@ -165,56 +126,82 @@ def save_post_to_cache(image: Path, post: dict, cache: Path, rating_letter):
     # Compute fallback pixel hash
     px_hash = compute_danbooru_pixel_hash(image)
 
-    # Extract and format each tag category
-    #rating = post.get("rating", "?")
+    general_tags, character_tags, artist_tags, series_tags = [], [], [], []
+    source_tag = None
+
+    for tag in tags:
+        if tag.startswith("character:"):
+            character_tags.append(tag.split(":", 1)[1])
+        elif tag.startswith("series:"):
+            series_tags.append(tag.split(":", 1)[1])
+        elif tag.startswith("artist:"):
+            artist_tags.append(tag.split(":", 1)[1])
+        elif tag.startswith("source:"):
+            source_tag = tag.split(":", 1)[1]
+        else:
+            general_tags.append(tag)
+
+    # Always keep tag lists as lists (no accidental strings)
+    def normalize_list(lst):
+        return [str(x).strip() for x in lst if x is not None and str(x).strip()]
+
+    general_tags = normalize_list(general_tags)
+    character_tags = normalize_list(character_tags)
+    artist_tags = normalize_list(artist_tags)
+    series_tags = normalize_list(series_tags)
+
+    general = ",".join(general_tags) or "tagme"
+    character = ",".join(character_tags)
+    artist = ",".join(artist_tags)
+    series = ",".join(series_tags)
+    source = source_tag or ""
     rating = rating_letter
-    source = post.get("source", None)
 
-    general = ", ".join(sorted(set(post.get("general", []))))
-    character = ", ".join(sorted(set(post.get("character", []))))
-    artist = ", ".join(sorted(set(post.get("artist", []))))
-    series = ", ".join(sorted(set(post.get("series", []))))
+    # Insert into DB
+    with sqlite3.connect(cache) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                md5 TEXT PRIMARY KEY,
+                pixel_hash TEXT,
+                rating TEXT,
+                source TEXT,
+                general TEXT,
+                character TEXT,
+                artist TEXT,
+                series TEXT
+            )
+        """)
+        # Fetch existing row, if any
+        cur.execute("SELECT rating, source, general, character, artist, series FROM posts WHERE md5 = ?", (md5,))
+        existing = cur.fetchone()
 
-    # Connect and insert
-    conn = sqlite3.connect(cache)
-    cur = conn.cursor()
-
-    # Make sure your schema is ready
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            md5 TEXT PRIMARY KEY,
-            pixel_hash TEXT,
-            rating TEXT,
-            source TEXT,
-            general TEXT,
-            character TEXT,
-            artist TEXT,
-            series TEXT
-        )
-    """)
-
-    cur.execute("""
-        INSERT OR REPLACE INTO posts
-        (md5, pixel_hash, rating, source, general, character, artist, series)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        md5, px_hash, rating, source,
-        general, character, artist, series
-    ))
-
-    conn.commit()
-    conn.close()
+        # Only update if something differs
+        new_data = (rating, source, general, character, artist, series)
+        if existing is None or any(existing[i] != new_data[i] for i in range(len(new_data))):
+            cur.execute("""
+                INSERT OR REPLACE INTO posts
+                (md5, pixel_hash, rating, source, general, character, artist, series)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (md5, px_hash, *new_data))
+        conn.commit()
 
 def row_to_post_dict(row: tuple) -> dict:
+    def split_field(field):
+        if not field:
+            return []
+        # split on comma, strip whitespace and ignore empty pieces
+        return [part.strip() for part in field.split(",") if part.strip()]
+
     return {
         "md5": row[0],
         "pixel_hash": row[1],
         "rating": row[2],
         "source": row[3],
-        "general": row[4].split(",") if row[4] else [],
-        "character": row[5].split(",") if row[5] else [],
-        "artist": row[6].split(",") if row[6] else [],
-        "series": row[7].split(",") if row[7] else [],
+        "general": split_field(row[4]),
+        "character": split_field(row[5]),
+        "artist": split_field(row[6]),
+        "series": split_field(row[7]),
     }
 
 def compute_danbooru_pixel_hash(image_path: Path) -> str:
@@ -246,30 +233,18 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
     buffer = header + raw_bytes
     return hashlib.md5(buffer).hexdigest()
 
-def md5sum(path: Path) -> str:
-    h = hashlib.md5()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-def pil_ensure_rgb(image: Image.Image) -> Image.Image:
-    if image.mode not in ["RGB", "RGBA"]:
-        image = image.convert("RGBA") if "transparency" in image.info else image.convert("RGB")
-    if image.mode == "RGBA":
-        canvas = Image.new("RGBA", image.size, (255, 255, 255))
-        canvas.alpha_composite(image)
-        image = canvas.convert("RGB")
-    return image
-
-def pil_pad_square(image: Image.Image) -> Image.Image:
-    w, h = image.size
-    px = max(w, h)
-    canvas = Image.new("RGB", (px, px), (255, 255, 255))
-    canvas.paste(image, ((px - w) // 2, (px - h) // 2))
-    return canvas
-
 def main(args):
+    print("=== Tagger Run Summary ===")
+    print(f"📁  Input:           {args.image_path}")
+    print(f"📥  Input Cache:     {args.cache}")
+    if args.update_cache:
+        print(f"🗄️  Update Cache:    True")
+    else:
+        print(f"🗄️  Update Cache:    False")
+    print(f"📦  Batch Size:      {args.batch}")
+    print(f"🧵  Threads:         {args.threads}")
+    print(f"📂  Prefix:          {args.prefix}")
+    print()
 
     if Path(args.cdb).is_file:
         cdb_path = Path(args.cdb)
@@ -306,7 +281,7 @@ def main(args):
                     character_series_map[char] = series
         print(f"[INFO] Loaded {len(character_series_map):,} character→series mappings from SQLite.")
 
-    for batch in tqdm.tqdm(batches, desc="\nTagging images"):
+    for batch in tqdm.tqdm(batches, desc="Tagging images", position=1, leave=False):
 
         # Preprocess and store md5s and images
         # === Multi-threaded post resolution ===
@@ -314,7 +289,9 @@ def main(args):
             results = list(tqdm.tqdm(
                 executor.map(lambda img: resolve_post(img, args.cache), batch),
                 total=len(batch),
-                desc="\nResolving posts"
+                desc="Resolving posts",
+                position=2,
+                leave=False
             ))
 
         rating_priority = {'e': 5, 'q': 4, 's': 3, 'g': 2, '?': 1}
@@ -339,14 +316,31 @@ def main(args):
             tags.extend(f"series:{t}" for t in post.get("series", []))
             tags.extend(f"artist:{t}" for t in post.get("artist", []))
 
-            for char_tag in post.get("general", []):
+            txt_path = image.with_suffix(".txt")
+            if txt_path.is_file():
+                with txt_path.open("r", encoding="utf-8") as f:
+                    extra_tags = []
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        # Split comma-separated tags
+                        for tag in line.split(","):
+                            tag = tag.strip()
+                            if tag:
+                                # Replace internal spaces with underscores
+                                tag = re.sub(r'\s+', '_', tag)
+                                extra_tags.append(tag)
+                    tags.extend(extra_tags)
+
+            for char_tag in tags:
                 if char_tag in character_series_map:
-                    series_tags = []
                     inferred_series = character_series_map[char_tag]
-                    series_tags.extend(inferred_series)
-                    # ✅ Append inferred series to post
-                    tags.extend(f"series:{t}" for t in series_tags)
-                    tags.extend(f"character:{t}" for t in char_tag)
+                    tags.append(f"character:{char_tag}")
+                    if isinstance(inferred_series, (list, tuple, set)):
+                        tags.extend(f"series:{t}" for t in inferred_series)
+                    else:
+                        tags.append(f"series:{inferred_series}")
 
             rating_letter = post.get("rating", None)
 
@@ -377,13 +371,12 @@ def main(args):
                 source = convert_cdn_links(source)
                 tags.append(f"source:{source}")
 
-            save_post_to_cache(image, post, args.cache, rating_letter)
-
-            tags = [re.sub(r'\s+', ' ', tag).strip() for tag in tags]
-
+            tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
             tags = sorted(set(tags))
             tag_str = ", ".join(tags)
 
+            if args.update_cache:
+                save_post_to_cache(image, post, args.cache, rating_letter, tags)
 
             rel_path = image.relative_to(args.image_path)
             csv_rows.append([
@@ -393,6 +386,7 @@ def main(args):
                 rating_letter,
                 ""
             ])
+
     if cdb_conn:
         cdb_conn.close()
     if csv_rows:
@@ -408,19 +402,12 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Creates a CSV suitable for input into Shimmie2.")
     parser.add_argument("--cache", default=str(db_dir / "posts_cache.db"), help="Path to sqlite database with posts cache.")
+    parser.add_argument("--update-cache", action="store_true")
     parser.add_argument("--character_db", "--cdb", dest="cdb", default=str(db_dir / "characters.db"), help="Path to characters/series mapping database.")
     parser.add_argument("--images", dest="image_path", default="", help="Path to images")
     parser.add_argument("--prefix", default="import", help="What directory name will be used inside Shimmie directory.")
     parser.add_argument("--batch", type=int, default=20, help="How many images should be processed simultaneously (default is 20)")
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Number of threads to use (default is half of the detected CPU threads)")
     args = parser.parse_args()
-
-    print("=== Tagger Run Summary ===")
-    print(f"📁  Input:           {args.image_path}")
-    print(f"📥  Input Cache:     {args.cache}")
-    print(f"📦  Batch Size:      {args.batch}")
-    print(f"🧵  Threads:         {args.threads}")
-    print(f"📂  Prefix:          {args.prefix}")
-    print()
 
     main(args)
