@@ -1,7 +1,7 @@
 """
 This is designed to help with batch importing into shimmie2
 """
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 from pathlib import Path
 import argparse
@@ -9,6 +9,7 @@ import csv
 import hashlib
 import re
 import sqlite3
+import subprocess
 import tqdm
 
 import pyvips
@@ -195,6 +196,22 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
     buffer = header + raw_bytes
     return hashlib.md5(buffer).hexdigest()
 
+def convert_to_webp(src_path: Path, dst_path: Path):
+    """Convert images using ImageMagick."""
+    src_path = Path(src_path)
+    dst_path = Path(dst_path)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "magick",
+        str(src_path),
+        "-resize", "512x512>",
+        "-quality", "92",
+        f"webp:{dst_path}"
+    ]
+
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 # run it
 def main(args):
     """
@@ -341,12 +358,20 @@ def main(args):
                     save_post_to_cache(rating_letter, tags, md5, px_hash)
 
                 rel_path = image.relative_to(args.image_path)
+                if args.thumbnail:
+                    thumb = f"{args.image_path}/thumbnails/{rel_path}"
+                    thumbpath = f"{args.prefix}/thumbnails/{rel_path}"
+                    with ProcessPoolExecutor(max_workers=args.threads) as imgpro:
+                        imgpro.submit(convert_to_webp, image, thumb)
+                else:
+                    thumbpath = '""'
+
                 csv_rows.append([
                     f"{args.prefix}/{rel_path}",
                     tag_str,
                     "",
                     rating_letter,
-                    ""
+                    thumbpath
                 ])
 
     csv_path = Path(args.image_path)
@@ -368,5 +393,6 @@ if __name__ == "__main__":
                         help="How many images should be processed simultaneously (default is 20)")
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2,
                         help="Number of threads to use (default half)")
+    parser.add_argument("--thumbnail", action="store_true")
 
     main(parser.parse_args())
