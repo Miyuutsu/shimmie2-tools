@@ -1,5 +1,6 @@
 import os
 import sys
+import hashlib
 from pathlib import Path
 
 def validate_float(value):
