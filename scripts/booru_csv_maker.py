@@ -42,7 +42,7 @@ def resolve_post(image: Path, cache: str) -> tuple[Path, dict | None]: # batch p
                 if row:
                     post = row_to_post_dict(row)
                 else:
-                    add_post_to_cache(image, args.cache)
+                    add_post_to_cache(image, cache)
                     cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
                     row = cur.fetchone()
                     post = row_to_post_dict(row)
