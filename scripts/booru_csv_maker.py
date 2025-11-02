@@ -1,23 +1,16 @@
-from PIL import Image, UnidentifiedImageError
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from functions.utils import validate_float, get_cpu_threads, add_module_path, convert_cdn_links, compute_md5
+from concurrent.futures import ThreadPoolExecutor
 
-from io import BytesIO
 from pathlib import Path
-from pyvips import Image as VipsImage
-from simple_parsing import field, parse_known_args
-from typing import Optional, Tuple
 import argparse
 import csv
 import hashlib
-import json
-import numpy as np
-import pandas as pd
-import pyvips
 import re
 import sqlite3
-import sys
 import tqdm
+
+import pyvips
+from functions.utils import get_cpu_threads, convert_cdn_links, compute_md5
+from PIL import Image
 
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".jxl", ".avif"}
@@ -26,9 +19,8 @@ MD5_RE = re.compile(r"[a-fA-F0-9]{32}")
 script_dir = Path(__file__).parent.resolve()
 db_dir = script_dir / ".." / "database"
 
-def resolve_post(image: Path, cache: str) -> tuple[Path, dict | None]:
+def resolve_post(image: Path, cache: str) -> tuple[Path, dict | None]: # batch processing
     if Path(cache).is_file():
-        path = Path(cache)
         with sqlite3.connect(cache) as conn:
             cur = conn.cursor()
             post = None
@@ -44,24 +36,25 @@ def resolve_post(image: Path, cache: str) -> tuple[Path, dict | None]:
                     post = row_to_post_dict(row)
 
             if not post:
-                try:
-                    px_hash = compute_danbooru_pixel_hash(image)
+                px_hash = compute_danbooru_pixel_hash(image)
+                cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
+                row = cur.fetchone()
+                if row:
+                    post = row_to_post_dict(row)
+                else:
+                    add_post_to_cache(image, args.cache)
                     cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
                     row = cur.fetchone()
-                    if row:
-                        post = row_to_post_dict(row)
-                    else:
-                        add_post_to_cache(image, args.cache)
-                        cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
-                        row = cur.fetchone()
-                        post = row_to_post_dict(row)
+                    post = row_to_post_dict(row)
 
-                except Exception as e:
-                    print(f"[WARN] Pixel hash failed for {image.name}: {e}")
             return image, post
     else:
-        raise FileNotFoundError(f"Warning: Database cache not found. Database cache is considered mandatory due to speed and resource requirements.")
+        raise FileNotFoundError(
+            "Warning: Database cache not found."
+            "Database cache is considered mandatory due to speed and resource requirements."
+            )
 
+# used with resolve_post to ensure everything goes smoothly
 def add_post_to_cache(image: Path, cache: Path):
     if not Path(cache).is_file():
         raise FileNotFoundError(f"Cannot save to cache: {cache} does not exist.")
@@ -110,7 +103,8 @@ def add_post_to_cache(image: Path, cache: Path):
 
         conn.commit()
 
-def save_post_to_cache(image: Path, post: dict, cache: Path, rating_letter, tags: list[str]):
+# used with update-cache
+def save_post_to_cache(image: Path, cache: Path, rating_letter, tags: list[str]):
     if not Path(cache).is_file():
         raise FileNotFoundError(f"Cannot save to cache: {cache} does not exist.")
 
@@ -186,6 +180,7 @@ def save_post_to_cache(image: Path, post: dict, cache: Path, rating_letter, tags
             """, (md5, px_hash, *new_data))
         conn.commit()
 
+# I don't even remember what this does, something with the csv
 def row_to_post_dict(row: tuple) -> dict:
     def split_field(field):
         if not field:
@@ -204,6 +199,7 @@ def row_to_post_dict(row: tuple) -> dict:
         "series": split_field(row[7]),
     }
 
+# because the original database contained pixel hash I kept this
 def compute_danbooru_pixel_hash(image_path: Path) -> str:
     image = pyvips.Image.new_from_file(str(image_path), access="sequential")
 
@@ -233,28 +229,24 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
     buffer = header + raw_bytes
     return hashlib.md5(buffer).hexdigest()
 
+# run it
 def main(args):
     print("=== Tagger Run Summary ===")
     print(f"📁  Input:           {args.image_path}")
     print(f"📥  Input Cache:     {args.cache}")
-    if args.update_cache:
-        print(f"🗄️  Update Cache:    True")
-    else:
-        print(f"🗄️  Update Cache:    False")
+    print(f"🗄️  Update Cache:    {args.update_cache}")
     print(f"📦  Batch Size:      {args.batch}")
     print(f"🧵  Threads:         {args.threads}")
     print(f"📂  Prefix:          {args.prefix}")
     print()
 
-    if Path(args.cdb).is_file:
-        cdb_path = Path(args.cdb)
-        cdb_conn = sqlite3.connect(cdb_path)
-        cdb_cursor = cdb_conn.cursor()
-    else:
-        raise FileNotFoundError(f"Character database is mandatory now.")
+
+    cdb_path = Path(args.cdb)
+    cdb_conn = sqlite3.connect(cdb_path)
+    cdb_cursor = cdb_conn.cursor()
 
     if not Path(args.image_path).is_dir:
-        raise FileNotFoundError(f"Path not found: {images}")
+        raise FileNotFoundError(f"Path not found: {args.image_path}")
 
     files = Path(args.image_path).rglob("*")
 
@@ -272,7 +264,7 @@ def main(args):
     character_series_map = {}
 
     if cdb_path.exists():
-        cdb_cursor.execute(f"SELECT * FROM data")
+        cdb_cursor.execute("SELECT * FROM data")
         rows = cdb_cursor.fetchall()
         for row in rows:
             if len(row) >= 2:
@@ -356,7 +348,9 @@ def main(args):
             if not rating_letter:
                 if "explicit" in post.get("rating", []):
                     rating_letter = "e"
-                elif "questionable" in rating or "sensitive" in post.get("rating", []):
+                elif "questionable" in post.get("rating", []):
+                    rating_letter = "q"
+                elif "sensitive" in post.get("rating", []):
                     rating_letter = "q"
                 elif "general" in post.get("rating", []):
                     rating_letter = "s"
@@ -376,7 +370,7 @@ def main(args):
             tag_str = ", ".join(tags)
 
             if args.update_cache:
-                save_post_to_cache(image, post, args.cache, rating_letter, tags)
+                save_post_to_cache(image, args.cache, rating_letter, tags)
 
             rel_path = image.relative_to(args.image_path)
             csv_rows.append([
@@ -408,6 +402,5 @@ if __name__ == "__main__":
     parser.add_argument("--prefix", default="import", help="What directory name will be used inside Shimmie directory.")
     parser.add_argument("--batch", type=int, default=20, help="How many images should be processed simultaneously (default is 20)")
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Number of threads to use (default is half of the detected CPU threads)")
-    args = parser.parse_args()
 
-    main(args)
+    main(parser.parse_args())
