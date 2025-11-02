@@ -55,7 +55,7 @@ def convert_cdn_links(image_url):
         return f"https://www.pixiv.net/en/artworks/{artwork_id}"
     fantia_match = re.search(fantia_pattern, image_url)
     if fantia_match:
-        post_id = fantia_s_match.group(1)
+        post_id = fantia_match.group(1)
         return f"https://fantia.jp/posts/{post_id}"
 
     return image_url
