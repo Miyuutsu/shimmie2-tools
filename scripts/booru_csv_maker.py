@@ -361,8 +361,9 @@ def main(args):
                 if args.thumbnail:
                     thumb = f"{args.image_path}/thumbnails/{rel_path}"
                     thumbpath = f"{args.prefix}/thumbnails/{rel_path}"
-                    with ProcessPoolExecutor(max_workers=args.threads) as imgpro:
-                        imgpro.submit(convert_to_webp, image, thumb)
+                    if not Path(thumbpath).is_file:
+                        with ProcessPoolExecutor(max_workers=args.threads) as imgpro:
+                            imgpro.submit(convert_to_webp, image, thumb)
                 else:
                     thumbpath = '""'
 
