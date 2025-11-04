@@ -260,7 +260,7 @@ def main(args):
                 tag_rating_map[row[0].strip()] = row[1].strip()
 
     files = Path(args.image_path).rglob("*")
-    images = [f for f in files if f.suffix.lower() in ALLOWED_EXTS and f.is_file()]
+    images = [f for f in files if f.suffix.lower() in ALLOWED_EXTS and f.is_file() and "thumbnails" not in f.relative_to(args.image_path).parts]
     batches = [images[i:i + args.batch] for i in range(0, len(images), args.batch)]
 
     csv_rows = []
