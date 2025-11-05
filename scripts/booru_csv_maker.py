@@ -196,7 +196,17 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
     buffer = header + raw_bytes
     return hashlib.md5(buffer).hexdigest()
 
-def convert_to_webp(src_path: Path, dst_path: Path):
+def process_webp(task):
+    '''
+    for some reason this was necessary
+    '''
+    src_path, dst_path = task
+    try:
+        convert_to_webp(src_path, dst_path)
+    except:
+        print(f"Error creating thumbnail of {src_path}!")
+
+def convert_to_webp(src_path: Path, dst_path: Path, res):
     """Convert images using ImageMagick."""
     src_path = Path(src_path)
     dst_path = Path(dst_path)
@@ -205,7 +215,7 @@ def convert_to_webp(src_path: Path, dst_path: Path):
     cmd = [
         "magick",
         str(src_path),
-        "-resize", "512x512>",
+        "-resize", f"{res}x{res}>",
         "-quality", "92",
         f"webp:{dst_path}"
     ]
@@ -260,11 +270,14 @@ def main(args):
                 tag_rating_map[row[0].strip()] = row[1].strip()
 
     files = Path(args.image_path).rglob("*")
-    images = [f for f in files if f.suffix.lower() in ALLOWED_EXTS and f.is_file() and "thumbnails" not in f.relative_to(args.image_path).parts]
+    images = [
+        f for f in files
+        if f.suffix.lower() in ALLOWED_EXTS and f.is_file()
+        and "thumbnails" not in f.relative_to(args.image_path).parts
+    ]
     batches = [images[i:i + args.batch] for i in range(0, len(images), args.batch)]
 
     csv_rows = []
-
     for batch in tqdm.tqdm(batches, desc="Image batches", position=1, leave=False):
         # === Multi-threaded post resolution ===
         with ThreadPoolExecutor(max_workers=args.threads) as executor:
@@ -276,9 +289,11 @@ def main(args):
                 leave=False
             ))
 
+
             rating_priority = {'e': 5, 'q': 4, 's': 3, 'g': 2, '?': 1}
 
             for image, post, md5, px_hash in results:
+                rel_path = image.relative_to(args.image_path)
                 tags = []
                 tags.extend(post.get("general", []))
                 tags.extend(f"character:{t}" for t in post.get("character", []))
@@ -359,21 +374,26 @@ def main(args):
 
                 rel_path = image.relative_to(args.image_path)
                 if args.thumbnail:
-                    thumb = f"{args.image_path}/thumbnails/{rel_path}"
-                    thumbpath = f"{args.prefix}/thumbnails/{rel_path}"
-                    if not Path(thumbpath).is_file:
-                        with ProcessPoolExecutor(max_workers=args.threads) as imgpro:
-                            imgpro.submit(convert_to_webp, image, thumb)
-                else:
-                    thumbpath = '""'
+                    thumbpath = Path(args.prefix) / "thumbnails" / rel_path
 
                 csv_rows.append([
                     f"{args.prefix}/{rel_path}",
                     tag_str,
                     "",
                     rating_letter,
-                    thumbpath
+                    str(thumbpath) if args.thumbnail else '""'
                 ])
+
+            if args.thumbnail:
+                tasks = []
+                for image in batch:
+                    rel_path = image.relative_to(args.image_path)
+                    thumb_src = Path(args.image_path) / "thumbnails" / rel_path
+                    if not thumb_src.is_file():
+                        tasks.append((image, thumb_src))
+            if tasks:
+                with ProcessPoolExecutor(max_workers=args.threads) as imgpro:
+                    list(imgpro.map(process_webp, tasks))
 
     csv_path = Path(args.image_path)
     csv_path =  csv_path / "import.csv"
@@ -395,5 +415,6 @@ if __name__ == "__main__":
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2,
                         help="Number of threads to use (default half)")
     parser.add_argument("--thumbnail", action="store_true")
+    parser.add_argument("--res", type=int, default=512, help="Max resolution of any side for thumbs")
 
     main(parser.parse_args())
