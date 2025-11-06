@@ -206,7 +206,7 @@ def process_webp(task):
     except:
         print(f"Error creating thumbnail of {src_path}!")
 
-def convert_to_webp(src_path: Path, dst_path: Path, res):
+def convert_to_webp(src_path: Path, dst_path: Path):
     """Convert images using ImageMagick."""
     src_path = Path(src_path)
     dst_path = Path(dst_path)
@@ -215,7 +215,7 @@ def convert_to_webp(src_path: Path, dst_path: Path, res):
     cmd = [
         "magick",
         str(src_path),
-        "-resize", f"{res}x{res}>",
+        "-resize", "512x512>",
         "-quality", "92",
         f"webp:{dst_path}"
     ]
@@ -415,6 +415,5 @@ if __name__ == "__main__":
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2,
                         help="Number of threads to use (default half)")
     parser.add_argument("--thumbnail", action="store_true")
-    parser.add_argument("--res", type=int, default=512, help="Max resolution of any side for thumbs")
 
     main(parser.parse_args())
