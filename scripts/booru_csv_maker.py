@@ -1,12 +1,10 @@
-"""
-This is designed to help with batch importing into shimmie2
-"""
+"""This is designed to help with batch importing into shimmie2"""
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-
 from pathlib import Path
 import argparse
 import csv
 import hashlib
+import io
 import re
 import sqlite3
 import subprocess
@@ -16,6 +14,12 @@ import pyvips
 from PIL import Image
 from functions.utils import get_cpu_threads, convert_cdn_links, compute_md5
 
+RES = "512x512>"
+FTYPE = "webp"
+FBRES = 512
+
+#####
+#####
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".jxl", ".avif"}
 MD5_RE = re.compile(r"[a-fA-F0-9]{32}")
@@ -64,9 +68,7 @@ def resolve_post(image: Path) -> tuple[Path, dict | None]:
 
 # used with resolve_post to ensure everything goes smoothly
 def add_post_to_cache(md5, px_hash):
-    """
-    For adding new images to cache
-    """
+    """For adding new images to cache"""
     with sqlite3.connect(cache) as conn:
         cur = conn.cursor()
 
@@ -95,9 +97,7 @@ def add_post_to_cache(md5, px_hash):
         conn.commit()
 
 def parse_tags(tags: list[str]) -> tuple[str, str, str, str, str]:
-    """
-    Parses tags
-    """
+    """Parses tags"""
     tag_lists = {'general': [], 'character': [], 'artist': [], 'series': []}
     source_tag = None
     for tag in tags:
@@ -117,9 +117,7 @@ def parse_tags(tags: list[str]) -> tuple[str, str, str, str, str]:
     )
 
 def save_post_to_cache(rating_letter, tags: list[str], md5, px_hash):
-    """
-    For updating the cache
-    """
+    """For updating the cache"""
     with sqlite3.connect(cache) as conn:
         cur = conn.cursor()
 
@@ -143,9 +141,7 @@ def save_post_to_cache(rating_letter, tags: list[str], md5, px_hash):
         conn.commit()
 
 def row_to_post_dict(row: tuple) -> dict:
-    """
-    This does something with the csv, I don't remember what right now
-    """
+    """This does something with the csv, I don't remember what right now"""
     def split_field(field):
         if not field:
             return []
@@ -165,9 +161,7 @@ def row_to_post_dict(row: tuple) -> dict:
 
 
 def compute_danbooru_pixel_hash(image_path: Path) -> str:
-    """
-    because the original database contained pixel hash I kept this
-    """
+    """because the original database contained pixel hash I kept this"""
     image = pyvips.Image.new_from_file(str(image_path), access="sequential")
 
     # Match Danbooru's ICC transform and color space normalization
@@ -197,14 +191,17 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
     return hashlib.md5(buffer).hexdigest()
 
 def process_webp(task):
-    '''
-    for some reason this was necessary
-    '''
+    '''for some reason this was necessary'''
     src_path, dst_path = task
     try:
         convert_to_webp(src_path, dst_path)
-    except:
-        print(f"Error creating thumbnail of {src_path}!")
+    except subprocess.CalledProcessError:
+        # ImageMagick failed — fallback to in-memory Pillow resize
+        try:
+            fallback_to_webp(src_path, dst_path)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            # Catch all non-system exceptions cleanly
+            print(f"Error creating thumbnail of {src_path}! ({type(e).__name__}: {e})")
 
 def convert_to_webp(src_path: Path, dst_path: Path):
     """Convert images using ImageMagick."""
@@ -215,18 +212,34 @@ def convert_to_webp(src_path: Path, dst_path: Path):
     cmd = [
         "magick",
         str(src_path),
-        "-resize", "512x512>",
+        "-resize", RES,
         "-quality", "92",
-        f"webp:{dst_path}"
+        f"{FTYPE}:{dst_path}"
     ]
 
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+def fallback_to_webp(src_path: Path, dst_path: Path):
+    """In-memory fallback using Pillow."""
+    dst_path = Path(dst_path)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(src_path, "rb") as f:
+        data = f.read()
+
+    # Load via Pillow (lenient zlib)
+    im = Image.open(io.BytesIO(data))
+    im.load()  # force full decode in-memory
+
+    # Resize while preserving aspect
+    im.thumbnail((FBRES, FBRES), Image.Resampling.LANCZOS)
+
+    # Save to WebP
+    im.save(dst_path, FTYPE, quality=92, method=6)
+
 # run it
 def main(args):
-    """
-    the main code
-    """
+    """the main code"""
     print("=== Tagger Run Summary ===")
     print(f"📁  Input:           {args.image_path}")
     print(f"📥  Input Cache:     {cache}")
