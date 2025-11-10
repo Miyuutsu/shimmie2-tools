@@ -5,6 +5,7 @@ from pathlib import Path
 import argparse
 import csv
 import hashlib
+import html
 import io
 import re
 import sqlite3
@@ -23,7 +24,7 @@ FBRES = 512
 #####
 #####
 Image.MAX_IMAGE_PIXELS = None
-ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".jxl", ".avif"}
+ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
 MD5_RE = re.compile(r"[a-fA-F0-9]{32}")
 
 script_dir = Path(__file__).parent.resolve()
@@ -357,23 +358,29 @@ def main(args):
                     tags.extend(f"series:{t}" for t in post.get("series", []))
                     tags.extend(f"artist:{t}" for t in post.get("artist", []))
 
-                    txt_path = image.with_suffix(".txt")
-                    if txt_path.is_file():
-                        with txt_path.open("r", encoding="utf-8") as f:
-                            extra_tags = []
-                            for line in f:
-                                line = line.strip()
-                                if not line or line.startswith("#"):
-                                    continue
-                                # Split comma-separated tags
-                                for tag in line.split(","):
-                                    tag = tag.strip()
-                                    if tag:
-                                        # Replace internal spaces with underscores
-                                        tag = re.sub(r'\s+', '_', tag)
-                                        extra_tags.append(tag)
-                            tags.extend(extra_tags)
-
+                    txt_candidates = [
+                        image.with_suffix(".txt"),
+                        image.with_name(image.name + ".txt")
+                    ]
+                    for txt_path in txt_candidates:
+                        if txt_path.is_file():
+                            with txt_path.open("r", encoding="utf-8") as f:
+                                extra_tags = []
+                                for line in f:
+                                    line = line.strip()
+                                    if not line or line.startswith("#"):
+                                        continue
+                                    line = html.unescape(line)
+                                    parts = [
+                                        tag.strip()
+                                        for tag in re.split(r"[,;]", line)
+                                        if tag.strip()
+                                    ]
+                                    # Split comma-separated tags
+                                    for tag in parts:
+                                        tag = re.sub(r"\s+", "_", tag)
+                                        if tag:
+                                            extra_tags.append(tag)
                     new_tags = []
                     for tag in tags:
                         new_tags.append(tag)
