@@ -30,6 +30,7 @@ MD5_RE = re.compile(r"[a-fA-F0-9]{32}")
 script_dir = Path(__file__).parent.resolve()
 db_dir = script_dir / ".." / "database"
 cdb_path = db_dir / "characters.db"
+adb_path = db_dir / "artists.db"
 db_path = db_dir / "tag_rating_dominant.db"
 cache = db_dir / "posts_cache.db"
 thread_local = threading.local()
@@ -293,6 +294,9 @@ def main(args):
     if not Path(cdb_path).is_file:
         raise FileNotFoundError(f"Character DB not found: {cdb_path}")
 
+    if not Path(adb_path).is_file:
+        raise FileNotFoundError(f"Artist DB not found: {cdb_path}")
+
     if not Path(cache).is_file:
         raise FileNotFoundError(f"Cache not found: {cache}")
 
@@ -313,6 +317,18 @@ def main(args):
                 if char and series:
                     character_series_map[char] = series
         print(f"[INFO] Loaded {len(character_series_map):,} character→series mappings from SQLite.")
+
+    artist_prefix_map = {}
+    with sqlite3.connect(adb_path) as adb_conn:
+        adb_cursor = adb_conn.cursor()
+        adb_cursor.execute("SELECT * FROM data")
+        rows = adb_cursor.fetchall()
+        for row in rows:
+            if len(row) >= 2:
+                artist, partist = row[0].strip(), row[1].strip()
+                if artist and partist:
+                    artist_prefix_map[artist] = partist
+        print(f"[INFO] Loaded {len(artist_prefix_map):,} artist→artist prefixed mappings from SQLite.")
 
     tag_rating_map = {}
     with sqlite3.connect(db_path) as tag_db_conn:
@@ -364,8 +380,8 @@ def main(args):
                     ]
                     for txt_path in txt_candidates:
                         if txt_path.is_file():
+                            extra_tags = []
                             with txt_path.open("r", encoding="utf-8") as f:
-                                extra_tags = []
                                 for line in f:
                                     line = line.strip()
                                     if not line or line.startswith("#"):
@@ -381,6 +397,7 @@ def main(args):
                                         tag = re.sub(r"\s+", "_", tag)
                                         if tag:
                                             extra_tags.append(tag)
+                            tags.extend(extra_tags)
                     new_tags = []
                     for tag in tags:
                         new_tags.append(tag)
@@ -393,9 +410,18 @@ def main(args):
                                     new_tags.append(f"series:{t}")
                             else:
                                 new_tags.append(f"series:{inferred_series}")
-                            new_tags = [t for t in new_tags if t != tag] # Removed tag
 
+                            new_tags = [t for t in new_tags if t != tag] # Removed tag
                     tags[:] = new_tags # at the end
+
+                    artist_tags = []
+                    for tag in tags:
+                        artist_tags.append(tag)
+                        if tag in artist_prefix_map:
+                            artist_tags.append(f"artist:{tag}")
+
+                            artist_tags = [t for t in artist_tags if t != tag] # Removed tag
+                    tags[:] = artist_tags
 
                     rating_letter = post.get("rating", None)
 
