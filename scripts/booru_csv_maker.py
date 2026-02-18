@@ -279,6 +279,14 @@ def fallback_to_webp(src_path: Path, dst_path: Path):
     # Save to WebP
     im.save(dst_path, FTYPE, quality=92, method=6)
 
+def rating_from_score(total_score: int, safe_max, questionable_max) -> str:
+    """Map a numeric total to the rating letter."""
+    if total_score <= safe_max:
+        return 's'          # safe
+    if total_score <= questionable_max:
+        return 'q'          # questionable
+    return 'e'              # explicit
+
 # run it
 def main(args):
     """the main code"""
@@ -328,7 +336,7 @@ def main(args):
                 artist, partist = row[0].strip(), row[1].strip()
                 if artist and partist:
                     artist_prefix_map[artist] = partist
-        print(f"[INFO] Loaded {len(artist_prefix_map):,} artist→artist prefixed mappings from SQLite.")
+        print(f"[INFO] Loaded {len(artist_prefix_map):,} artist prefix mappings from SQLite.")
 
     tag_rating_map = {}
     with sqlite3.connect(db_path) as tag_db_conn:
@@ -337,7 +345,7 @@ def main(args):
         rows = tag_db_cursor.fetchall()
         for row in rows:
             if len(row) >= 2:
-                tag_rating_map[row[0].strip()] = row[1].strip()
+                tag_rating_map[row[0].strip()] = row[1]
 
     files = Path(args.image_path).rglob("*")
     images = [
@@ -347,7 +355,6 @@ def main(args):
     ]
     batches = [images[i:i + args.batch] for i in range(0, len(images), args.batch)]
 
-    rating_priority = {'e': 5, 'q': 4, 's': 3, 'g': 2, '?': 1}
     existing_thumbs = set()
     csv_rows = []
     for batch in tqdm.tqdm(batches, desc="Image batches", position=1, leave=False):
@@ -423,19 +430,18 @@ def main(args):
                             artist_tags = [t for t in artist_tags if t != tag] # Removed tag
                     tags[:] = artist_tags
 
-                    rating_letter = post.get("rating", None)
+                    rating_letter = None
+                    total_score = 0
 
                     for gen_tag in tags:
-                        db_rating = tag_rating_map.get(gen_tag)
-                        if db_rating:
-                            if rating_letter is None:
-                                rating_letter = db_rating
-                            elif rating_priority[db_rating] > rating_priority[rating_letter]:
-                                rating_letter = db_rating
-                        if rating_letter == 'e':
-                            break  # highest rating, no need to continue
+                        weight = tag_rating_map.get(gen_tag)
+                        if weight is not None:
+                            total_score += weight
 
-                    if not rating_letter:
+                    if total_score > 0:
+                        rating_letter = rating_from_score(total_score, args.smax, args.qmax)
+
+                    if rating_letter is None:
                         if "explicit" in post.get("rating", []):
                             rating_letter = "e"
                         elif "questionable" in post.get("rating", []):
@@ -482,8 +488,8 @@ def main(args):
                     thumb_src = Path(args.image_path) / "thumbnails" / rel_path
                     existing_thumbs.add(str(thumb_src))
 
+            tasks = []
             if args.thumbnail:
-                tasks = []
                 for image in batch:
                     rel_path = image.relative_to(args.image_path)
                     thumb_src = Path(args.image_path) / "thumbnails" / rel_path
@@ -517,5 +523,7 @@ if __name__ == "__main__":
     parser.add_argument("--check-existing", action="store_true",
                         help="Check if Shimmie already has image")
     parser.add_argument("--dbuser", default=None, help="Shimmie user for reading database")
+    parser.add_argument("--smax", default=50, help="Max value for safe rating.")
+    parser.add_argument("--qmax", default=250, help="Max value for q rating.")
 
     main(parser.parse_args())
