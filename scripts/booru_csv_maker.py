@@ -435,7 +435,12 @@ def main(args):
 
                     for gen_tag in tags:
                         weight = tag_rating_map.get(gen_tag)
-                        if weight is not None:
+                        if weight is None:
+                            continue
+                        if weight == 1:
+                            if total_score == 0:
+                                total_score = 1
+                        elif weight > 1:
                             total_score += weight
 
                     if total_score > 0:
