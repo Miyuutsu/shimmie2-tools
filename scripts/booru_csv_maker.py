@@ -287,6 +287,26 @@ def rating_from_score(total_score: int, safe_max, questionable_max) -> str:
         return 'q'          # questionable
     return 'e'              # explicit
 
+def dedup_prefixed(tags,
+                   prefixes=('artist', 'character', 'series', 'source')):
+    """
+    In‑place removal of plain tags that have a prefixed counterpart.
+    """
+    tag_set = set(tags)                 # fast look‑ups
+    to_remove = set()
+
+    for tag in tags:
+        if ':' in tag:                   # already prefixed → skip
+            continue
+        plain = tag
+        for pref in prefixes:
+            if f"{pref}:{plain}" in tag_set:
+                to_remove.add(plain)
+                break                    # one match is enough
+
+    # rewrite the original list (keeps external references valid)
+    tags[:] = [t for t in tags if t not in to_remove]
+
 # run it
 def main(args):
     """the main code"""
@@ -467,6 +487,7 @@ def main(args):
                         tags.append(f"source:{source}")
 
                     tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
+                    dedup_prefixed(tags)
                     tags = sorted(set(tags))
                     tag_str = ", ".join(tags)
 
@@ -528,7 +549,7 @@ if __name__ == "__main__":
     parser.add_argument("--check-existing", action="store_true",
                         help="Check if Shimmie already has image")
     parser.add_argument("--dbuser", default=None, help="Shimmie user for reading database")
-    parser.add_argument("--smax", default=50, help="Max value for safe rating.")
-    parser.add_argument("--qmax", default=250, help="Max value for q rating.")
+    parser.add_argument("--smax", default=90, help="Max value for safe rating.")
+    parser.add_argument("--qmax", default=150, help="Max value for q rating.")
 
     main(parser.parse_args())
