@@ -1,555 +1,309 @@
 """This is designed to help with batch importing into shimmie2"""
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from contextlib import contextmanager
 from pathlib import Path
 import argparse
 import csv
-import hashlib
 import html
-import io
 import re
 import sqlite3
-import subprocess
-import threading
 import tqdm
 
-import pyvips
 from PIL import Image
-from functions.utils import get_cpu_threads, convert_cdn_links, compute_md5
+from functions.utils import (get_cpu_threads, convert_cdn_links, rating_from_score, resolve_post,
+                             save_post_to_cache, process_webp, dedup_prefixed)
 
-RES = "512x512>"
-FTYPE = "webp"
-FBRES = 512
-
-#####
-#####
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
-MD5_RE = re.compile(r"[a-fA-F0-9]{32}")
 
-script_dir = Path(__file__).parent.resolve()
-db_dir = script_dir / ".." / "database"
-cdb_path = db_dir / "characters.db"
-adb_path = db_dir / "artists.db"
-db_path = db_dir / "tag_rating_dominant.db"
-cache = db_dir / "posts_cache.db"
-thread_local = threading.local()
+# Paths setup
+SCRIPT_DIR = Path(__file__).parent.resolve()
+DB_DIR = SCRIPT_DIR / ".." / "database"
+CDB_PATH = DB_DIR / "characters.db"
+ADB_PATH = DB_DIR / "artists.db"
+TAG_DB_PATH = DB_DIR / "tag_rating_dominant.db"
+CACHE_PATH = DB_DIR / "posts_cache.db"
 
-@contextmanager
-def get_cache_conn():
-    '''Use a connection cache'''
-    conn = getattr(thread_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(cache, check_same_thread=False)
-        thread_local.conn = conn
-    yield conn
+# Data Structures
+ResolutionData = namedtuple('ResolutionData', ['image', 'post', 'md5', 'px_hash', 'exists'])
+Mappings = namedtuple('Mappings', ['char', 'artist', 'rating'])
 
-def resolve_post(image: Path, shimmie_path, check_existing, dbuser) -> tuple[Path, dict | None]:
-    """Resolves the post information from the database or adds it to cache."""
-    with get_cache_conn() as conn:
-        cur = conn.cursor()
-        post = None
+def check_paths():
+    """Validates existence of required database files."""
+    if not CDB_PATH.is_file():
+        raise FileNotFoundError(f"Character DB not found: {CDB_PATH}")
+    if not ADB_PATH.is_file():
+        raise FileNotFoundError(f"Artist DB not found: {ADB_PATH}")
+    if not TAG_DB_PATH.is_file():
+        raise FileNotFoundError("Tag DB not found")
+    if not CACHE_PATH.is_file():
+        raise FileNotFoundError(f"Cache not found: {CACHE_PATH}")
 
-        # Try MD5 from filename
-        match = MD5_RE.search(image.stem)
-        md5 = match.group(0).lower() if match else compute_md5(image)
+def load_mappings():
+    """Loads character, artist, and tag rating mappings from SQLite."""
+    char_map = {}
+    with sqlite3.connect(CDB_PATH) as conn:
+        for row in conn.execute("SELECT * FROM data"):
+            if len(row) >= 2 and row[0].strip() and row[1].strip():
+                char_map[row[0].strip()] = row[1].strip()
 
-        if md5:
-            cur.execute("SELECT * FROM posts WHERE md5 = ?", (md5,))
-            row = cur.fetchone()
-            if row:
-                post = row_to_post_dict(row)
-                cur.execute("SELECT pixel_hash FROM posts WHERE md5 = ?", (md5,))
-                result = cur.fetchone()
-                if result:
-                    px_hash = result[0]  # Get pixel hash from the db
-                else:
-                    px_hash = compute_danbooru_pixel_hash(image)  # Calculate if needed
+    artist_map = {}
+    with sqlite3.connect(ADB_PATH) as conn:
+        for row in conn.execute("SELECT * FROM data"):
+            if len(row) >= 2 and row[0].strip() and row[1].strip():
+                artist_map[row[0].strip()] = row[1].strip()
 
-        if not post:
-            px_hash = compute_danbooru_pixel_hash(image)
-            cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
-            row = cur.fetchone()
-            if row:
-                post = row_to_post_dict(row)
-            else:
-                add_post_to_cache(md5, px_hash)
-                cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
-                row = cur.fetchone()
-                post = row_to_post_dict(row)
+    rating_map = {}
+    with sqlite3.connect(TAG_DB_PATH) as conn:
+        for row in conn.execute("SELECT * FROM dominant_tag_ratings"):
+            if len(row) >= 2:
+                rating_map[row[0].strip()] = row[1]
 
-        exists = False
-        if check_existing and shimmie_path:
-            try:
-                cmd = [
-                    "php",
-                    str(Path(shimmie_path) / "index.php"),
-                    "-u", dbuser or "dbuser",
-                    "search", f"md5:{md5}"
-                ]
+    print(f"[INFO] Loaded {len(char_map):,} chars, {len(artist_map):,} artists.")
+    return Mappings(char_map, artist_map, rating_map)
 
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,  # don't raise exceptions, handle manually
-                    cwd=shimmie_path
-                )
-
-                if md5 in result.stdout:
-                    exists = True
-
-            except Exception as e:# pylint: disable=broad-exception-caught
-                # Catch all non-system exceptions cleanly
-                exists = "error"
-                print(f"Error checking Shimmie2 database! ({type(e).__name__}: {e})")
-                print(cmd)
-
-
-        return image, post, md5, px_hash, exists
-
-# used with resolve_post to ensure everything goes smoothly
-def add_post_to_cache(md5, px_hash):
-    """For adding new images to cache"""
-    with get_cache_conn() as conn:
-        cur = conn.cursor()
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS posts (
-                md5 TEXT PRIMARY KEY,
-                pixel_hash TEXT,
-                rating TEXT,
-                source TEXT,
-                general TEXT,
-                character TEXT,
-                artist TEXT,
-                series TEXT
-            )
-        """)
-
-        cur.execute("""
-            INSERT OR REPLACE INTO posts
-            (md5, pixel_hash, rating, source, general, character, artist, series)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            md5, px_hash, "?", "",
-            "", "", "", ""
-        ))
-
-        conn.commit()
-
-def parse_tags(tags: list[str]) -> tuple[str, str, str, str, str]:
-    """Parses tags"""
-    tag_lists = {'general': [], 'character': [], 'artist': [], 'series': []}
-    source_tag = None
-    for tag in tags:
-        prefix, _, value = tag.partition(':')
-        if prefix in tag_lists:
-            tag_lists[prefix].append(value)
-        elif prefix == "source":
-            source_tag = value
-        else:
-            tag_lists["general"].append(tag)
-    return (
-        ",".join(tag_lists["general"]) or "tagme",
-        ",".join(tag_lists["character"]),
-        ",".join(tag_lists["artist"]),
-        ",".join(tag_lists["series"]),
-        source_tag or ""
-    )
-
-def save_post_to_cache(rating_letter, tags: list[str], md5, px_hash):
-    """For updating the cache"""
-    with get_cache_conn() as conn:
-        cur = conn.cursor()
-
-        general, character, artist, series, source = parse_tags(tags)
-        rating = rating_letter
-
-        # Fetch existing row, if any
-        cur.execute("""
-            SELECT rating, source, general, character, artist, series
-            FROM posts WHERE md5 = ?""", (md5,))
-        existing = cur.fetchone()
-
-        # Only update if something differs
-        new_data = (rating, source, general, character, artist, series)
-        if existing is None or any(existing[i] != new_data[i] for i in range(len(new_data))):
-            cur.execute("""
-                INSERT OR REPLACE INTO posts
-                (md5, pixel_hash, rating, source, general, character, artist, series)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (md5, px_hash, *new_data))
-        conn.commit()
-
-def row_to_post_dict(row: tuple) -> dict:
-    """This does something with the csv, I don't remember what right now"""
-    def split_field(field):
-        if not field:
-            return []
-        # split on comma, strip whitespace and ignore empty pieces
-        return [part.strip() for part in field.split(",") if part.strip()]
-
-    return {
-        "md5": row[0],
-        "pixel_hash": row[1],
-        "rating": row[2],
-        "source": row[3],
-        "general": split_field(row[4]),
-        "character": split_field(row[5]),
-        "artist": split_field(row[6]),
-        "series": split_field(row[7]),
-    }
-
-
-def compute_danbooru_pixel_hash(image_path: Path) -> str:
-    """because the original database contained pixel hash I kept this"""
-    image = pyvips.Image.new_from_file(str(image_path), access="sequential")
-
-    # Match Danbooru's ICC transform and color space normalization
-    if image.get_typeof("icc-profile-data") != 0:
-        image = image.icc_transform("srgb")
-    if image.interpretation != "srgb":
-        image = image.colourspace("srgb")
-    if not image.hasalpha():
-        image = image.addalpha()
-
-    # Write raw P7 header
-    header = (
-        b"P7\n"
-        + f"WIDTH {image.width}\n".encode()
-        + f"HEIGHT {image.height}\n".encode()
-        + f"DEPTH {image.bands}\n".encode()
-        + b"MAXVAL 255\n"
-        + b"TUPLTYPE RGB_ALPHA\n"
-        + b"ENDHDR\n"
-    )
-
-    # Get raw RGBA pixel bytes in memory
-    raw_bytes = image.write_to_memory()
-
-    # Concatenate and hash
-    buffer = header + raw_bytes
-    return hashlib.md5(buffer).hexdigest()
-
-def process_webp(task):
-    '''for some reason this was necessary'''
-    src_path, dst_path = task
-    try:
-        convert_to_webp(src_path, dst_path)
-    except subprocess.CalledProcessError:
-        # ImageMagick failed — fallback to in-memory Pillow resize
-        try:
-            fallback_to_webp(src_path, dst_path)
-        except Exception as e: # pylint: disable=broad-exception-caught
-            # Catch all non-system exceptions cleanly
-            print(f"Error creating thumbnail of {src_path}! ({type(e).__name__}: {e})")
-
-def convert_to_webp(src_path: Path, dst_path: Path):
-    """Convert images using ImageMagick."""
-    src_path = Path(src_path)
-    dst_path = Path(dst_path)
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-
-    cmd = [
-        "magick",
-        str(src_path),
-        "-resize", RES,
-        "-quality", "92",
-        f"{FTYPE}:{dst_path}"
+def get_sidecar_tags(image_path):
+    """Scans for .txt files associated with the image and parses tags."""
+    extra_tags = []
+    txt_candidates = [
+        image_path.with_suffix(".txt"),
+        image_path.with_name(image_path.name + ".txt")
     ]
 
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-def fallback_to_webp(src_path: Path, dst_path: Path):
-    """In-memory fallback using Pillow."""
-    dst_path = Path(dst_path)
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(src_path, "rb") as f:
-        data = f.read()
-
-    # Load via Pillow (lenient zlib)
-    im = Image.open(io.BytesIO(data))
-    im.load()  # force full decode in-memory
-
-    # Resize while preserving aspect
-    im.thumbnail((FBRES, FBRES), Image.Resampling.LANCZOS)
-
-    # Save to WebP
-    im.save(dst_path, FTYPE, quality=92, method=6)
-
-def rating_from_score(total_score: int, safe_max, questionable_max) -> str:
-    """Map a numeric total to the rating letter."""
-    if total_score <= safe_max:
-        return 's'          # safe
-    if total_score <= questionable_max:
-        return 'q'          # questionable
-    return 'e'              # explicit
-
-def dedup_prefixed(tags,
-                   prefixes=('artist', 'character', 'series', 'source')):
-    """
-    In‑place removal of plain tags that have a prefixed counterpart.
-    """
-    tag_set = set(tags)                 # fast look‑ups
-    to_remove = set()
-
-    for tag in tags:
-        if ':' in tag:                   # already prefixed → skip
+    for txt_path in txt_candidates:
+        if not txt_path.is_file():
             continue
-        plain = tag
-        for pref in prefixes:
-            if f"{pref}:{plain}" in tag_set:
-                to_remove.add(plain)
-                break                    # one match is enough
 
-    # rewrite the original list (keeps external references valid)
-    tags[:] = [t for t in tags if t not in to_remove]
+        with txt_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = html.unescape(line.strip())
+                if not line or line.startswith("#"):
+                    continue
+                parts = [t.strip() for t in re.split(r"[,;]", line) if t.strip()]
+                extra_tags.extend(re.sub(r"\s+", "_", t) for t in parts if t)
+    return extra_tags
 
-# run it
-def main(args):
-    """the main code"""
+def enrich_tags(initial_tags, mappings):
+    """Adds prefixes (series:, character:, artist:) based on mappings."""
+    # First pass: Add inferred tags, then remove the bare tag if it was successfully prefixed
+    temp_tags = []
+    for tag in initial_tags:
+        temp_tags.append(tag)
+        if tag in mappings.char:
+            inferred = mappings.char[tag]
+            temp_tags.append(f"character:{tag}")
+            if isinstance(inferred, (list, tuple, set)):
+                temp_tags.extend(f"series:{t}" for t in inferred)
+            else:
+                temp_tags.append(f"series:{inferred}")
+
+    # Second pass: remove bare tags that were identified as characters
+    stage_1 = [t for t in temp_tags if t not in mappings.char]
+
+    # Third pass: Handle artists
+    final_tags = []
+    for tag in stage_1:
+        final_tags.append(tag)
+        if tag in mappings.artist:
+            final_tags.append(f"artist:{tag}")
+
+    return [t for t in final_tags if t not in mappings.artist]
+
+def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
+    """Determines rating based on tag weights or fallback to database if available"""
+    total_score = 0
+    for tag in tags:
+        weight = rating_map.get(tag, 0)
+        if weight > 1:
+            total_score += weight
+        elif weight == 1 and total_score == 0:
+            # Matches original logic: a weight of 1 ensures the score is at least 1
+            total_score = 1
+
+    rating_letter = None
+    if total_score > 0:
+        rating_letter = rating_from_score(total_score, smax, qmax)
+
+    if rating_letter is None:
+        # Check database fallbacks
+        if "explicit" in post_rating_list:
+            rating_letter = "e"
+        elif any(r in post_rating_list for r in ["questionable", "sensitive"]):
+            rating_letter = "q"
+        elif "general" in post_rating_list:
+            rating_letter = "s"
+        else:
+            rating_letter = "?"
+
+    return "s" if rating_letter == "g" else rating_letter
+
+def compile_metadata(image, post, mappings, args):
+    """Generates the final tag string and rating letter."""
+    tags = []
+    tags.extend(post.get("general", []))
+    tags.extend(f"character:{t}" for t in post.get("character", []))
+    tags.extend(f"series:{t}" for t in post.get("series", []))
+    tags.extend(f"artist:{t}" for t in post.get("artist", []))
+    tags.extend(get_sidecar_tags(image))
+
+    tags = enrich_tags(tags, mappings)
+
+    if post.get("source"):
+        tags.append(f"source:{convert_cdn_links(post['source'])}")
+
+    rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
+
+    tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
+    dedup_prefixed(tags)
+    return ", ".join(sorted(set(tags))), rating, tags
+
+def process_image_result(image, res_data, args, mappings):
+    """
+    Processes a single resolved image.
+    Args:
+        image (Path): Path to image.
+        res_data (ResolutionData): NamedTuple (post, md5, px_hash, exists).
+        args (Namespace): CLI arguments.
+        mappings (Mappings): NamedTuple (char, artist, rating).
+    Returns:
+        tuple: (csv_row_list, thumb_path_str_or_None)
+    """
+    if res_data.exists == "error":
+        print(f"{image} skipped due to error!")
+        return None, None
+
+    rel_path = image.relative_to(args.image_path)
+    thumb_path = Path(args.prefix) / "thumbnails" / rel_path if args.thumbnail else ""
+
+    # Check if exists in DB (skip metadata gen if so)
+    if res_data.exists:
+        thumb_file = Path(args.image_path) / "thumbnails" / rel_path
+        return None, str(thumb_file) if args.thumbnail else None
+
+    # New Image Logic
+    tag_str, rating, tag_list = compile_metadata(image, res_data.post, mappings, args)
+
+    if args.update_cache:
+        save_post_to_cache(rating, tag_list, res_data.md5, res_data.px_hash, CACHE_PATH)
+
+    row = [
+        f"{args.prefix}/{rel_path}",
+        tag_str,
+        "",
+        rating,
+        str(thumb_path) if args.thumbnail else '""'
+    ]
+    return row, None
+
+def collect_images(path, batch_size):
+    """Finds all valid images and chunks them."""
+    files = Path(path).rglob("*")
+    images = [
+        f for f in files
+        if f.suffix.lower() in ALLOWED_EXTS and f.is_file()
+        and "thumbnails" not in f.relative_to(path).parts
+    ]
+    batches = [images[i:i + batch_size] for i in range(0, len(images), batch_size)]
+    return images, batches
+
+def print_summary(args):
+    """Prints run configuration."""
     print("=== Tagger Run Summary ===")
     print(f"📁  Input:           {args.image_path}")
-    print(f"📥  Input Cache:     {cache}")
+    print(f"📥  Input Cache:     {CACHE_PATH}")
     print(f"🗄️  Update Cache:    {args.update_cache}")
     print(f"📦  Batch Size:      {args.batch}")
     print(f"🧵  Threads:         {args.threads}")
     print(f"📂  Prefix:          {args.prefix}")
     print()
 
-    if not Path(cdb_path).is_file:
-        raise FileNotFoundError(f"Character DB not found: {cdb_path}")
-
-    if not Path(adb_path).is_file:
-        raise FileNotFoundError(f"Artist DB not found: {cdb_path}")
-
-    if not Path(cache).is_file:
-        raise FileNotFoundError(f"Cache not found: {cache}")
-
-    if not Path(args.image_path).is_dir:
-        raise FileNotFoundError(f"Path not found: {args.image_path}")
-
-    if not Path(db_path).is_file:
-        raise FileNotFoundError("Tag DB not found")
-
-    character_series_map = {}
-    with sqlite3.connect(cdb_path) as cdb_conn:
-        cdb_cursor = cdb_conn.cursor()
-        cdb_cursor.execute("SELECT * FROM data")
-        rows = cdb_cursor.fetchall()
-        for row in rows:
-            if len(row) >= 2:
-                char, series = row[0].strip(), row[1].strip()
-                if char and series:
-                    character_series_map[char] = series
-        print(f"[INFO] Loaded {len(character_series_map):,} character→series mappings from SQLite.")
-
-    artist_prefix_map = {}
-    with sqlite3.connect(adb_path) as adb_conn:
-        adb_cursor = adb_conn.cursor()
-        adb_cursor.execute("SELECT * FROM data")
-        rows = adb_cursor.fetchall()
-        for row in rows:
-            if len(row) >= 2:
-                artist, partist = row[0].strip(), row[1].strip()
-                if artist and partist:
-                    artist_prefix_map[artist] = partist
-        print(f"[INFO] Loaded {len(artist_prefix_map):,} artist prefix mappings from SQLite.")
-
-    tag_rating_map = {}
-    with sqlite3.connect(db_path) as tag_db_conn:
-        tag_db_cursor = tag_db_conn.cursor()
-        tag_db_cursor.execute("SELECT * FROM dominant_tag_ratings")
-        rows = tag_db_cursor.fetchall()
-        for row in rows:
-            if len(row) >= 2:
-                tag_rating_map[row[0].strip()] = row[1]
-
-    files = Path(args.image_path).rglob("*")
-    images = [
-        f for f in files
-        if f.suffix.lower() in ALLOWED_EXTS and f.is_file()
-        and "thumbnails" not in f.relative_to(args.image_path).parts
-    ]
-    batches = [images[i:i + args.batch] for i in range(0, len(images), args.batch)]
-
-    existing_thumbs = set()
-    csv_rows = []
-    for batch in tqdm.tqdm(batches, desc="Image batches", position=1, leave=False):
-        # === Multi-threaded post resolution ===
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            results = list(tqdm.tqdm(
-                executor.map(
-                    lambda img:
-                        resolve_post(img, args.shimmie_path, args.check_existing, args.dbuser),
-                        batch
-                ),
-                total=len(batch),
-                desc="Resolving posts",
-                position=2,
-                leave=False
-            ))
-
-            for image, post, md5, px_hash, exists in results:
-                if not exists:
-                    rel_path = image.relative_to(args.image_path)
-                    tags = []
-                    tags.extend(post.get("general", []))
-                    tags.extend(f"character:{t}" for t in post.get("character", []))
-                    tags.extend(f"series:{t}" for t in post.get("series", []))
-                    tags.extend(f"artist:{t}" for t in post.get("artist", []))
-
-                    txt_candidates = [
-                        image.with_suffix(".txt"),
-                        image.with_name(image.name + ".txt")
-                    ]
-                    for txt_path in txt_candidates:
-                        if txt_path.is_file():
-                            extra_tags = []
-                            with txt_path.open("r", encoding="utf-8") as f:
-                                for line in f:
-                                    line = line.strip()
-                                    if not line or line.startswith("#"):
-                                        continue
-                                    line = html.unescape(line)
-                                    parts = [
-                                        tag.strip()
-                                        for tag in re.split(r"[,;]", line)
-                                        if tag.strip()
-                                    ]
-                                    # Split comma-separated tags
-                                    for tag in parts:
-                                        tag = re.sub(r"\s+", "_", tag)
-                                        if tag:
-                                            extra_tags.append(tag)
-                            tags.extend(extra_tags)
-                    new_tags = []
-                    for tag in tags:
-                        new_tags.append(tag)
-                        if tag in character_series_map:
-                            inferred_series = character_series_map[tag]
-                            new_tags.append(f"character:{tag}")
-
-                            if isinstance(inferred_series, (list, tuple, set)):
-                                for t in inferred_series:
-                                    new_tags.append(f"series:{t}")
-                            else:
-                                new_tags.append(f"series:{inferred_series}")
-
-                            new_tags = [t for t in new_tags if t != tag] # Removed tag
-                    tags[:] = new_tags # at the end
-
-                    artist_tags = []
-                    for tag in tags:
-                        artist_tags.append(tag)
-                        if tag in artist_prefix_map:
-                            artist_tags.append(f"artist:{tag}")
-
-                            artist_tags = [t for t in artist_tags if t != tag] # Removed tag
-                    tags[:] = artist_tags
-
-                    rating_letter = None
-                    total_score = 0
-
-                    for gen_tag in tags:
-                        weight = tag_rating_map.get(gen_tag)
-                        if weight is None:
-                            continue
-                        if weight == 1:
-                            if total_score == 0:
-                                total_score = 1
-                        elif weight > 1:
-                            total_score += weight
-
-                    if total_score > 0:
-                        rating_letter = rating_from_score(total_score, args.smax, args.qmax)
-
-                    if rating_letter is None:
-                        if "explicit" in post.get("rating", []):
-                            rating_letter = "e"
-                        elif "questionable" in post.get("rating", []):
-                            rating_letter = "q"
-                        elif "sensitive" in post.get("rating", []):
-                            rating_letter = "q"
-                        elif "general" in post.get("rating", []):
-                            rating_letter = "s"
-                        else:
-                            rating_letter = "?"
-
-                    if rating_letter == "g":
-                        rating_letter = "s"
-
-                    if post.get("source"):
-                        source = post["source"]
-                        source = convert_cdn_links(source)
-                        tags.append(f"source:{source}")
-
-                    tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
-                    dedup_prefixed(tags)
-                    tags = sorted(set(tags))
-                    tag_str = ", ".join(tags)
-
-                    if args.update_cache:
-                        save_post_to_cache(rating_letter, tags, md5, px_hash)
-
-                    rel_path = image.relative_to(args.image_path)
-                    if args.thumbnail:
-                        thumbpath = Path(args.prefix) / "thumbnails" / rel_path
-
-                    csv_rows.append([
-                        f"{args.prefix}/{rel_path}",
-                        tag_str,
-                        "",
-                        rating_letter,
-                        str(thumbpath) if args.thumbnail else '""'
-                    ])
-
-                elif exists == "error":
-                    print(f"{image} skipped due to error!")
-
-                if exists and args.thumbnail:
-                    rel_path = image.relative_to(args.image_path)
-                    thumb_src = Path(args.image_path) / "thumbnails" / rel_path
-                    existing_thumbs.add(str(thumb_src))
-
-            tasks = []
-            if args.thumbnail:
-                for image in batch:
-                    rel_path = image.relative_to(args.image_path)
-                    thumb_src = Path(args.image_path) / "thumbnails" / rel_path
-                    if str(thumb_src) not in existing_thumbs and not thumb_src.is_file():
-                        tasks.append((image, thumb_src))
-            if tasks:
-                with ProcessPoolExecutor(max_workers=args.threads) as imgpro:
-                    list(imgpro.map(process_webp, tasks))
-
-    csv_path = Path(args.image_path)
-    csv_path =  csv_path / "import.csv"
+def write_output(base_path, rows):
+    """Writes the CSV file."""
+    csv_path = Path(base_path) / "import.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-        writer.writerows(csv_rows)
+        writer.writerows(rows)
     print(f"[✓] Shimmie CSV written to {csv_path}")
-    print(f"\n[✓] Processed {len(images)} image(s) across {len(batches)} batch(es).")
 
+def resolve_batch_metadata(batch, args):
+    """Handles the IO-bound task of resolving posts for a batch."""
+    if args.skip_existing and not args.spath:
+        raise ValueError("--path must be provided when using --skip-existing.")
+
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        resolver = executor.map(
+            lambda img: resolve_post(img, args.spath, args.skip_existing,
+                                     args.dbuser, CACHE_PATH),
+            batch
+        )
+        return list(tqdm.tqdm(resolver, total=len(batch),
+                              desc="Resolving", position=2, leave=False))
+
+def generate_thumbnails(tasks, threads):
+    """Handles the CPU-bound task of processing images."""
+    if not tasks:
+        return
+    with ProcessPoolExecutor(max_workers=threads) as imgpro:
+        list(imgpro.map(process_webp, tasks))
+
+def process_batches(batches, mappings, args):
+    """
+    Handles the batch processing logic.
+    """
+    csv_rows = []
+    existing_thumbs = set()
+
+    for batch in tqdm.tqdm(batches, desc="Image batches", position=1, leave=False):
+        results = resolve_batch_metadata(batch, args)
+        thumb_tasks = []
+
+        for img, res_tuple in zip(batch, results):
+            res_data = ResolutionData(*res_tuple)
+            row, thumb_key = process_image_result(img, res_data, args, mappings)
+
+            if thumb_key:
+                existing_thumbs.add(thumb_key)
+
+            if row:
+                csv_rows.append(row)
+                if args.thumbnail:
+                    t_src = Path(args.image_path)/"thumbnails"/img.relative_to(args.image_path)
+                    if str(t_src) not in existing_thumbs and not t_src.is_file():
+                        thumb_tasks.append((img, t_src))
+
+        generate_thumbnails(thumb_tasks, args.threads)
+
+    return csv_rows
+
+def main(args):
+    """The main execution flow."""
+    check_paths()
+    if not Path(args.image_path).is_dir():
+        raise FileNotFoundError(f"Path not found: {args.image_path}")
+
+    print_summary(args)
+    mappings = load_mappings()
+    images, batches = collect_images(args.image_path, args.batch)
+
+    # Process batches and get results
+    csv_rows = process_batches(batches, mappings, args)
+    csv_rows.sort()
+
+    write_output(args.image_path, csv_rows)
+    print(f"\n[✓] Processed {len(images)} image(s) across {len(batches)} batch(es).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Creates a CSV suitable for input into Shimmie2.")
-    parser.add_argument("--update-cache", action="store_true")
+    parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
     parser.add_argument("--images", dest="image_path", default="", help="Path to images")
-    parser.add_argument("--prefix", default="import",
-                        help="What directory name will be used inside Shimmie directory.")
-    parser.add_argument("--batch", type=int, default=20,
-                        help="How many images should be processed simultaneously (default is 20)")
-    parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2,
-                        help="Number of threads to use (default half)")
-    parser.add_argument("--thumbnail", action="store_true")
-    parser.add_argument("--shimmie-path", default="", help="Path to shimmie root")
-    parser.add_argument("--check-existing", action="store_true",
-                        help="Check if Shimmie already has image")
-    parser.add_argument("--dbuser", default=None, help="Shimmie user for reading database")
-    parser.add_argument("--smax", default=90, help="Max value for safe rating.")
-    parser.add_argument("--qmax", default=150, help="Max value for q rating.")
+    parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
+    parser.add_argument("--batch", type=int, default=20, help="Batch size")
+    parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Thread count")
+    parser.add_argument("--thumbnail", action="store_true", help="Generate thumbnails")
+    parser.add_argument("--path", dest="spath", default="", help="Path to shimmie root")
+    parser.add_argument("--skip-existing", action="store_true", help="Check Shimmie for image")
+    parser.add_argument("--dbuser", default=None, help="Shimmie DB user")
+    parser.add_argument("--smax", default=70, help="Max safe rating.")
+    parser.add_argument("--qmax", default=250, help="Max questionable rating.")
 
     main(parser.parse_args())
