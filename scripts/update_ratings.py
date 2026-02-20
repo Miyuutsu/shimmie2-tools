@@ -93,29 +93,30 @@ if __name__ == "__main__":
         description="Auto‑correct image ratings in shimmiedb using the numeric weight system"
     )
     parser.add_argument(
-        "-u", "--user",
-        type=str,
-        default=None,
-        help="PostgreSQL user (default: None)",
-    )
-    parser.add_argument(
         "--db",
         type=str,
         default="shimmiedb",
         help="PostgreSQL database name (default: shimmiedb)",
     )
     parser.add_argument(
-        "-s", "--smax",
-        type=int,
-        default=90,
-        help="Maximum total_score that still maps to a safe rating (default: 90)",
-    )
-    parser.add_argument(
         "-q", "--qmax",
         type=int,
-        default=150,
-        help="Maximum total_score that maps to a questionable rating (default: 150)",
+        default=250,
+        help="Max questionable rating.",
     )
+    parser.add_argument(
+        "-s", "--smax",
+        type=int,
+        default=50,
+        help="Max safe rating.",
+    )
+    parser.add_argument(
+        "-u", "--user",
+        type=str,
+        required=True,
+        help="PostgreSQL user (default: None)",
+    )
+
 
     parsed_args = parser.parse_args()
     if parsed_args.user is None:

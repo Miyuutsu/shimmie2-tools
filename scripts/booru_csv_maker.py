@@ -227,9 +227,6 @@ def write_output(base_path, rows):
 
 def resolve_batch_metadata(batch, args):
     """Handles the IO-bound task of resolving posts for a batch."""
-    if args.skip_existing and not args.spath:
-        raise ValueError("--path must be provided when using --skip-existing.")
-
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         resolver = executor.map(
             lambda img: resolve_post(img, args.spath, args.skip_existing,
@@ -294,16 +291,20 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Creates a CSV suitable for input into Shimmie2.")
-    parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
-    parser.add_argument("--images", dest="image_path", default="", help="Path to images")
-    parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
     parser.add_argument("--batch", type=int, default=20, help="Batch size")
+    parser.add_argument("--dbuser", default=None, help="Shimmie DB user")
+    parser.add_argument("--images", dest="image_path", required=True, help="Path to images")
+    parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
+    parser.add_argument("--qmax", default=250, help="Max questionable rating.")
+    parser.add_argument("--skip-existing", action="store_true", help="Check Shimmie for image")
+    parser.add_argument("--smax", default=50, help="Max safe rating.")
+    parser.add_argument("--spath", help="Path to shimmie root")
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Thread count")
     parser.add_argument("--thumbnail", action="store_true", help="Generate thumbnails")
-    parser.add_argument("--path", dest="spath", default="", help="Path to shimmie root")
-    parser.add_argument("--skip-existing", action="store_true", help="Check Shimmie for image")
-    parser.add_argument("--dbuser", default=None, help="Shimmie DB user")
-    parser.add_argument("--smax", default=70, help="Max safe rating.")
-    parser.add_argument("--qmax", default=250, help="Max questionable rating.")
+    parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
 
-    main(parser.parse_args())
+    preargs = parser.parse_args()
+    if preargs.skip_existing and not preargs.spath:
+        parser.error("--spath is required when --skip-existing is set.")
+
+    main(preargs)
