@@ -11,7 +11,7 @@ import tqdm
 
 from PIL import Image
 from functions.utils import (get_cpu_threads, convert_cdn_links, rating_from_score, resolve_post,
-                             save_post_to_cache, process_webp, dedup_prefixed)
+                             save_post_to_cache, process_webp, apply_tag_curation)
 
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
@@ -137,6 +137,36 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
 
     return "s" if rating_letter == "g" else rating_letter
 
+def clean_resolution_tags(tags, image_path):
+    """Calculates resolution tags based on pixel count and dimensions."""
+    res_group = {"lowres", "highres", "absurdres",
+                 "incredibly_absurdres", "wide_image", "tall_image"}
+    res_tags = [t for t in tags if not t in res_group]
+
+    with Image.open(image_path) as img:
+        width, height = img.size
+        pixels = width * height
+        ratio = width / height
+
+    # Dimension Check
+    if width > 10000 or height > 10000:
+        res_tags.append("incredibly_absurdres")
+
+    # Pixel Count Checks
+    if pixels >= 7680000:
+        res_tags.append("absurdres")
+    elif pixels >= 3686400:
+        res_tags.append("highres")
+    elif pixels <= 589824:
+        res_tags.append("lowres")
+
+    if ratio >= 4.0:
+        res_tags.append("wide_image")
+    elif ratio <= 0.25:
+        res_tags.append("tall_image")
+
+    return res_tags
+
 def compile_metadata(image, post, mappings, args):
     """Generates the final tag string and rating letter."""
     tags = []
@@ -146,15 +176,19 @@ def compile_metadata(image, post, mappings, args):
     tags.extend(f"artist:{t}" for t in post.get("artist", []))
     tags.extend(get_sidecar_tags(image))
 
-    tags = enrich_tags(tags, mappings)
+    tags = clean_resolution_tags(tags, image)
 
     if post.get("source"):
         tags.append(f"source:{convert_cdn_links(post['source'])}")
 
     rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
 
+    # Clean whitespace and strip redundant _series) suffixes
     tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
-    dedup_prefixed(tags)
+    tags = [re.sub(r'_series\)$', ')', tag.strip()) for tag in tags]
+
+    apply_tag_curation(tags)
+
     return ", ".join(sorted(set(tags))), rating, tags
 
 def process_image_result(image, res_data, args, mappings):

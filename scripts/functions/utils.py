@@ -354,13 +354,34 @@ def fallback_to_webp(src_path: Path, dst_path: Path):
     # Save to WebP
     im.save(dst_path, ftype, quality=92, method=6)
 
-def dedup_prefixed(tags,
-                   prefixes=('artist', 'character', 'series', 'source')):
+def apply_tag_curation(tags):
     """
-    In‑place removal of plain tags that have a prefixed counterpart.
+    In‑place fixing of tags that need messing.
     """
-    tag_set = set(tags)                 # fast look‑ups
+    prefixes=('artist', 'character', 'series', 'source')
+    master_merge_list = {
+        "series:pokemon_(game)": "series:pokemon",
+        "series:pokemon_(anime)": "series:pokemon",
+        "series:pokemon_emerald": "series:pokemon_rse",
+        "character:samurai_(7th_dragon_series)": "character:samurai_(7th_dragon)",
+        "samurai_(7th_dragon)": "character:samurai_(7th_dragon)"
+        # You can keep adding your custom merges here
+        # just make sure the last one has no comma
+    }
+
     to_remove = set()
+    cleaned_tags = []
+
+    for tag in tags:
+        if tag in master_merge_list:
+            cleaned_tags.append(master_merge_list[tag])
+            to_remove.add(tag)
+
+    tags.extend(cleaned_tags)
+    tags[:] = [t for t in tags if t not in to_remove]
+
+    tag_set = set(tags)
+    to_remove.clear()
 
     for tag in tags:
         if ':' in tag:                   # already prefixed → skip
@@ -373,3 +394,7 @@ def dedup_prefixed(tags,
 
     # rewrite the original list (keeps external references valid)
     tags[:] = [t for t in tags if t not in to_remove]
+    if "tagme" in tags:
+        tags.remove("tagme")
+    if len(set(tags)) < 15:
+        tags.append("tagme")
