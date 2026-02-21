@@ -79,16 +79,30 @@ def convert_cdn_links(image_url):
         r"(?:_(?:[\w]+_)?p\d{1,3})?"
         r"\.(?:jpg|jpeg|png|webp)"
     )
-
-    fantia_pattern = r"c\.fantia\.jp/uploads/post/file/(\d+)/"
     pixiv_match = re.search(pixiv_pattern, image_url)
     if pixiv_match:
         artwork_id = pixiv_match.group(1)
         return f"https://www.pixiv.net/en/artworks/{artwork_id}"
+
+    fantia_pattern = r"c\.fantia\.jp/uploads/post/file/(\d+)/"
     fantia_match = re.search(fantia_pattern, image_url)
     if fantia_match:
         post_id = fantia_match.group(1)
         return f"https://fantia.jp/posts/{post_id}"
+
+    tumblr_pattern = r"([\w-]+)\.tumblr\.com/post/(\d+)"
+    tumblr_match = re.search(tumblr_pattern, image_url)
+    if tumblr_match:
+        username = tumblr_match.group(1)
+        post_id = tumblr_match.group(2)
+        return f"https://{username}.tumblr.com/post/{post_id}"
+
+    yandere_pattern = r"files\.yande\.re/.*?/yande\.re(?:%20|\s|\+)(\d+)"
+    yandere_match = re.search(yandere_pattern, image_url)
+
+    if yandere_match:
+        post_id = yandere_match.group(1)
+        return f"https://yande.re/post/show/{post_id}"
 
     return image_url
 
@@ -358,43 +372,56 @@ def apply_tag_curation(tags):
     """
     In‑place fixing of tags that need messing.
     """
-    prefixes=('artist', 'character', 'series', 'source')
+    prefixes = ('artist:', 'character:', 'series:', 'source:')
     master_merge_list = {
-        "series:pokemon_(game)": "series:pokemon",
-        "series:pokemon_(anime)": "series:pokemon",
-        "series:pokemon_emerald": "series:pokemon_rse",
         "character:samurai_(7th_dragon_series)": "character:samurai_(7th_dragon)",
-        "samurai_(7th_dragon)": "character:samurai_(7th_dragon)"
+        "deep-blue_series": "series:deep-blue",
+        "samurai_(7th_dragon)": "character:samurai_(7th_dragon)",
+        "series:fate_(series)": "series:fate",
+        "series:pokemon_(anime)": "series:pokemon",
+        "series:pokemon_(classic_anime)": "series:pokemon",
+        "series:pokemon_(game)": "series:pokemon",
+        "series:pokemon_bw_(anime)": "series:pokemon_bw",
+        "series:pokemon_dppt_(anime)": "series:pokemon_dppt",
+        "series:pokemon_emerald": "series:pokemon_rse",
+        "series:pokemon_rse_(anime)": "series:pokemon_rse",
+        "series:pokemon_sm_(anime)": "series:pokemon_sm",
+        "series:pokemon_xy_(anime)": "series:pokemon_xy",
+        "series:x-men:_the_animated_series": "series:x-men",
+        "x-men:_the_animated_series": "series:x-men",
+        "x-men_film_series": "series:x-men"
         # You can keep adding your custom merges here
         # just make sure the last one has no comma
     }
 
-    to_remove = set()
-    cleaned_tags = []
+    original_set = set(tags)
+    step1_tags = []
 
     for tag in tags:
-        if tag in master_merge_list:
-            cleaned_tags.append(master_merge_list[tag])
-            to_remove.add(tag)
+        if ':' not in tag:
+            if any(f"{p}{tag}" in original_set for p in prefixes):
+                continue
+        step1_tags.append(tag)
 
-    tags.extend(cleaned_tags)
-    tags[:] = [t for t in tags if t not in to_remove]
+    step2_tags = [master_merge_list.get(tag, tag) for tag in step1_tags]
+    merged_set = set(step2_tags)
+    step3_tags = []
 
-    tag_set = set(tags)
-    to_remove.clear()
+    for tag in step2_tags:
+        if ':' not in tag:
+            if any(f"{p}{tag}" in merged_set for p in prefixes):
+                continue
+        step3_tags.append(tag)
 
-    for tag in tags:
-        if ':' in tag:                   # already prefixed → skip
-            continue
-        plain = tag
-        for pref in prefixes:
-            if f"{pref}:{plain}" in tag_set:
-                to_remove.add(plain)
-                break                    # one match is enough
+    step3_set = set(step3_tags)
+    step4_tags = []
+    for tag in step3_tags:
+        if tag.endswith("_(cosplay)"):
+            base_name = tag[:-10]
 
-    # rewrite the original list (keeps external references valid)
-    tags[:] = [t for t in tags if t not in to_remove]
-    if "tagme" in tags:
-        tags.remove("tagme")
-    if len(set(tags)) < 15:
-        tags.append("tagme")
+            if f"character:{base_name}" in step3_set:
+                step4_tags.append("cosplay")
+                continue
+        step4_tags.append(tag)
+
+    tags[:] = [t for t in step4_tags if t != "tagme"]

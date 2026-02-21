@@ -176,10 +176,13 @@ def compile_metadata(image, post, mappings, args):
     tags.extend(f"artist:{t}" for t in post.get("artist", []))
     tags.extend(get_sidecar_tags(image))
 
+    tags = enrich_tags(tags, mappings)
     tags = clean_resolution_tags(tags, image)
 
     if post.get("source"):
         tags.append(f"source:{convert_cdn_links(post['source'])}")
+
+
 
     rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
 
@@ -188,6 +191,21 @@ def compile_metadata(image, post, mappings, args):
     tags = [re.sub(r'_series\)$', ')', tag.strip()) for tag in tags]
 
     apply_tag_curation(tags)
+
+    if len(tags) < 15:
+        tags.append("tagme")
+    if not any(tag.startswith("artist:") for tag in tags):
+        tags.append("artist:tagme")
+    if not any(tag.startswith("character:") for tag in tags):
+        tags.append("character:tagme")
+    if not any(tag.startswith("series:") for tag in tags):
+        tags.append("series:tagme")
+    if not any(tag.startswith("source:") for tag in tags):
+        filename = str(image)
+        yandere_file_match = re.search(r"yandere_(\d+)_", filename)
+        if yandere_file_match:
+            extracted_id = yandere_file_match.group(1)
+            tags.append(f"source:https://yande.re/post/show/{extracted_id}")
 
     return ", ".join(sorted(set(tags))), rating, tags
 
@@ -257,7 +275,7 @@ def write_output(base_path, rows):
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
         writer.writerows(rows)
-    print(f"[✓] Shimmie CSV written to {csv_path}")
+    print(f"\n[✓] Shimmie CSV written to {csv_path}")
 
 def resolve_batch_metadata(batch, args):
     """Handles the IO-bound task of resolving posts for a batch."""
