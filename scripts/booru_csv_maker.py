@@ -216,6 +216,7 @@ def clean_resolution_tags(tags, image_path):
 def compile_metadata(image, post, mappings, args):
     """Generates the final tag string and rating letter."""
     tags = []
+    tags.extend(args.pretags)
     tags.extend(post.get("general", []))
     tags.extend(f"character:{t}" for t in post.get("character", []))
     tags.extend(f"series:{t}" for t in post.get("series", []))
@@ -389,6 +390,8 @@ if __name__ == "__main__":
     parser.add_argument("--dbuser", default=None, help="Shimmie DB user")
     parser.add_argument("--images", dest="image_path", help="Path to images directory")
     parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
+    parser.add_argument("--pretags", type=str, default="",
+                        help="Comma-separated list of tags to prepend to all posts")
     parser.add_argument("--qmax", default=250, help="Max questionable rating.")
     parser.add_argument("--skip-existing", action="store_true", help="Check Shimmie for image")
     parser.add_argument("--smax", default=50, help="Max safe rating.")
@@ -403,5 +406,10 @@ if __name__ == "__main__":
         parser.error("You must provide at least one input path: --images or --videos")
     if preargs.skip_existing and not preargs.spath:
         parser.error("--spath is required when --skip-existing is set.")
+
+    if preargs.pretags:
+        preargs.pretags = [t.strip() for t in preargs.pretags.split(",") if t.strip()]
+    else:
+        preargs.pretags = []
 
     main(preargs)
