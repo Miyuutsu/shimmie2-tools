@@ -10,7 +10,7 @@ import sqlite3
 import tqdm
 
 from PIL import Image
-from functions.utils import (get_cpu_threads, convert_cdn_links, rating_from_score, resolve_post,
+from functions.utils import (get_cpu_threads, resolve_best_source, rating_from_score, resolve_post,
                              save_post_to_cache, process_webp, apply_tag_curation)
 
 Image.MAX_IMAGE_PIXELS = None
@@ -179,10 +179,10 @@ def compile_metadata(image, post, mappings, args):
     tags = enrich_tags(tags, mappings)
     tags = clean_resolution_tags(tags, image)
 
-    if post.get("source"):
-        tags.append(f"source:{convert_cdn_links(post['source'])}")
-
-
+    # --- Unified Source Resolution ---
+    best_source = resolve_best_source(post.get("source"), image)
+    if best_source:
+        tags.append(f"source:{best_source}")
 
     rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
 
@@ -200,14 +200,8 @@ def compile_metadata(image, post, mappings, args):
         tags.append("character:tagme")
     if not any(tag.startswith("series:") for tag in tags):
         tags.append("series:tagme")
-    if not any(tag.startswith("source:") for tag in tags):
-        filename = str(image)
-        yandere_file_match = re.search(r"yandere_(\d+)_", filename)
-        if yandere_file_match:
-            extracted_id = yandere_file_match.group(1)
-            tags.append(f"source:https://yande.re/post/show/{extracted_id}")
 
-    return ", ".join(sorted(set(tags))), rating, tags
+    return ", ".join(sorted(set(tags))), rating, tags, best_source
 
 def process_image_result(image, res_data, args, mappings):
     """
@@ -233,10 +227,10 @@ def process_image_result(image, res_data, args, mappings):
         return None, str(thumb_file) if args.thumbnail else None
 
     # New Image Logic
-    tag_str, rating, tag_list = compile_metadata(image, res_data.post, mappings, args)
+    tag_str, rating, tag_list, best_source = compile_metadata(image, res_data.post, mappings, args)
 
     if args.update_cache:
-        save_post_to_cache(rating, tag_list, res_data.md5, res_data.px_hash, CACHE_PATH)
+        save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
 
     row = [
         f"{args.prefix}/{rel_path}",

@@ -53,7 +53,74 @@ def add_module_path(relative_path: str):
     if str(module_path) not in sys.path:
         sys.path.append(str(module_path))
 
-def convert_cdn_links(image_url):
+def get_source_score(url):
+    """Returns the priority score for a given URL. Lower is better."""
+    source_priority = {
+        "pixiv.net": 1,
+        "fantia.jp": 2,
+        "tumblr.com": 3,
+        "baraag.net": 4,   # Mastodon 1
+        "misskey.io": 5,   # Mastodon 2
+        "pawoo.net": 6,    # Mastodon 3
+        "twitter.com": 7,
+        "x.com": 7,
+        "gelbooru.com": 8,
+        "konachan.com": 9,
+        "kemono.cr": 10,
+        "danbooru.donmai.us": 11,
+        "twimg.com": 12,
+        "yande.re": 13
+    }
+    if not url:
+        return 999
+
+    url_lower = url.lower()
+    for domain, score in source_priority.items():
+        if domain in url_lower:
+            return score
+
+    return 100 # Default score for unknown but valid URLs
+
+def convert_filename_to_source(filename):
+    """
+    Extracts canonical source URLs from standardized filename paths.
+    """
+    if not isinstance(filename, str):
+        return None
+
+    # --- Gelbooru Logic ---
+    # Matches filename patterns
+    # Example: 'gelbooru_123456_hash.jpg'
+    gelbooru_match = re.search(r"gelbooru_(\d+)_", filename)
+    if gelbooru_match:
+        return f"https://gelbooru.com/index.php?page=post&s=view&id={gelbooru_match.group(1)}"
+
+    # --- Konachan Logic ---
+    # Matches filename patterns
+    # Example: 'konachan_123456_hash.png'
+    konachan_match = re.search(r"konachan_(\d+)_", filename)
+    if konachan_match:
+        return f"https://konachan.com/post/show/{konachan_match.group(1)}"
+
+    # --- Kemono/Fanbox Logic ---
+    # Matches file paths
+    # Example: 'fanbox/user_id/post_id_optional_text.jpg'
+    kemono_match = re.search(r"fanbox/(\d+)/(\d+)_", filename)
+    if kemono_match:
+        user_id = kemono_match.group(1)
+        post_id = kemono_match.group(2)
+        return f"https://kemono.cr/fanbox/user/{user_id}/post/{post_id}"
+
+    # --- Yande.re Logic ---
+    # Matches filename patterns
+    # Example: 'yandere_123456_hash.jpg'
+    yandere_match = re.search(r"yandere_(\d+)_", filename)
+    if yandere_match:
+        return f"https://yande.re/post/show/{yandere_match.group(1)}"
+
+    return None
+
+def convert_cdn_url(image_url):
     """
     Converts CDN links to more descriptive URLs. Currently supports Pixiv and Fantia.
 
@@ -61,7 +128,7 @@ def convert_cdn_links(image_url):
         image_url (str): The image URL.
 
     Returns:
-        str: The converted URL.  If the URL is not a known CDN link, it is returned as it.
+        str: The converted URL.  If the URL is not a known CDN link, it is returned as is.
 
     Raises:
         TypeError: if input is not a string.
@@ -69,7 +136,9 @@ def convert_cdn_links(image_url):
     if not isinstance(image_url, str):
         raise TypeError(f"Input image URL must be a string. Received {type(image_url)}")
 
-    # satisfy the linter
+    # --- Pixiv Logic ---
+    # Matches original or CDN links
+    # Example: 'https://i.pximg.net/img-original/img/yyyy/mm/dd/00/00/00/id_p0.png'
     pixiv_pattern = (
         r"(?:i|img)\d{0,5}\.(?:pximg|pixiv)\.net/"
         r"(?:(?:img-original|img\d{1,5})/img/|img/)"
@@ -84,27 +153,64 @@ def convert_cdn_links(image_url):
         artwork_id = pixiv_match.group(1)
         return f"https://www.pixiv.net/en/artworks/{artwork_id}"
 
-    fantia_pattern = r"c\.fantia\.jp/uploads/post/file/(\d+)/"
-    fantia_match = re.search(fantia_pattern, image_url)
+    # --- Fantia Logic ---
+    # Matches post file uploads
+    # Example: 'https://c.fantia.jp/uploads/post/file/id/main_image.jpg'
+    fantia_match = re.search(r"c\.fantia\.jp/uploads/post/file/(\d+)/", image_url)
     if fantia_match:
         post_id = fantia_match.group(1)
         return f"https://fantia.jp/posts/{post_id}"
 
-    tumblr_pattern = r"([\w-]+)\.tumblr\.com/post/(\d+)"
-    tumblr_match = re.search(tumblr_pattern, image_url)
+    # --- Tumblr Logic ---
+    # Matches post URLs
+    # Example: 'https://username.tumblr.com/post/id/slug'
+    tumblr_match = re.search(r"([\w-]+)\.tumblr\.com/post/(\d+)", image_url)
     if tumblr_match:
         username = tumblr_match.group(1)
         post_id = tumblr_match.group(2)
         return f"https://{username}.tumblr.com/post/{post_id}"
 
-    yandere_pattern = r"files\.yande\.re/.*?/yande\.re(?:%20|\s|\+)(\d+)"
-    yandere_match = re.search(yandere_pattern, image_url)
+    # --- Gelbooru Logic ---
+    # Matches filenames
+    # Example: 'gelbooru_id_hash.jpg'
+    gelbooru_match = re.search(r"gelbooru_(\d+)_", image_url)
+    if gelbooru_match:
+        post_id = gelbooru_match.group(1)
+        return f"https://gelbooru.com/index.php?page=post&s=view&id={post_id}"
 
+    # --- Yande.re Logic ---
+    # Matches file URLs
+    # Example: 'https://files.yande.re/image/hash/yande.re/id/tags.jpg'
+    yandere_match = re.search(r"files\.yande\.re/.*?/yande\.re(?:%20|\s|\+)(\d+)", image_url)
     if yandere_match:
         post_id = yandere_match.group(1)
         return f"https://yande.re/post/show/{post_id}"
 
     return image_url
+
+def resolve_best_source(post_source, filename):
+    """
+    Evaluates both the metadata source and filename, returning the highest priority URL.
+    """
+    candidates = []
+
+    if post_source:
+        if isinstance(post_source, list):
+            candidates.extend([convert_cdn_url(src) for src in post_source])
+        else:
+            candidates.append(convert_cdn_url(post_source))
+
+    file_src = convert_filename_to_source(str(filename))
+    if file_src:
+        candidates.append(file_src)
+
+    candidates = [c for c in candidates if c]
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=get_source_score)
+    return candidates[0]
 
 def compute_md5(image_path: Path) -> str:
     """
@@ -244,28 +350,34 @@ def parse_tags(tags: list[str]) -> tuple[str, str, str, str, str]:
         source_tag or ""
     )
 
-def save_post_to_cache(rating_letter, tags: list[str], md5, px_hash, cache):
+def save_post_to_cache(res_data, rating_letter, tags: list[str], pure_source_link, cache):
     """For updating the cache"""
     with get_cache_conn(cache) as conn:
         cur = conn.cursor()
 
-        general, character, artist, series, source = parse_tags(tags)
-        rating = rating_letter
+        parsed_tags = parse_tags(tags)
+        new_data = (
+            rating_letter,
+            pure_source_link or "",
+            parsed_tags[0],  # general
+            parsed_tags[1],  # character
+            parsed_tags[2],  # artist
+            parsed_tags[3]   # series
+        )
 
         # Fetch existing row, if any
         cur.execute("""
             SELECT rating, source, general, character, artist, series
-            FROM posts WHERE md5 = ?""", (md5,))
+            FROM posts WHERE md5 = ?""", (res_data.md5,))
         existing = cur.fetchone()
 
         # Only update if something differs
-        new_data = (rating, source, general, character, artist, series)
-        if existing is None or any(existing[i] != new_data[i] for i in range(len(new_data))):
+        if existing is None or existing != new_data:
             cur.execute("""
                 INSERT OR REPLACE INTO posts
                 (md5, pixel_hash, rating, source, general, character, artist, series)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (md5, px_hash, *new_data))
+            """, (res_data.md5, res_data.px_hash, *new_data))
         conn.commit()
 
 def row_to_post_dict(row: tuple) -> dict:
