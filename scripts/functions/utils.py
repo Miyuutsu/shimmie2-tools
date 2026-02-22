@@ -16,6 +16,8 @@ import threading
 import pyvips
 from PIL import Image
 
+VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
+
 def rating_from_score(total_score: int, safe_max: int, questionable_max: int) -> str:
     """Map a numeric total to the rating letter."""
     if total_score <= safe_max:
@@ -251,6 +253,8 @@ def resolve_post(image: Path, shimmie_path,
         match = re.compile(r"[a-fA-F0-9]{32}").search(image.stem)
         md5 = match.group(0).lower() if match else compute_md5(image)
 
+        is_video = image.suffix.lower() in VIDEO_EXTS
+
         if md5:
             cur.execute("SELECT * FROM posts WHERE md5 = ?", (md5,))
             row = cur.fetchone()
@@ -259,12 +263,12 @@ def resolve_post(image: Path, shimmie_path,
                 cur.execute("SELECT pixel_hash FROM posts WHERE md5 = ?", (md5,))
                 result = cur.fetchone()
                 if result:
-                    px_hash = result[0]  # Get pixel hash from the db
+                    px_hash = result[0]
                 else:
-                    px_hash = compute_danbooru_pixel_hash(image)  # Calculate if needed
+                    px_hash = md5 if is_video else compute_danbooru_pixel_hash(image)
 
         if not post:
-            px_hash = compute_danbooru_pixel_hash(image)
+            px_hash = md5 if is_video else compute_danbooru_pixel_hash(image)
             cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
             row = cur.fetchone()
             if row:
@@ -432,15 +436,20 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
 def process_webp(task):
     '''for some reason this was necessary'''
     src_path, dst_path = task
-    try:
-        convert_to_webp(src_path, dst_path)
-    except subprocess.CalledProcessError:
-        # ImageMagick failed — fallback to in-memory Pillow resize
+
+    if Path(src_path).suffix.lower() in VIDEO_EXTS:
         try:
-            fallback_to_webp(src_path, dst_path)
-        except Exception as e: # pylint: disable=broad-exception-caught
-            # Catch all non-system exceptions cleanly
-            print(f"Error creating thumbnail of {src_path}! ({type(e).__name__}: {e})")
+            extract_video_thumbnail(src_path, dst_path)
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating video thumbnail for {src_path}! ({e})")
+    else:
+        try:
+            convert_to_webp(src_path, dst_path)
+        except subprocess.CalledProcessError:
+            try:
+                fallback_to_webp(src_path, dst_path)
+            except Exception as e: # pylint: disable=broad-exception-caught
+                print(f"Error creating thumbnail of {src_path}! ({type(e).__name__}: {e})")
 
 def convert_to_webp(src_path: Path, dst_path: Path):
     """Convert images using ImageMagick."""
@@ -537,3 +546,36 @@ def apply_tag_curation(tags):
         step4_tags.append(tag)
 
     tags[:] = [t for t in step4_tags if t != "tagme"]
+
+def get_video_resolution(file_path: Path):
+    """Extracts resolution from a video/gif using ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0",
+            str(file_path)
+        ]
+        output = subprocess.check_output(cmd, text=True).strip()
+        if output and 'x' in output:
+            parts = output.split('\n', maxsplit=1)[0].split('x')
+            return int(parts[0]), int(parts[1])
+    except Exception as e: #pylint: disable=broad-exception-caught
+        print(f"Error getting resolution for {file_path}: {e}")
+    return None, None
+
+def extract_video_thumbnail(src_path: Path, dst_path: Path):
+    """Extracts the first frame of a video and saves it directly as a WebP thumbnail via ffmpeg."""
+    src_path = Path(src_path)
+    dst_path = Path(dst_path)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_webp_path = dst_path.with_name(f"{dst_path.name}.webp")
+
+    cmd = [
+        "ffmpeg", "-y", "-v", "error", "-i", str(src_path),
+        "-ss", "00:00:00.000", "-vframes", "1",
+        "-vf", "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'",
+        "-c:v", "libwebp", "-lossless", "0", "-q:v", "92",
+        str(temp_webp_path)
+    ]
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    temp_webp_path.replace(dst_path)

@@ -10,8 +10,9 @@ import sqlite3
 import tqdm
 
 from PIL import Image
-from functions.utils import (get_cpu_threads, resolve_best_source, rating_from_score, resolve_post,
-                             save_post_to_cache, process_webp, apply_tag_curation)
+from functions.utils import (get_cpu_threads, resolve_best_source,
+                             rating_from_score, resolve_post, save_post_to_cache,
+                             process_webp,apply_tag_curation, get_video_resolution, VIDEO_EXTS)
 
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
@@ -27,6 +28,42 @@ CACHE_PATH = DB_DIR / "posts_cache.db"
 # Data Structures
 ResolutionData = namedtuple('ResolutionData', ['image', 'post', 'md5', 'px_hash', 'exists'])
 Mappings = namedtuple('Mappings', ['char', 'artist', 'rating'])
+
+def collect_files(image_path, video_path, batch_size):
+    """Finds all valid files from provided paths, handles duplicates, and chunks them."""
+    files = []
+
+    if image_path:
+        img_dir = Path(image_path)
+        if img_dir.is_dir():
+            files.extend([f for f in img_dir.rglob("*") if f.suffix.lower() in ALLOWED_EXTS])
+
+    if video_path:
+        vid_dir = Path(video_path)
+        if vid_dir.is_dir():
+            files.extend([f for f in vid_dir.rglob("*") if f.suffix.lower() in VIDEO_EXTS])
+
+    grouped_files = {}
+    for f in files:
+        if f.is_file() and "thumbnails" not in f.parts:
+            stem = f.with_suffix('')
+            if stem not in grouped_files:
+                grouped_files[stem] = []
+            grouped_files[stem].append(f)
+
+    final_files = []
+    for stem, group in grouped_files.items():
+        if len(group) == 1:
+            final_files.append(group[0])
+        else:
+            with_sidecars = [f for f in group if f.with_name(f.name + ".txt").is_file()]
+            if len(with_sidecars) == 1:
+                final_files.append(with_sidecars[0])
+            else:
+                print(f"[WARNING] Skipping {stem}.* - Ambiguous multiple formats without tags.")
+
+    batches = [final_files[i:i + batch_size] for i in range(0, len(final_files), batch_size)]
+    return final_files, batches
 
 def check_paths():
     """Validates existence of required database files."""
@@ -121,7 +158,9 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
             total_score = 1
 
     rating_letter = None
-    if total_score > 0:
+    if 0 < total_score <= smax and "tagme" in tags:
+        rating_letter = "?"
+    elif total_score > 0:
         rating_letter = rating_from_score(total_score, smax, qmax)
 
     if rating_letter is None:
@@ -143,10 +182,17 @@ def clean_resolution_tags(tags, image_path):
                  "incredibly_absurdres", "wide_image", "tall_image"}
     res_tags = [t for t in tags if not t in res_group]
 
-    with Image.open(image_path) as img:
-        width, height = img.size
-        pixels = width * height
-        ratio = width / height
+    # Branch based on the file type
+    if image_path.suffix.lower() in VIDEO_EXTS:
+        width, height = get_video_resolution(image_path)
+        if not width or not height:
+            return res_tags
+    else:
+        with Image.open(image_path) as img:
+            width, height = img.size
+
+    pixels = width * height
+    ratio = width / height
 
     # Dimension Check
     if width > 10000 or height > 10000:
@@ -184,8 +230,6 @@ def compile_metadata(image, post, mappings, args):
     if best_source:
         tags.append(f"source:{best_source}")
 
-    rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
-
     # Clean whitespace and strip redundant _series) suffixes
     tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
     tags = [re.sub(r'_series\)$', ')', tag.strip()) for tag in tags]
@@ -194,6 +238,7 @@ def compile_metadata(image, post, mappings, args):
 
     if len(tags) < 15:
         tags.append("tagme")
+    rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
     if not any(tag.startswith("artist:") for tag in tags):
         tags.append("artist:tagme")
     if not any(tag.startswith("character:") for tag in tags):
@@ -205,9 +250,9 @@ def compile_metadata(image, post, mappings, args):
 
 def process_image_result(image, res_data, args, mappings):
     """
-    Processes a single resolved image.
+    Processes a single resolved file.
     Args:
-        image (Path): Path to image.
+        file (Path): Path to file.
         res_data (ResolutionData): NamedTuple (post, md5, px_hash, exists).
         args (Namespace): CLI arguments.
         mappings (Mappings): NamedTuple (char, artist, rating).
@@ -218,7 +263,11 @@ def process_image_result(image, res_data, args, mappings):
         print(f"{image} skipped due to error!")
         return None, None
 
-    rel_path = image.relative_to(args.image_path)
+    if args.image_path and image.is_relative_to(args.image_path):
+        base_path = Path(args.image_path)
+    else:
+        base_path = Path(args.video_path)
+    rel_path = image.relative_to(base_path)
     thumb_path = Path(args.prefix) / "thumbnails" / rel_path if args.thumbnail else ""
 
     # Check if exists in DB (skip metadata gen if so)
@@ -241,21 +290,13 @@ def process_image_result(image, res_data, args, mappings):
     ]
     return row, None
 
-def collect_images(path, batch_size):
-    """Finds all valid images and chunks them."""
-    files = Path(path).rglob("*")
-    images = [
-        f for f in files
-        if f.suffix.lower() in ALLOWED_EXTS and f.is_file()
-        and "thumbnails" not in f.relative_to(path).parts
-    ]
-    batches = [images[i:i + batch_size] for i in range(0, len(images), batch_size)]
-    return images, batches
-
 def print_summary(args):
     """Prints run configuration."""
     print("=== Tagger Run Summary ===")
-    print(f"📁  Input:           {args.image_path}")
+    if args.image_path:
+        print(f"📁  Images:          {args.image_path}")
+    if args.video_path:
+        print(f"🎞️  Videos:          {args.video_path}")
     print(f"📥  Input Cache:     {CACHE_PATH}")
     print(f"🗄️  Update Cache:    {args.update_cache}")
     print(f"📦  Batch Size:      {args.batch}")
@@ -310,7 +351,11 @@ def process_batches(batches, mappings, args):
             if row:
                 csv_rows.append(row)
                 if args.thumbnail:
-                    t_src = Path(args.image_path)/"thumbnails"/img.relative_to(args.image_path)
+                    if args.image_path and img.is_relative_to(args.image_path):
+                        base_path = Path(args.image_path)
+                    else:
+                        base_path = Path(args.video_path)
+                    t_src = base_path / "thumbnails" / img.relative_to(base_path)
                     if str(t_src) not in existing_thumbs and not t_src.is_file():
                         thumb_tasks.append((img, t_src))
 
@@ -321,25 +366,28 @@ def process_batches(batches, mappings, args):
 def main(args):
     """The main execution flow."""
     check_paths()
-    if not Path(args.image_path).is_dir():
-        raise FileNotFoundError(f"Path not found: {args.image_path}")
+    if args.image_path and not Path(args.image_path).is_dir():
+        raise FileNotFoundError(f"Image path not found: {args.image_path}")
+    if args.video_path and not Path(args.video_path).is_dir():
+        raise FileNotFoundError(f"Video path not found: {args.video_path}")
 
     print_summary(args)
     mappings = load_mappings()
-    images, batches = collect_images(args.image_path, args.batch)
+    files, batches = collect_files(args.image_path, args.video_path, args.batch)
 
     # Process batches and get results
     csv_rows = process_batches(batches, mappings, args)
     csv_rows.sort()
 
-    write_output(args.image_path, csv_rows)
-    print(f"\n[✓] Processed {len(images)} image(s) across {len(batches)} batch(es).")
+    out_dir = args.image_path if args.image_path else args.video_path
+    write_output(out_dir, csv_rows)
+    print(f"\n[✓] Processed {len(files)} file(s) across {len(batches)} batch(es).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Creates a CSV suitable for input into Shimmie2.")
     parser.add_argument("--batch", type=int, default=20, help="Batch size")
     parser.add_argument("--dbuser", default=None, help="Shimmie DB user")
-    parser.add_argument("--images", dest="image_path", required=True, help="Path to images")
+    parser.add_argument("--images", dest="image_path", help="Path to images directory")
     parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
     parser.add_argument("--qmax", default=250, help="Max questionable rating.")
     parser.add_argument("--skip-existing", action="store_true", help="Check Shimmie for image")
@@ -348,8 +396,11 @@ if __name__ == "__main__":
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Thread count")
     parser.add_argument("--thumbnail", action="store_true", help="Generate thumbnails")
     parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
+    parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
 
     preargs = parser.parse_args()
+    if not preargs.image_path and not preargs.video_path:
+        parser.error("You must provide at least one input path: --images or --videos")
     if preargs.skip_existing and not preargs.spath:
         parser.error("--spath is required when --skip-existing is set.")
 
