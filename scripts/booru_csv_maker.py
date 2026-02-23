@@ -4,15 +4,18 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
 import argparse
 import csv
-import html
 import re
 import sqlite3
 import tqdm
 
 from PIL import Image
-from functions.utils import (get_cpu_threads, resolve_best_source,
-                             rating_from_score, resolve_post, save_post_to_cache,
-                             process_webp,apply_tag_curation, get_video_resolution, VIDEO_EXTS)
+from functions.utils import (
+    get_cpu_threads, resolve_best_source, rating_from_score,
+    resolve_post, save_post_to_cache, process_webp, apply_tag_curation,
+    get_video_resolution, VIDEO_EXTS, get_sidecar_tags,
+    get_shimmie_db_credentials, get_cache_conn, mine_tag_equivalencies,
+    load_dynamic_mappings
+)
 
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
@@ -98,27 +101,6 @@ def load_mappings():
 
     print(f"[INFO] Loaded {len(char_map):,} chars, {len(artist_map):,} artists.")
     return Mappings(char_map, artist_map, rating_map)
-
-def get_sidecar_tags(image_path):
-    """Scans for .txt files associated with the image and parses tags."""
-    extra_tags = []
-    txt_candidates = [
-        image_path.with_suffix(".txt"),
-        image_path.with_name(image_path.name + ".txt")
-    ]
-
-    for txt_path in txt_candidates:
-        if not txt_path.is_file():
-            continue
-
-        with txt_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = html.unescape(line.strip())
-                if not line or line.startswith("#"):
-                    continue
-                parts = [t.strip() for t in re.split(r"[,;]", line) if t.strip()]
-                extra_tags.extend(re.sub(r"\s+", "_", t) for t in parts if t)
-    return extra_tags
 
 def enrich_tags(initial_tags, mappings):
     """Adds prefixes (series:, character:, artist:) based on mappings."""
@@ -213,7 +195,7 @@ def clean_resolution_tags(tags, image_path):
 
     return res_tags
 
-def compile_metadata(image, post, mappings, args):
+def compile_metadata(image, post, mappings, args, dynamic_mappings=None):
     """Generates the final tag string and rating letter."""
     tags = []
     tags.extend(args.pretags)
@@ -222,6 +204,9 @@ def compile_metadata(image, post, mappings, args):
     tags.extend(f"series:{t}" for t in post.get("series", []))
     tags.extend(f"artist:{t}" for t in post.get("artist", []))
     tags.extend(get_sidecar_tags(image))
+
+    sidecar_tags = get_sidecar_tags(image)
+    tags.extend(sidecar_tags)
 
     tags = enrich_tags(tags, mappings)
     tags = clean_resolution_tags(tags, image)
@@ -235,7 +220,7 @@ def compile_metadata(image, post, mappings, args):
     tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
     tags = [re.sub(r'_series\)$', ')', tag.strip()) for tag in tags]
 
-    apply_tag_curation(tags)
+    apply_tag_curation(tags, dynamic_mappings)
 
     if len(tags) < 15:
         tags.append("tagme")
@@ -249,7 +234,7 @@ def compile_metadata(image, post, mappings, args):
 
     return ", ".join(sorted(set(tags))), rating, tags, best_source
 
-def process_image_result(image, res_data, args, mappings):
+def process_image_result(image, res_data, args, mappings, dynamic_mappings):
     """
     Processes a single resolved file.
     Args:
@@ -277,7 +262,8 @@ def process_image_result(image, res_data, args, mappings):
         return None, str(thumb_file) if args.thumbnail else None
 
     # New Image Logic
-    tag_str, rating, tag_list, best_source = compile_metadata(image, res_data.post, mappings, args)
+    tag_str, rating, tag_list, best_source = compile_metadata(image, res_data.post,
+                                                              mappings, args, dynamic_mappings)
 
     if args.update_cache:
         save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
@@ -331,10 +317,14 @@ def generate_thumbnails(tasks, threads):
     with ProcessPoolExecutor(max_workers=threads) as imgpro:
         list(imgpro.map(process_webp, tasks))
 
-def process_batches(batches, mappings, args):
-    """
-    Handles the batch processing logic.
-    """
+def get_thumbnail_path(img, args):
+    """Helper to determine the correct thumbnail path to save local variables."""
+    if args.image_path and img.is_relative_to(args.image_path):
+        return Path(args.image_path) / "thumbnails" / img.relative_to(args.image_path)
+    return Path(args.video_path) / "thumbnails" / img.relative_to(args.video_path)
+
+def process_batches(batches, mappings, args, dynamic_mappings):
+    """Handles the batch processing logic."""
     csv_rows = []
     existing_thumbs = set()
 
@@ -344,7 +334,11 @@ def process_batches(batches, mappings, args):
 
         for img, res_tuple in zip(batch, results):
             res_data = ResolutionData(*res_tuple)
-            row, thumb_key = process_image_result(img, res_data, args, mappings)
+
+            # Line break added here to fix line-too-long
+            row, thumb_key = process_image_result(
+                img, res_data, args, mappings, dynamic_mappings
+            )
 
             if thumb_key:
                 existing_thumbs.add(thumb_key)
@@ -352,17 +346,25 @@ def process_batches(batches, mappings, args):
             if row:
                 csv_rows.append(row)
                 if args.thumbnail:
-                    if args.image_path and img.is_relative_to(args.image_path):
-                        base_path = Path(args.image_path)
-                    else:
-                        base_path = Path(args.video_path)
-                    t_src = base_path / "thumbnails" / img.relative_to(base_path)
+                    t_src = get_thumbnail_path(img, args)
                     if str(t_src) not in existing_thumbs and not t_src.is_file():
                         thumb_tasks.append((img, t_src))
 
         generate_thumbnails(thumb_tasks, args.threads)
 
     return csv_rows
+
+def run_mining_mode(args, files, mappings):
+    """Isolates the mining phase to reduce local variables in main()."""
+    db_conn = get_shimmie_db_credentials(args.spath)
+    with get_cache_conn(CACHE_PATH) as sqlite_conn:
+        mine_tag_equivalencies(
+            image_list=files,
+            conns=(db_conn, sqlite_conn),
+            output_path=args.create_map_csv,
+            mappings=mappings
+        )
+    print("Mining complete. Exiting before standard import processing.")
 
 def main(args):
     """The main execution flow."""
@@ -376,8 +378,18 @@ def main(args):
     mappings = load_mappings()
     files, batches = collect_files(args.image_path, args.video_path, args.batch)
 
+    # --- MINING MODE INTERCEPT ---
+    if args.create_map_csv:
+        run_mining_mode(args, files, mappings)
+        return
+    # -----------------------------
+
+    dynamic_mappings = {}
+    if args.use_map_csv:
+        dynamic_mappings = load_dynamic_mappings(args.use_map_csv)
+        print(f"[INFO] Loaded {len(dynamic_mappings)} dynamic tag mappings.")
     # Process batches and get results
-    csv_rows = process_batches(batches, mappings, args)
+    csv_rows = process_batches(batches, mappings, args, dynamic_mappings)
     csv_rows.sort()
 
     out_dir = args.image_path if args.image_path else args.video_path
@@ -387,6 +399,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Creates a CSV suitable for input into Shimmie2.")
     parser.add_argument("--batch", type=int, default=20, help="Batch size")
+    parser.add_argument("--create-map", dest="create_map_csv",
+                        help="Mine tags and create a CSV map at this path")
     parser.add_argument("--dbuser", default=None, help="Shimmie DB user")
     parser.add_argument("--images", dest="image_path", help="Path to images directory")
     parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
@@ -399,6 +413,8 @@ if __name__ == "__main__":
     parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Thread count")
     parser.add_argument("--thumbnail", action="store_true", help="Generate thumbnails")
     parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
+    parser.add_argument("--use-map", dest="use_map_csv",
+                        help="Load an existing CSV map from this path and apply it")
     parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
 
     preargs = parser.parse_args()
