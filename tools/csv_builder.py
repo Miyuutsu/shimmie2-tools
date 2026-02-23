@@ -2,27 +2,30 @@
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
-import argparse
 import csv
 import re
 import sqlite3
 import tqdm
 
 from PIL import Image
-from functions.utils import (
-    get_cpu_threads, resolve_best_source, rating_from_score,
-    resolve_post, save_post_to_cache, process_webp, apply_tag_curation,
-    get_video_resolution, VIDEO_EXTS, get_sidecar_tags,
-    get_shimmie_db_credentials, get_cache_conn, mine_tag_equivalencies,
-    load_dynamic_mappings
+
+from functions.common import VIDEO_EXTS
+from functions.source_resolver import resolve_best_source
+from functions.db_cache import (
+    resolve_post, save_post_to_cache, get_shimmie_db_credentials, get_cache_conn
 )
+from functions.media import process_webp, get_video_resolution
+from functions.tags_curation import (
+    rating_from_score, apply_tag_curation, get_sidecar_tags, load_dynamic_mappings
+)
+from functions.tags_mining import mine_tag_equivalencies
 
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
 
 # Paths setup
-SCRIPT_DIR = Path(__file__).parent.resolve()
-DB_DIR = SCRIPT_DIR / ".." / "database"
+SCRIPT_DIR = Path(__file__).parent.parent.resolve()
+DB_DIR = SCRIPT_DIR / "database"
 CDB_PATH = DB_DIR / "characters.db"
 ADB_PATH = DB_DIR / "artists.db"
 TAG_DB_PATH = DB_DIR / "tag_rating_dominant.db"
@@ -104,7 +107,6 @@ def load_mappings():
 
 def enrich_tags(initial_tags, mappings):
     """Adds prefixes (series:, character:, artist:) based on mappings."""
-    # First pass: Add inferred tags, then remove the bare tag if it was successfully prefixed
     temp_tags = []
     for tag in initial_tags:
         temp_tags.append(tag)
@@ -116,10 +118,8 @@ def enrich_tags(initial_tags, mappings):
             else:
                 temp_tags.append(f"series:{inferred}")
 
-    # Second pass: remove bare tags that were identified as characters
     stage_1 = [t for t in temp_tags if t not in mappings.char]
 
-    # Third pass: Handle artists
     final_tags = []
     for tag in stage_1:
         final_tags.append(tag)
@@ -136,7 +136,6 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
         if weight > 1:
             total_score += weight
         elif weight == 1 and total_score == 0:
-            # Matches original logic: a weight of 1 ensures the score is at least 1
             total_score = 1
 
     rating_letter = None
@@ -146,7 +145,6 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
         rating_letter = rating_from_score(total_score, smax, qmax)
 
     if rating_letter is None:
-        # Check database fallbacks
         if "explicit" in post_rating_list:
             rating_letter = "e"
         elif any(r in post_rating_list for r in ["questionable", "sensitive"]):
@@ -164,7 +162,6 @@ def clean_resolution_tags(tags, image_path):
                  "incredibly_absurdres", "wide_image", "tall_image"}
     res_tags = [t for t in tags if not t in res_group]
 
-    # Branch based on the file type
     if image_path.suffix.lower() in VIDEO_EXTS:
         width, height = get_video_resolution(image_path)
         if not width or not height:
@@ -176,11 +173,9 @@ def clean_resolution_tags(tags, image_path):
     pixels = width * height
     ratio = width / height
 
-    # Dimension Check
     if width > 10000 or height > 10000:
         res_tags.append("incredibly_absurdres")
 
-    # Pixel Count Checks
     if pixels >= 7680000:
         res_tags.append("absurdres")
     elif pixels >= 3686400:
@@ -203,7 +198,6 @@ def compile_metadata(image, post, mappings, args, dynamic_mappings=None):
     tags.extend(f"character:{t}" for t in post.get("character", []))
     tags.extend(f"series:{t}" for t in post.get("series", []))
     tags.extend(f"artist:{t}" for t in post.get("artist", []))
-    tags.extend(get_sidecar_tags(image))
 
     sidecar_tags = get_sidecar_tags(image)
     tags.extend(sidecar_tags)
@@ -211,12 +205,10 @@ def compile_metadata(image, post, mappings, args, dynamic_mappings=None):
     tags = enrich_tags(tags, mappings)
     tags = clean_resolution_tags(tags, image)
 
-    # --- Unified Source Resolution ---
     best_source = resolve_best_source(post.get("source"), image)
     if best_source:
         tags.append(f"source:{best_source}")
 
-    # Clean whitespace and strip redundant _series) suffixes
     tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
     tags = [re.sub(r'_series\)$', ')', tag.strip()) for tag in tags]
 
@@ -235,16 +227,7 @@ def compile_metadata(image, post, mappings, args, dynamic_mappings=None):
     return ", ".join(sorted(set(tags))), rating, tags, best_source
 
 def process_image_result(image, res_data, args, mappings, dynamic_mappings):
-    """
-    Processes a single resolved file.
-    Args:
-        file (Path): Path to file.
-        res_data (ResolutionData): NamedTuple (post, md5, px_hash, exists).
-        args (Namespace): CLI arguments.
-        mappings (Mappings): NamedTuple (char, artist, rating).
-    Returns:
-        tuple: (csv_row_list, thumb_path_str_or_None)
-    """
+    """Processes a single resolved file."""
     if res_data.exists == "error":
         print(f"{image} skipped due to error!")
         return None, None
@@ -256,14 +239,13 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
     rel_path = image.relative_to(base_path)
     thumb_path = Path(args.prefix) / "thumbnails" / rel_path if args.thumbnail else ""
 
-    # Check if exists in DB (skip metadata gen if so)
     if res_data.exists:
         thumb_file = Path(args.image_path) / "thumbnails" / rel_path
         return None, str(thumb_file) if args.thumbnail else None
 
-    # New Image Logic
-    tag_str, rating, tag_list, best_source = compile_metadata(image, res_data.post,
-                                                              mappings, args, dynamic_mappings)
+    tag_str, rating, tag_list, best_source = compile_metadata(
+        image, res_data.post, mappings, args, dynamic_mappings
+    )
 
     if args.update_cache:
         save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
@@ -299,16 +281,18 @@ def write_output(base_path, rows):
         writer.writerows(rows)
     print(f"\n[✓] Shimmie CSV written to {csv_path}")
 
-def resolve_batch_metadata(batch, args):
+def resolve_batch_metadata(batch, args, dbuser):
     """Handles the IO-bound task of resolving posts for a batch."""
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         resolver = executor.map(
-            lambda img: resolve_post(img, args.spath, args.skip_existing,
-                                     args.dbuser, CACHE_PATH),
+            lambda img: resolve_post(
+                img, args.spath, args.skip_existing, dbuser, CACHE_PATH
+            ),
             batch
         )
-        return list(tqdm.tqdm(resolver, total=len(batch),
-                              desc="Resolving", position=2, leave=False))
+        return list(
+            tqdm.tqdm(resolver, total=len(batch), desc="Resolving", position=2, leave=False)
+        )
 
 def generate_thumbnails(tasks, threads):
     """Handles the CPU-bound task of processing images."""
@@ -323,39 +307,47 @@ def get_thumbnail_path(img, args):
         return Path(args.image_path) / "thumbnails" / img.relative_to(args.image_path)
     return Path(args.video_path) / "thumbnails" / img.relative_to(args.video_path)
 
-def process_batches(batches, mappings, args, dynamic_mappings):
+def _process_single_batch(batch, maps, args, dbuser, existing_thumbs):
+    """Helper to process a single batch to reduce local variables."""
+    mappings, dynamic_mappings = maps
+    results = resolve_batch_metadata(batch, args, dbuser)
+    batch_rows = []
+    thumb_tasks = []
+
+    for img, res_tuple in zip(batch, results):
+        row, thumb_key = process_image_result(
+            img, ResolutionData(*res_tuple), args, mappings, dynamic_mappings
+        )
+
+        if thumb_key:
+            existing_thumbs.add(thumb_key)
+
+        if row:
+            batch_rows.append(row)
+            if args.thumbnail:
+                t_src = get_thumbnail_path(img, args)
+                if str(t_src) not in existing_thumbs and not t_src.is_file():
+                    thumb_tasks.append((img, t_src))
+
+    return batch_rows, thumb_tasks
+
+def process_batches(batches, mappings, args, dynamic_mappings, dbuser):
     """Handles the batch processing logic."""
     csv_rows = []
     existing_thumbs = set()
+    maps = (mappings, dynamic_mappings)
 
     for batch in tqdm.tqdm(batches, desc="Image batches", position=1, leave=False):
-        results = resolve_batch_metadata(batch, args)
-        thumb_tasks = []
-
-        for img, res_tuple in zip(batch, results):
-            res_data = ResolutionData(*res_tuple)
-
-            # Line break added here to fix line-too-long
-            row, thumb_key = process_image_result(
-                img, res_data, args, mappings, dynamic_mappings
-            )
-
-            if thumb_key:
-                existing_thumbs.add(thumb_key)
-
-            if row:
-                csv_rows.append(row)
-                if args.thumbnail:
-                    t_src = get_thumbnail_path(img, args)
-                    if str(t_src) not in existing_thumbs and not t_src.is_file():
-                        thumb_tasks.append((img, t_src))
-
+        batch_rows, thumb_tasks = _process_single_batch(
+            batch, maps, args, dbuser, existing_thumbs
+        )
+        csv_rows.extend(batch_rows)
         generate_thumbnails(thumb_tasks, args.threads)
 
     return csv_rows
 
 def run_mining_mode(args, files, mappings):
-    """Isolates the mining phase to reduce local variables in main()."""
+    """Isolates the mining phase to reduce local variables in run()."""
     db_conn = get_shimmie_db_credentials(args.spath)
     with get_cache_conn(CACHE_PATH) as sqlite_conn:
         mine_tag_equivalencies(
@@ -366,8 +358,8 @@ def run_mining_mode(args, files, mappings):
         )
     print("Mining complete. Exiting before standard import processing.")
 
-def main(args):
-    """The main execution flow."""
+def run(args):
+    """The main execution flow for csv building."""
     check_paths()
     if args.image_path and not Path(args.image_path).is_dir():
         raise FileNotFoundError(f"Image path not found: {args.image_path}")
@@ -378,54 +370,24 @@ def main(args):
     mappings = load_mappings()
     files, batches = collect_files(args.image_path, args.video_path, args.batch)
 
-    # --- MINING MODE INTERCEPT ---
     if args.create_map_csv:
         run_mining_mode(args, files, mappings)
         return
-    # -----------------------------
+
+    dbuser = None
+    if getattr(args, 'skip_existing', False) and getattr(args, 'spath', None):
+        creds = get_shimmie_db_credentials(args.spath)
+        if creds:
+            dbuser = creds.get('user')
 
     dynamic_mappings = {}
     if args.use_map_csv:
         dynamic_mappings = load_dynamic_mappings(args.use_map_csv)
         print(f"[INFO] Loaded {len(dynamic_mappings)} dynamic tag mappings.")
-    # Process batches and get results
-    csv_rows = process_batches(batches, mappings, args, dynamic_mappings)
+
+    csv_rows = process_batches(batches, mappings, args, dynamic_mappings, dbuser)
     csv_rows.sort()
 
     out_dir = args.image_path if args.image_path else args.video_path
     write_output(out_dir, csv_rows)
     print(f"\n[✓] Processed {len(files)} file(s) across {len(batches)} batch(es).")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Creates a CSV suitable for input into Shimmie2.")
-    parser.add_argument("--batch", type=int, default=20, help="Batch size")
-    parser.add_argument("--create-map", dest="create_map_csv",
-                        help="Mine tags and create a CSV map at this path")
-    parser.add_argument("--dbuser", default=None, help="Shimmie DB user")
-    parser.add_argument("--images", dest="image_path", help="Path to images directory")
-    parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
-    parser.add_argument("--pretags", type=str, default="",
-                        help="Comma-separated list of tags to prepend to all posts")
-    parser.add_argument("--qmax", default=250, help="Max questionable rating.")
-    parser.add_argument("--skip-existing", action="store_true", help="Check Shimmie for image")
-    parser.add_argument("--smax", default=50, help="Max safe rating.")
-    parser.add_argument("--spath", help="Path to shimmie root")
-    parser.add_argument("--threads", type=int, default=get_cpu_threads() // 2, help="Thread count")
-    parser.add_argument("--thumbnail", action="store_true", help="Generate thumbnails")
-    parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
-    parser.add_argument("--use-map", dest="use_map_csv",
-                        help="Load an existing CSV map from this path and apply it")
-    parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
-
-    preargs = parser.parse_args()
-    if not preargs.image_path and not preargs.video_path:
-        parser.error("You must provide at least one input path: --images or --videos")
-    if preargs.skip_existing and not preargs.spath:
-        parser.error("--spath is required when --skip-existing is set.")
-
-    if preargs.pretags:
-        preargs.pretags = [t.strip() for t in preargs.pretags.split(",") if t.strip()]
-    else:
-        preargs.pretags = []
-
-    main(preargs)
