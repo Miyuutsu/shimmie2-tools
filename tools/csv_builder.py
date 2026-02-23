@@ -5,6 +5,7 @@ from pathlib import Path
 import csv
 import re
 import sqlite3
+import warnings
 import tqdm
 
 from PIL import Image
@@ -14,7 +15,7 @@ from functions.source_resolver import resolve_best_source
 from functions.db_cache import (
     resolve_post, save_post_to_cache, get_shimmie_db_credentials, get_cache_conn
 )
-from functions.media import process_webp, get_video_resolution
+from functions.media import process_webp, get_video_resolution, get_image_resolution
 from functions.tags_curation import (
     rating_from_score, apply_tag_curation, get_sidecar_tags, load_dynamic_mappings
 )
@@ -22,6 +23,11 @@ from functions.tags_mining import mine_tag_equivalencies
 
 Image.MAX_IMAGE_PIXELS = None
 ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
+
+# Suppress DecompressionBombWarning if you deal with massive images
+warnings.simplefilter('ignore', Image.DecompressionBombWarning)
+# Suppress the Corrupt EXIF warning
+warnings.filterwarnings("ignore", "(?s).*Corrupt EXIF data.*", category=UserWarning)
 
 # Paths setup
 SCRIPT_DIR = Path(__file__).parent.parent.resolve()
@@ -164,11 +170,11 @@ def clean_resolution_tags(tags, image_path):
 
     if image_path.suffix.lower() in VIDEO_EXTS:
         width, height = get_video_resolution(image_path)
-        if not width or not height:
-            return res_tags
     else:
-        with Image.open(image_path) as img:
-            width, height = img.size
+        width, height = get_image_resolution(image_path)
+
+    if not width or not height:
+        return res_tags
 
     pixels = width * height
     ratio = width / height

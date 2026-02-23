@@ -32,6 +32,28 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
     raw_bytes = image.write_to_memory()
     return hashlib.md5(header + raw_bytes).hexdigest()
 
+def get_image_resolution(image_path: Path):
+    """Get image dimensions using PIL, falling back to ImageMagick on corruption."""
+    # Try PIL first (Fastest)
+    try:
+        with Image.open(image_path) as img:
+            return img.size
+    except Exception: # pylint: disable=broad-exception-caught
+        pass
+
+    # Fallback to ImageMagick (More robust for corrupt headers)
+    try:
+        cmd = ["magick", "identify", "-format", "%w,%h", str(image_path)]
+        # stderr=DEVNULL prevents console spam on truly broken files
+        res = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+        parts = res.split(',')
+        if len(parts) >= 2:
+            return int(parts[0]), int(parts[1])
+    except Exception as e: # pylint: disable=broad-exception-caught
+        print(f"Error getting resolution for {image_path}: {e}")
+
+    return None, None
+
 def process_webp(task):
     """Process an image or video into a WebP thumbnail."""
     src_path, dst_path = task
