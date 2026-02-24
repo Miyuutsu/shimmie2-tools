@@ -57,7 +57,7 @@ def _add_import_wikis_parser(subparsers):
     parser.add_argument(
         "--endpoint",
         default="wiki_pages.json",
-        help="API endpoint to fetch"
+        help="Comma-separated endpoints (e.g. wiki_pages.json,pools.json)"
     )
 
 def _add_csv2sqlite_parser(subparsers):
