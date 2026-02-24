@@ -11,6 +11,13 @@ import requests
 
 from functions.db_cache import get_shimmie_db_credentials
 
+# Optional import to allow modularity without crashing if file is missing
+try:
+    from functions.captcha import get_protected_session, AntiBotSolver
+except ImportError:
+    get_protected_session = None
+    AntiBotSolver = None
+
 DANBOORU_URL = "https://danbooru.donmai.us/wiki_pages.json"
 SQLITE_DB = Path("database/danbooru_wiki_cache.db")
 POSTS_DB = Path("database/posts_cache.db")
@@ -112,7 +119,10 @@ def _get_titles_pg(spath):
             with conn.cursor() as cursor:
                 cursor.execute("SELECT title FROM wiki_pages ORDER BY title ASC")
                 # HTML Version
-                return [f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>' for p in cursor.fetchall()]
+                return [
+                    f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>'
+                    for p in cursor.fetchall()
+                ]
     except psycopg2.Error as err:
         print(f"[ERROR] Postgres error: {err}")
         return None
@@ -129,7 +139,10 @@ def _get_titles_sqlite():
             cursor = conn.cursor()
             cursor.execute("SELECT title FROM wiki_cache ORDER BY title ASC")
             # HTML Version
-            return [f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>' for p in cursor.fetchall()]
+            return [
+                f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>'
+                for p in cursor.fetchall()
+            ]
     except sqlite3.Error as err:
         print(f"[ERROR] SQLite error: {err}")
         return None
@@ -351,6 +364,65 @@ def _insert_or_update_pg(pg_cur, title, body, existing_titles, update_existing=F
                 return "updated"
     return "skipped"
 
+def _get_page_data(session, page, args, solver):
+    """Helper to fetch a single page of data, handling retries and captcha."""
+    try:
+        resp = session.get(DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30)
+
+        # === CAPTCHA INTERCEPT ===
+        if args.captcha and solver:
+            # Check start of response for captcha markers
+            if solver.detect(resp.text[:2000]):
+                if solver.solve(session, resp.text, resp.url):
+                    print("[INFO] Retrying original request...")
+                    resp = session.get(
+                        DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30
+                    )
+                else:
+                    print("[ERROR] Failed to solve captcha. Skipping page.")
+                    return None
+        # =========================
+
+        resp.raise_for_status()
+        return resp.json()
+
+    except requests.RequestException as e:
+        print(f"[ERROR] Failed fetching page {page}: {e}")
+        return None
+
+def _process_wiki_entry(cursor, entry, args):
+    """Processes a single wiki entry and updates the cache."""
+    title, body, entry_id = entry.get("title", ""), entry.get("body", ""), entry.get("id")
+    if not title or not body or not entry_id:
+        return
+
+    body = body.replace('\r\n', '\n').strip()
+    title = title.strip()
+
+    if args.convert == "markdown":
+        body = _markdown_to_html(body)
+    elif args.convert == "shimmie":
+        body = _clean_wiki_body(body, title)
+
+    cursor.execute("SELECT body FROM wiki_cache WHERE title = ?", (title,))
+    row = cursor.fetchone()
+
+    if row is None:
+        cursor.execute("""
+            INSERT OR REPLACE INTO wiki_cache (id, title, body, updated_at, imported)
+            VALUES (?, ?, ?, ?, 0)
+        """, (entry_id, title, body, entry["updated_at"]))
+    else:
+        if args.update_cache and body.strip() != row[0].strip():
+            cursor.execute(
+                "UPDATE wiki_cache SET body = ?, updated_at = ? WHERE title = ?",
+                (body, entry["updated_at"], title)
+            )
+        else:
+            cursor.execute(
+                "UPDATE wiki_cache SET imported = 0 WHERE title = ?", (title,)
+            )
+
 def _fetch_and_cache(args):
     """Pulls directly from Danbooru API and caches in SQLite."""
     conn, cur = _init_cache()
@@ -359,7 +431,9 @@ def _fetch_and_cache(args):
 
     # === CAPTCHA / SESSION LOGIC ===
     if args.captcha:
-        from functions.captcha import get_protected_session, AntiBotSolver
+        if not get_protected_session:
+            print("[ERROR] Captcha module not found.")
+            return conn
         session = get_protected_session()
         solver = AntiBotSolver()
     else:
@@ -370,59 +444,13 @@ def _fetch_and_cache(args):
     for page in range(args.start_page, args.start_page + args.pages):
         print(f"📦 Fetching API page {page}...")
 
-        try:
-            resp = session.get(DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30)
-
-            # === CAPTCHA INTERCEPT ===
-            if args.captcha and solver:
-                content_preview = resp.text[:2000] # Check start of response
-                if solver.detect(content_preview):
-                    success = solver.solve(session, resp.text, resp.url)
-                    if success:
-                        print("[INFO] Retrying original request...")
-                        resp = session.get(DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30)
-                    else:
-                        print("[ERROR] Failed to solve captcha. Skipping page.")
-                        continue
-            # =========================
-
-            resp.raise_for_status()
-            data = resp.json()
-
-        except Exception as e:
-            print(f"[ERROR] Failed fetching page {page}: {e}")
+        data = _get_page_data(session, page, args, solver)
+        if not data:
             continue
 
         for entry in data:
-            title, body, entry_id = entry.get("title", ""), entry.get("body", ""), entry.get("id")
-            if not title or not body or not entry_id:
-                continue
+            _process_wiki_entry(cur, entry, args)
 
-            body = body.replace('\r\n', '\n').strip()
-
-            if args.convert == "markdown":
-                body = _markdown_to_html(body)
-            elif args.convert == "shimmie":
-                body = _clean_wiki_body(body, title.strip())
-
-            cur.execute("SELECT body FROM wiki_cache WHERE title = ?", (title.strip(),))
-            row = cur.fetchone()
-
-            if row is None:
-                cur.execute("""
-                    INSERT OR REPLACE INTO wiki_cache (id, title, body, updated_at, imported)
-                    VALUES (?, ?, ?, ?, 0)
-                """, (entry_id, title.strip(), body, entry["updated_at"]))
-            else:
-                if args.update_cache and body.strip() != row[0].strip():
-                    cur.execute(
-                        "UPDATE wiki_cache SET body = ?, updated_at = ? WHERE title = ?",
-                        (body, entry["updated_at"], title.strip())
-                    )
-                else:
-                    cur.execute(
-                        "UPDATE wiki_cache SET imported = 0 WHERE title = ?", (title.strip(),)
-                    )
     conn.commit()
     return conn
 
