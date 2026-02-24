@@ -111,6 +111,7 @@ def _get_titles_pg(spath):
         with psycopg2.connect(**db_config) as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT title FROM wiki_pages ORDER BY title ASC")
+                # HTML Version
                 return [f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>' for p in cursor.fetchall()]
     except psycopg2.Error as err:
         print(f"[ERROR] Postgres error: {err}")
@@ -127,6 +128,7 @@ def _get_titles_sqlite():
         with sqlite3.connect(SQLITE_DB) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT title FROM wiki_cache ORDER BY title ASC")
+            # HTML Version
             return [f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>' for p in cursor.fetchall()]
     except sqlite3.Error as err:
         print(f"[ERROR] SQLite error: {err}")
@@ -355,12 +357,43 @@ def _fetch_and_cache(args):
     if not args.update_cache:
         cur.execute("UPDATE wiki_cache SET imported = 1")
 
+    # === CAPTCHA / SESSION LOGIC ===
+    if args.captcha:
+        from functions.captcha import get_protected_session, AntiBotSolver
+        session = get_protected_session()
+        solver = AntiBotSolver()
+    else:
+        session = requests.Session()
+        solver = None
+    # ===============================
+
     for page in range(args.start_page, args.start_page + args.pages):
         print(f"📦 Fetching API page {page}...")
-        resp = requests.get(DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30)
-        resp.raise_for_status()
 
-        for entry in resp.json():
+        try:
+            resp = session.get(DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30)
+
+            # === CAPTCHA INTERCEPT ===
+            if args.captcha and solver:
+                content_preview = resp.text[:2000] # Check start of response
+                if solver.detect(content_preview):
+                    success = solver.solve(session, resp.text, resp.url)
+                    if success:
+                        print("[INFO] Retrying original request...")
+                        resp = session.get(DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30)
+                    else:
+                        print("[ERROR] Failed to solve captcha. Skipping page.")
+                        continue
+            # =========================
+
+            resp.raise_for_status()
+            data = resp.json()
+
+        except Exception as e:
+            print(f"[ERROR] Failed fetching page {page}: {e}")
+            continue
+
+        for entry in data:
             title, body, entry_id = entry.get("title", ""), entry.get("body", ""), entry.get("id")
             if not title or not body or not entry_id:
                 continue
@@ -377,7 +410,7 @@ def _fetch_and_cache(args):
 
             if row is None:
                 cur.execute("""
-                    INSERT OR IGNORE INTO wiki_cache (id, title, body, updated_at, imported)
+                    INSERT OR REPLACE INTO wiki_cache (id, title, body, updated_at, imported)
                     VALUES (?, ?, ?, ?, 0)
                 """, (entry_id, title.strip(), body, entry["updated_at"]))
             else:

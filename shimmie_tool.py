@@ -52,6 +52,8 @@ def _add_import_wikis_parser(subparsers):
     )
     parser.add_argument("--update-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
+    # Added captcha flag here
+    parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
 
 def _add_csv2sqlite_parser(subparsers):
     """Adds the csv2sqlite command."""
@@ -86,7 +88,6 @@ def setup_parser():
         "--help-all", action="store_true", help="Show full help for all commands and exit"
     )
 
-    # Empty metavar visually hides the ugly {command,command2...} text in --help
     subparsers = parser.add_subparsers(
         dest="command",
         title="Available Commands",
@@ -134,7 +135,6 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    # Dispatch Dictionary (Fixes Pylint R0912: Too many branches)
     dispatch = {
         "wiki-index": wiki.create_index,
         "import-wikis": wiki.import_danbooru,
