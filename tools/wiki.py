@@ -3,15 +3,11 @@
 import re
 import html
 import sqlite3
-from collections import namedtuple, defaultdict
-from datetime import datetime
+from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote, urljoin
 
-import psycopg2
 import requests
-
-from functions.db_cache import get_shimmie_db_credentials
 
 # Optional import to allow modularity without crashing if file is missing
 try:
@@ -20,11 +16,70 @@ except ImportError:
     get_protected_session = None
     AntiBotSolver = None
 
-BASE_BOORU_URL = "https://danbooru.donmai.us/"
+BASE_BOORU_URL = "https://danbooru.donmai.us"
 SQLITE_DB = Path("database/danbooru_wiki_cache.db")
-POSTS_DB = Path("database/posts_cache.db")
 
-CategoryConfig = namedtuple('CategoryConfig', ['prefix', 'title', 'col'])
+# ==========================================
+# CSS & Static Assets
+# ==========================================
+def _fetch_site_css(session, out_dir):
+    """
+    Attempts to scrape the original CSS from the site homepage.
+    Falls back to a default style if extraction fails.
+    """
+    css_path = out_dir / "style.css"
+    print("[INFO] Attempting to fetch original site CSS...")
+
+    try:
+        # 1. Scrape Homepage for CSS link
+        resp = session.get(BASE_BOORU_URL, timeout=10)
+        resp.raise_for_status()
+
+        # Regex to find <link rel="stylesheet" href="...">
+        # Matches href="style.css" or href="/css/style.css?v=2"
+        pattern = (
+            r'<link[^>]+rel=["\']?stylesheet["\']?[^>]+href=["\']?'
+            r'([^"\'>]+)["\']?'
+        )
+        match = re.search(pattern, resp.text)
+
+        if match:
+            css_url = match.group(1)
+            # Handle relative URLs
+            if not css_url.startswith('http'):
+                css_url = urljoin(BASE_BOORU_URL, css_url)
+
+            print(f"[INFO] Found CSS at: {css_url}")
+            css_resp = session.get(css_url, timeout=10)
+            css_resp.raise_for_status()
+
+            with css_path.open("w", encoding="utf-8") as f:
+                f.write(css_resp.text)
+            print("[✓] Saved original CSS.")
+            return "style.css"
+
+    except (requests.RequestException, OSError) as e:
+        print(f"[WARNING] CSS fetch failed ({e}). Using default style.")
+
+    # 2. Fallback Default CSS
+    default_css = """
+    body { font-family: sans-serif; max-width: 900px; margin: 20px auto;
+           padding: 0 10px; line-height: 1.6; background: #f0f0f0; color: #333; }
+    .page-container { background: #fff; padding: 20px; border: 1px solid #ccc;
+                      box-shadow: 2px 2px 5px rgba(0,0,0,0.1); }
+    a { color: #007bff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    h1 { border-bottom: 2px solid #eee; padding-bottom: 10px; }
+    .nav { margin-bottom: 20px; font-size: 0.9em; padding: 5px;
+           background: #e9ecef; border-radius: 4px; }
+    .history-section { margin-top: 40px; padding-top: 20px;
+                       border-top: 1px dashed #ccc; font-size: 0.9em; }
+    .history-list { max-height: 200px; overflow-y: auto; }
+    """
+    with css_path.open("w", encoding="utf-8") as f:
+        f.write(default_css)
+    return "style.css"
+
 
 # ==========================================
 # Static Site Generator Helpers
@@ -33,11 +88,9 @@ def _sanitize_fs_name(name):
     """
     Sanitizes a wiki title for use as a filename.
     Replaces unsafe FS chars (/, \\, :, *, ?, ", <, >, |) with underscore.
-    Keeps ' and ; as requested, but handles them carefully.
+    Keeps ' and ; as requested.
     """
-    # Replace dangerous characters
     clean = re.sub(r'[<>:"/\\|?*]', '_', name)
-    # Strip leading/trailing spaces or dots (Windows doesn't like trailing dots)
     return clean.strip(" .")
 
 def _get_bucket(name):
@@ -51,34 +104,32 @@ def _get_bucket(name):
         return "#"
     return "misc"
 
-def _make_link(target, label=None, relative_to_bucket=None):
-    """Creates a relative HTML link to another wiki page."""
+def _make_link(target, label=None, relative_to_bucket=None, rev_id=None):
+    """Creates a relative HTML link to another wiki page or specific revision."""
     safe_target = _sanitize_fs_name(target.replace(' ', '_'))
     bucket = _get_bucket(safe_target)
 
+    filename = f"{safe_target}.html"
+    if rev_id:
+        filename = f"{safe_target}_rev{rev_id}.html"
+
     if relative_to_bucket:
         # Link from pages/X/file.html -> pages/Y/target.html
-        # Path is ../Y/target.html
-        href = f"../{bucket}/{quote(safe_target)}.html"
+        href = f"../{bucket}/{quote(filename)}"
     else:
         # Link from root index.html -> pages/Y/target.html
-        href = f"pages/{bucket}/{quote(safe_target)}.html"
+        href = f"pages/{bucket}/{quote(filename)}"
 
     return f'<a href="{href}">{html.escape(label or target)}</a>'
 
 def _shimmie_to_html(text, current_bucket):
-    """
-    Converts Shimmie markup (BBCode-ish) to simple HTML for static viewing.
-    """
+    """Converts Shimmie markup (BBCode-ish) to simple HTML."""
     if not text:
         return ""
-
-    # Escape HTML first
     text = html.escape(text)
 
     # Headers
     text = re.sub(r'\[h(\d)\](.*?)\[/h\1\]', r'<h\1>\2</h\1>', text)
-
     # Formatting
     text = re.sub(r'\[b\](.*?)\[/b\]', r'<strong>\1</strong>', text)
     text = re.sub(r'\[i\](.*?)\[/i\]', r'<em>\1</em>', text)
@@ -92,111 +143,151 @@ def _shimmie_to_html(text, current_bucket):
             target, label = content.split('|', 1)
             return _make_link(target, label, current_bucket)
         return _make_link(content, content, current_bucket)
-
     text = re.sub(r'\[\[(.*?)\]\]', link_repl, text)
 
-    # External Links [url=...]...[/url]
+    # External Links
     text = re.sub(
         r'\[url=([^\]]+)\](.*?)\[/url\]',
         r'<a href="\1" target="_blank">\2</a>',
         text
     )
-
-    # Newlines to <br>
     text = text.replace('\n', '<br>')
-
     return text
 
-def _write_static_page(out_dir, title, body):
-    """Writes a single HTML page."""
+def _write_static_page(out_dir, entry, revisions, css_file):
+    """
+    Writes a single HTML page (and its revisions).
+    entry: The 'Main' entry (latest/current).
+    revisions: A list of other entries (historical).
+    """
+    title = entry['title']
     safe_name = _sanitize_fs_name(title.replace(' ', '_'))
     bucket = _get_bucket(safe_name)
-
     bucket_dir = out_dir / "pages" / bucket
     bucket_dir.mkdir(parents=True, exist_ok=True)
 
-    file_path = bucket_dir / f"{safe_name}.html"
+    # 1. Write Main Page
+    main_ctx = {
+        "title": title,
+        "body": entry['body'],
+        "bucket": bucket,
+        "revisions": revisions,
+        "is_rev": False,
+        "parent_link": None,
+        "meta_info": ""
+    }
+    _write_html_file(bucket_dir / f"{safe_name}.html", main_ctx, css_file)
+
+    # 2. Write Revision Pages
+    for rev in revisions:
+        rev_id = rev['remote_id']
+        rev_ctx = {
+            "title": f"{title} (Rev {rev_id})",
+            "body": rev['body'],
+            "bucket": bucket,
+            "revisions": [],
+            "is_rev": True,
+            "parent_link": f"{safe_name}.html",
+            "meta_info": f"Source: {rev['source']} | Date: {rev['updated_at']}"
+        }
+        _write_html_file(
+            bucket_dir / f"{safe_name}_rev{rev_id}.html", rev_ctx, css_file
+        )
+
+def _build_history_html(revisions, title, bucket):
+    """Generates the history section HTML list."""
+    if not revisions:
+        return ""
+
+    history_list = []
+    # Sort revisions by ID descending (newest first)
+    for r in sorted(revisions, key=lambda x: x['remote_id'], reverse=True):
+        link = _make_link(title, f"Revision {r['remote_id']}", bucket, r['remote_id'])
+        src = r['source']
+        date = r['updated_at'] or "N/A"
+        history_list.append(f"<li>{link} <small>({src} - {date})</small></li>")
+
+    return f"""
+    <div class="history-section">
+        <h3>History & Versions</h3>
+        <ul class="history-list">{''.join(history_list)}</ul>
+    </div>
+    """
+
+def _write_html_file(path, ctx, css_file):
+    """Inner helper to dump the HTML string."""
+    title = ctx['title']
+    bucket = ctx['bucket']
+
+    history_html = _build_history_html(ctx['revisions'], title, bucket)
+
+    nav_links = '<a href="../../index.html">← Back to Index</a>'
+    if ctx['is_rev'] and ctx['parent_link']:
+        # Use quote for the parent link filename to handle special chars like '
+        nav_links += f' | <a href="{quote(ctx["parent_link"])}">Current Version</a>'
+
+    meta_html = ""
+    if ctx['meta_info']:
+        meta_html = f'<p><small>{ctx["meta_info"]}</small></p>'
 
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <title>{html.escape(title)}</title>
-    <style>
-        body {{
-            font-family: sans-serif;
-            max-width: 800px;
-            margin: 20px auto;
-            padding: 0 10px;
-            line-height: 1.6;
-        }}
-        a {{ color: #007bff; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-        h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; }}
-        .nav {{ margin-bottom: 20px; font-size: 0.9em; }}
-    </style>
+    <link rel="stylesheet" href="../../{css_file}">
 </head>
 <body>
-    <div class="nav">
-        <a href="../../index.html">← Back to Index</a>
-    </div>
-    <h1>{html.escape(title)}</h1>
-    <div>
-        {_shimmie_to_html(body, bucket)}
+    <div class="page-container">
+        <div class="nav">{nav_links}</div>
+        <h1>{html.escape(title)}</h1>
+        {meta_html}
+        <div>{_shimmie_to_html(ctx['body'], bucket)}</div>
+        {history_html}
     </div>
 </body>
 </html>"""
 
-    with file_path.open("w", encoding="utf-8") as f:
+    with path.open("w", encoding="utf-8") as f:
         f.write(html_content)
+
 
 # ==========================================
 # Data Fetchers
 # ==========================================
-def _get_entries_pg(spath):
-    """Fetch all (title, body) pairs from Postgres."""
-    db_config = get_shimmie_db_credentials(spath)
-    if not db_config:
-        print(f"[ERROR] Could not load DB credentials from {spath}")
-        return []
-    try:
-        with psycopg2.connect(**db_config) as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT title, body FROM wiki_pages ORDER BY title ASC")
-                return cursor.fetchall()
-    except psycopg2.Error as err:
-        print(f"[ERROR] Postgres error: {err}")
-        return []
-
 def _get_entries_sqlite():
-    """Fetch all (title, body) pairs from SQLite cache."""
+    """Fetch all entries from SQLite and group them by title."""
     if not SQLITE_DB.exists():
-        print(f"[ERROR] No Shimmie path provided and {SQLITE_DB} not found.")
-        return []
+        print(f"[ERROR] {SQLITE_DB} not found.")
+        return {}
+
+    entries = defaultdict(list)
     try:
         with sqlite3.connect(SQLITE_DB) as conn:
+            # Use Row factory to access columns by name
+            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT title, body FROM wiki_cache ORDER BY title ASC")
-            return cursor.fetchall()
+            cursor.execute("SELECT * FROM wiki_cache ORDER BY title ASC")
+            for row in cursor:
+                entries[row['title']].append(dict(row))
     except sqlite3.Error as err:
         print(f"[ERROR] SQLite error: {err}")
-        return []
+        return {}
+    return entries
 
-def _get_sorted_index_html(entries, args):
+def _get_sorted_index_html(titles, args, css_file):
     """Generates the main index.html content."""
-
-    # 1. Build Dictionary of Links
-    links = []
-    for title, _ in entries:
-        links.append(_make_link(title, title, relative_to_bucket=None))
-
     content = ""
+
+    # Build links dict
+    # We only link to the Main page (no rev_id)
+    links = [_make_link(t, t, relative_to_bucket=None) for t in titles]
 
     if args.sort:
         buckets = defaultdict(list)
-        for title, _ in entries:
-            bk = _get_bucket(title)
-            link = _make_link(title, title, relative_to_bucket=None)
+        for t in titles:
+            bk = _get_bucket(t)
+            link = _make_link(t, t, relative_to_bucket=None)
             buckets[bk].append(link)
 
         keys = sorted(buckets.keys())
@@ -209,7 +300,6 @@ def _get_sorted_index_html(entries, args):
             for link in buckets[k]:
                 content += f"<li>{link}</li>\n"
             content += "</ul>\n"
-
     else:
         content = "<ul>\n" + "\n".join([f"<li>{l}</li>" for l in links]) + "\n</ul>"
 
@@ -218,55 +308,82 @@ def _get_sorted_index_html(entries, args):
 <head>
     <meta charset="UTF-8">
     <title>Wiki Index</title>
-    <style>
-        body {{ font-family: sans-serif; max-width: 900px; margin: 20px auto; padding: 20px; }}
-        h1 {{ text-align: center; }}
-        h2 {{ border-bottom: 1px solid #ccc; margin-top: 30px; }}
-        ul {{ list-style-type: none; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }}
-        li {{ flex: 1 0 200px; }}
-        a {{ text-decoration: none; color: #333; }}
-        a:hover {{ color: #007bff; }}
-    </style>
+    <link rel="stylesheet" href="{css_file}">
 </head>
 <body>
-    <h1>Wiki Index</h1>
-    {content}
+    <div class="page-container">
+        <h1>Wiki Index</h1>
+        {content}
+    </div>
 </body>
 </html>"""
+
+def _score_wiki_entry(row):
+    """Scores an entry to determine if it should be the 'Main' page."""
+    src = row['source']
+    if 'wiki_pages' in src:
+        return 2
+    if 'artist' in src and 'version' not in src:
+        return 2  # theoretical artist main endpoint
+    if 'artist_version' in src:
+        return 1
+    return 0
 
 def create_index(args):
     """Main execution for creating the static wiki site."""
     out_dir = Path(args.output)
 
     # 1. Fetch Data
-    print("[INFO] Fetching wiki data...")
-    if args.spath:
-        entries = _get_entries_pg(args.spath)
-    else:
-        entries = _get_entries_sqlite()
+    # For this advanced multi-version logic, we strictly use the SQLite cache
+    print("[INFO] Fetching wiki data from SQLite...")
+    grouped_entries = _get_entries_sqlite()
 
-    if not entries:
+    if not grouped_entries:
         print("[ERROR] No wiki entries found.")
         return
 
-    print(f"[INFO] Found {len(entries)} pages. Generating static site...")
+    print(f"[INFO] Found {len(grouped_entries)} unique titles. Generating static site...")
 
-    # 2. Create Directory Structure
+    # 2. Setup Directory
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "pages").mkdir(exist_ok=True)
 
-    # 3. Generate Individual Pages
+    # 3. Fetch CSS
+    session = requests.Session()
+    # If using captcha module:
+    if args.spath or Path("cookies.txt").exists():
+        # Simple check if we can upgrade session
+        if get_protected_session:
+            session = get_protected_session()
+
+    css_file = _fetch_site_css(session, out_dir)
+
+    # 4. Generate Pages
     count = 0
-    for title, body in entries:
-        _write_static_page(out_dir, title, body)
+
+    for _, rows in grouped_entries.items():
+        # Determine Main vs History
+        # Priority: source='wiki_pages.json' > newest updated_at
+
+        # Sort by Score DESC, then Date DESC
+        rows.sort(
+            key=lambda x: (_score_wiki_entry(x), x['updated_at'] or ""),
+            reverse=True
+        )
+
+        main_entry = rows[0]
+        revisions = rows[1:] if len(rows) > 1 else []
+
+        _write_static_page(out_dir, main_entry, revisions, css_file)
+
         count += 1
         if count % 1000 == 0:
-            print(f"   ...processed {count} pages", end="\r")
+            print(f"   ...processed {count} titles", end="\r")
 
-    print(f"[✓] Generated {count} HTML pages in '{out_dir}/pages/'")
+    print(f"[✓] Generated pages for {count} titles in '{out_dir}/pages/'")
 
-    # 4. Generate Main Index
-    index_html = _get_sorted_index_html(entries, args)
+    # 5. Generate Main Index
+    index_html = _get_sorted_index_html(sorted(grouped_entries.keys()), args, css_file)
     with (out_dir / "index.html").open("w", encoding="utf-8") as f:
         f.write(index_html)
 
@@ -281,247 +398,117 @@ def _init_cache():
     SQLITE_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(SQLITE_DB)
     cur = conn.cursor()
+
+    # SCHEMA CHECK & MIGRATION
+    # We moved from PK(id) -> PK(title) -> PK(unique_key string)
+    needs_rebuild = False
+    try:
+        cur.execute("PRAGMA table_info(wiki_cache)")
+        cols = {row[1] for row in cur.fetchall()}
+        # If 'source' column is missing, it's an old schema
+        if cols and 'source' not in cols:
+            needs_rebuild = True
+    except sqlite3.Error:
+        pass
+
+    if needs_rebuild:
+        print("[WARN] Schema change detected (Multi-Endpoint support). Dropping old table...")
+        cur.execute("DROP TABLE IF EXISTS wiki_cache")
+
+    # New Schema: Composite Key to handle multiple endpoints sharing IDs
     cur.execute("""
         CREATE TABLE IF NOT EXISTS wiki_cache (
-            id INTEGER PRIMARY KEY, title TEXT UNIQUE, body TEXT,
-            updated_at TEXT, imported BOOLEAN DEFAULT 0
+            unique_key TEXT PRIMARY KEY,
+            remote_id INTEGER,
+            title TEXT,
+            body TEXT,
+            updated_at TEXT,
+            source TEXT,
+            imported BOOLEAN DEFAULT 0
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_title ON wiki_cache(title)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_imported ON wiki_cache(imported)")
     conn.commit()
     return conn, cur
 
-def _process_toc_lines(toc_lines, title):
-    """Processes Table of Contents block to reduce locals."""
-    toc_processed = ["[h3][b]Table of Contents[/b][/h3]"]
-    for toc_line in toc_lines:
-        match = re.match(
-            r'^(\*+)\s*(?:([\dA-Za-z.]+)\.\s*)?"(.+?)":#([^\s]+)', toc_line.strip()
-        )
-        if match:
-            stars, number, label, anchor = match.groups()
-            indentation = '\u00A0' * (len(stars) - 1)
-            separator = '' if '.' in (number or '') else '.'
-            anchor = anchor.replace('dtext-', '')
-            formatted = (
-                f"{indentation}• {number or ''}{separator} "
-                f"[url=site://wiki/{title}#bb-{anchor}]{label}[/url]"
-            )
-            toc_processed.append(formatted)
-    return toc_processed
-
-# FIX: Removed the unused 'line' argument
-def _process_header(match, is_anchor):
-    """Processes headers to reduce locals."""
-    level = match.group(1)
-    label = match.group(3) if is_anchor else match.group(2)
-
-    if level == '2':
-        level = '1'
-    elif level == '3':
-        level = '2'
-    elif level == '4':
-        level = '3'
-    elif level in ('5', '6'):
-        level = '4'
-
-    if is_anchor:
-        anchor = match.group(2)
-        return f"[anchor={anchor}][/anchor][h{level}]{label}[/h{level}]"
-    return f"[h{level}]{label}[/h{level}]"
-
-def _clean_wiki_body(text: str, title: str) -> str:
-    """Sanitize and convert Danbooru wiki body to Shimmie2-friendly format."""
-    lines = []
-    in_toc, toc_lines = False, []
-
-    for line in text.splitlines():
-        line = line.rstrip()
-        if line.strip() == "":
-            lines.append(line)
-            continue
-
-        if line.strip().lower() == "[expand=table of contents]":
-            in_toc, toc_lines = True, []
-            continue
-
-        if in_toc:
-            if line.strip().lower() == "[/expand]":
-                in_toc = False
-                lines.extend(_process_toc_lines(toc_lines, title))
-            else:
-                toc_lines.append(line)
-            continue
-
-        if any(substr in line.lower() for substr in (
-            "/user_upgrades/new", "gold+ account", "premium users",
-            "see also: forum", "available to supporters",
-        )):
-            continue
-
-        line = re.sub(r'<a href="([^"]+)">(.+?)</a>', r'[url=\1]\2[/url]', line)
-        line = re.sub(r'"([^"]+?)":/wiki/([a-zA-Z0-9_:]+)', r'[[\2|\1]]', line)
-        line = re.sub(r'\[/forum_topics/\d+\]', '', line)
-        line = re.sub(r'<(ul|ol|p)>\s*</\1>', '', line)
-
-        header_anchor = re.match(r'^h([1-6])#([a-zA-Z0-9_-]+)\.\s*(.+)', line)
-        header_plain = re.match(r'^h([1-6])\.\s*(.+)', line)
-
-        if header_anchor or header_plain:
-            line = _process_header(header_anchor or header_plain, bool(header_anchor))
-
-        line = re.sub(r'!post\s+#\d+', '>>0', line)
-
-        list_match = re.match(r'^(\*+)\s*(.*)', line)
-        if list_match:
-            asterisks, content = list_match.groups()
-            spaces = '  ' * (len(asterisks) - 1) if len(asterisks) > 1 else ''
-            line = f"{spaces}• {content}"
-
-        lines.append(line)
-
-    cleaned = "\n".join(lines)
-
-    def repl_spaces(m):
-        c = m.group(1)
-        if '|' in c:
-            t, l = c.split('|', 1)
-            return f"[[{t.replace(' ', '_')}|{l}]]"
-        return f"[[{c.replace(' ', '_')}]]"
-
-    cleaned = re.sub(r'\[\[([^\]]+)\]\]', repl_spaces, cleaned)
-    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-
-def _markdown_to_html(text):
-    """Converts basic markdown elements to HTML."""
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"__(.+?)__", r"<strong>\1</strong>", text)
-    text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
-    text = re.sub(r"_(.+?)_", r"<em>\1</em>", text)
-    text = re.sub(r"(?m)^[-*]\s+(.*)", r"<li>\1</li>", text)
-    text = re.sub(r"(?s)(<li>.*?</li>)", r"<ul>\1</ul>", text)
-    return text
-
-def _insert_or_update_pg(pg_cur, title, body, existing_titles, update_existing=False):
-    """Handles insertion or revision updates in Postgres."""
-    if title not in existing_titles:
-        pg_cur.execute("""
-            INSERT INTO wiki_pages (owner_id, owner_ip, date, title, revision, locked, body)
-            VALUES (1, '127.0.0.1', %s, %s, 1, false, %s)
-        """, (datetime.now(), title, body))
-        return "inserted"
-
-    if update_existing:
-        pg_cur.execute(
-            "SELECT revision, body FROM wiki_pages WHERE title = %s ORDER BY revision DESC LIMIT 1",
-            (title,)
-        )
-        current = pg_cur.fetchone()
-        if current:
-            current_rev, current_body = current
-            if '[[shimmie:lock]]' in current_body:
-                print(f"🔒 Skipped locked entry: {title}")
-                return "skipped"
-            if body.strip() != current_body.strip():
-                pg_cur.execute("""
-                    INSERT INTO wiki_pages (owner_id, owner_ip, date, title, revision, locked, body)
-                    VALUES (1, '127.0.0.1', %s, %s, %s, false, %s)
-                """, (datetime.now(), title, current_rev + 1, body))
-                return "updated"
-    return "skipped"
-
 def _get_page_data(session, page, args, solver):
-    """Helper to fetch a single page of data, handling retries and captcha."""
-    # Construct the full target URL based on the selected endpoint
+    """Helper to fetch a single page of data."""
     target_url = urljoin(BASE_BOORU_URL, args.endpoint)
-
     try:
         resp = session.get(target_url, params={"page": page, "limit": 1000}, timeout=30)
 
-        # === CAPTCHA INTERCEPT ===
         if args.captcha and solver:
-            # Check start of response for captcha markers
             if solver.detect(resp.text[:2000]):
                 if solver.solve(session, resp.text, resp.url):
-                    print("[INFO] Retrying original request...")
+                    print("[INFO] Captcha solved. Retrying...")
                     resp = session.get(
                         target_url, params={"page": page, "limit": 1000}, timeout=30
                     )
                 else:
-                    print("[ERROR] Failed to solve captcha. Skipping page.")
                     return None
-        # =========================
 
         resp.raise_for_status()
         return resp.json()
-
     except requests.RequestException as e:
-        print(f"[ERROR] Failed fetching page {page}: {e}")
+        print(f"[ERROR] Fetch failed: {e}")
         return None
 
 def _process_wiki_entry(cursor, entry, args):
-    """Processes a single wiki entry and updates the cache."""
-    # Support both standard wiki format and artist_version format
+    """Processes a single wiki entry."""
     title = entry.get("title") or entry.get("name")
     entry_id = entry.get("id")
 
     if not title or not entry_id:
         return
 
-    # Handle body: standard wiki vs artist versions (urls list)
+    # Handle body variations
     body = entry.get("body", "")
     if not body and "urls" in entry and isinstance(entry["urls"], list):
-        body = "\n".join(entry["urls"])
+        body = "\n".join(entry["urls"]) # Artist versions often behave this way
 
     body = body.replace('\r\n', '\n').strip()
     title = title.strip()
 
-    if args.convert == "markdown":
-        body = _markdown_to_html(body)
-    elif args.convert == "shimmie":
-        body = _clean_wiki_body(body, title)
+    # Generate Unique Key: "wiki_pages.json_50" or "artist_versions.json_50"
+    unique_key = f"{args.endpoint}_{entry_id}"
 
-    cursor.execute("SELECT body FROM wiki_cache WHERE title = ?", (title,))
+    cursor.execute("SELECT body FROM wiki_cache WHERE unique_key = ?", (unique_key,))
     row = cursor.fetchone()
 
     if row is None:
         cursor.execute("""
-            INSERT OR REPLACE INTO wiki_cache (id, title, body, updated_at, imported)
-            VALUES (?, ?, ?, ?, 0)
-        """, (entry_id, title, body, entry.get("updated_at", "")))
+            INSERT INTO wiki_cache (
+                unique_key, remote_id, title, body, updated_at, source, imported
+            ) VALUES (?, ?, ?, ?, ?, ?, 0)
+        """, (
+            unique_key, entry_id, title, body,
+            entry.get("updated_at", ""), args.endpoint
+        ))
     else:
+        # Only update if changed
         if args.update_cache and body.strip() != row[0].strip():
-            cursor.execute(
-                "UPDATE wiki_cache SET body = ?, updated_at = ? WHERE title = ?",
-                (body, entry.get("updated_at", ""), title)
-            )
-        else:
-            cursor.execute(
-                "UPDATE wiki_cache SET imported = 0 WHERE title = ?", (title,)
-            )
+            cursor.execute("""
+                UPDATE wiki_cache
+                SET body = ?, title = ?, updated_at = ?, source = ?
+                WHERE unique_key = ?
+            """, (
+                body, title, entry.get("updated_at", ""),
+                args.endpoint, unique_key
+            ))
 
 def _fetch_and_cache(args):
     """Pulls directly from Danbooru API and caches in SQLite."""
     conn, cur = _init_cache()
-    if not args.update_cache:
-        cur.execute("UPDATE wiki_cache SET imported = 1")
 
-    # === CAPTCHA / SESSION LOGIC ===
-    if args.captcha:
-        if not get_protected_session:
-            print("[ERROR] Captcha module not found.")
-            return conn
+    # Session Setup
+    session = requests.Session()
+    solver = None
+    if args.captcha and get_protected_session:
         session = get_protected_session()
         solver = AntiBotSolver()
-    else:
-        session = requests.Session()
-        solver = None
-    # ===============================
 
     for page in range(args.start_page, args.start_page + args.pages):
-        print(f"📦 Fetching API page {page}...")
-
+        print(f"📦 Fetching {args.endpoint} page {page}...")
         data = _get_page_data(session, page, args, solver)
         if not data:
             continue
@@ -534,61 +521,18 @@ def _fetch_and_cache(args):
 
 def import_danbooru(args):
     """Main execution for fetching and importing Danbooru wikis."""
-    if args.spath:
-        db_config = get_shimmie_db_credentials(args.spath)
-        if not db_config:
-            print(f"[ERROR] Could not load DB credentials from {args.spath}")
-            return
-        print("=== Wiki Import Summary (Online) ===")
-        print(f"📚  Database:       {db_config['dbname']}")
-    else:
-        print("=== Wiki Import Summary (Offline Cache) ===")
-        print("💽  Target:         SQLite Cache Only")
-
-    print(f"📄  Pages:          {args.start_page} to {args.start_page + args.pages}")
+    print("=== Wiki Import Summary (Multi-Source) ===")
     print(f"🔗  Endpoint:       {args.endpoint}")
-    print(f"🔄  Update Cache:   {'Yes' if args.update_cache else 'No'}")
+    print(f"💽  Database:       {SQLITE_DB}")
+    print(f"📄  Pages:          {args.start_page} to {args.start_page + args.pages}")
 
     if args.clear_cache and SQLITE_DB.exists():
         SQLITE_DB.unlink()
         print("🧹 Cleared wiki cache.")
 
     cache_conn = _fetch_and_cache(args)
-
-    # If no spath provided, stop here (Cache creation complete)
-    if not args.spath:
-        print(f"\n[✓] Wiki data cached to {SQLITE_DB}")
-        cache_conn.close()
-        return
-
-    # Continue with Postgres import if spath exists
-    cache_cur = cache_conn.cursor()
-
-    pg_conn = psycopg2.connect(**db_config)
-    pg_conn.set_client_encoding('UTF8')
-    pg_cur = pg_conn.cursor()
-
-    pg_cur.execute("SELECT title FROM wiki_pages")
-    existing_titles = {row[0] for row in pg_cur.fetchall()}
-
-    cache_cur.execute("SELECT title, body FROM wiki_cache WHERE imported = 0")
-    rows = cache_cur.fetchall()
-    print(f"📥 {len(rows)} wiki pages queued for import into Postgres.")
-
-    results = {"inserted": 0, "updated": 0, "skipped": 0}
-    for title, body in rows:
-        result = _insert_or_update_pg(pg_cur, title, body, existing_titles, args.update_existing)
-        results[result] += 1
-        if result != "skipped":
-            cache_cur.execute("UPDATE wiki_cache SET imported = 1 WHERE title = ?", (title,))
-
-    pg_conn.commit()
-    cache_conn.commit()
-    pg_conn.close()
     cache_conn.close()
 
-    print(
-        f"\n✅ Inserted: {results['inserted']} | "
-        f"🔁 Updated: {results['updated']} | "
-        f"⏭️ Skipped: {results['skipped']}"
-    )
+    print(f"\n[✓] Data cached to {SQLITE_DB}")
+    print("    Note: To push to Shimmie Postgres, use 'make-csv' or custom scripts.")
+    print("    This tool now optimizes for the 'wiki-index' Static Site Generator.")

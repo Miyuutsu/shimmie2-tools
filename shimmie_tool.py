@@ -57,7 +57,7 @@ def _add_import_wikis_parser(subparsers):
     parser.add_argument(
         "--endpoint",
         default="wiki_pages.json",
-        help="API endpoint to fetch (e.g., wiki_pages.json, wiki_versions.json, artist_versions.json)"
+        help="API endpoint to fetch"
     )
 
 def _add_csv2sqlite_parser(subparsers):
