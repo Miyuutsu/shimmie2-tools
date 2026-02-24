@@ -44,7 +44,7 @@ def _get_custom_css():
         padding: 20px;
     }
     .page-container {
-        max-width: 900px;
+        max-width: 1000px;
         margin: 0 auto;
         background: var(--card-bg);
         padding: 40px;
@@ -93,6 +93,34 @@ def _get_custom_css():
         font-family: monospace;
         font-size: 0.9em;
     }
+    /* Dashboard Grid */
+    .dashboard-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 20px;
+        margin-top: 30px;
+    }
+    .dashboard-card {
+        background: rgba(255,255,255,0.05);
+        padding: 25px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        text-align: center;
+        transition: transform 0.2s, background 0.2s;
+        display: block;
+    }
+    .dashboard-card:hover {
+        transform: translateY(-5px);
+        background: rgba(255,255,255,0.1);
+        text-decoration: none;
+    }
+    .dashboard-card h3 {
+        border: none; margin: 0 0 10px 0;
+        color: var(--accent); font-size: 1.4em;
+    }
+    .dashboard-card span {
+        font-size: 0.9em; color: var(--text-muted); display: block;
+    }
     """
 
 def _write_css_file(out_dir):
@@ -125,8 +153,11 @@ def _get_bucket(name):
         return "#"
     return "misc"
 
-def _make_link(target, label=None, relative_to_bucket=None, rev_id=None):
-    """Creates a relative HTML link."""
+def _make_link(target, label=None, context="root", rev_id=None):
+    """
+    Creates a relative HTML link.
+    context: 'root' (dashboard), 'category' (sub-index), or bucket name (e.g. 'a')
+    """
     safe_target = _sanitize_fs_name(str(target).replace(' ', '_'))
     bucket = _get_bucket(safe_target)
 
@@ -134,10 +165,16 @@ def _make_link(target, label=None, relative_to_bucket=None, rev_id=None):
     if rev_id:
         filename = f"{safe_target}_rev{rev_id}.html"
 
-    if relative_to_bucket:
-        href = f"../{bucket}/{quote(filename)}"
-    else:
+    # Link logic based on where we are linking FROM
+    if context == "root":
+        # From index.html to pages/x/file.html
         href = f"pages/{bucket}/{quote(filename)}"
+    elif context == "category":
+        # From category/index.html to ../pages/x/file.html
+        href = f"../pages/{bucket}/{quote(filename)}"
+    else:
+        # From pages/y/file.html to ../x/file.html
+        href = f"../{bucket}/{quote(filename)}"
 
     return f'<a href="{href}">{html.escape(str(label or target))}</a>'
 
@@ -247,7 +284,8 @@ def _write_html_file(path, ctx, css_file):
 
     history_html = _build_history_html(ctx['revisions'], title, bucket)
 
-    nav_links = '<a href="../../index.html">← Back to Index</a>'
+    # Content pages are deep: pages/bucket/file.html -> ../../index.html
+    nav_links = '<a href="../../index.html">← Back to Dashboard</a>'
     if ctx['is_rev'] and ctx['parent_link']:
         nav_links += f' | <a href="{quote(ctx["parent_link"])}">Current Version</a>'
 
@@ -278,7 +316,7 @@ def _write_html_file(path, ctx, css_file):
 
 
 # ==========================================
-# Data Fetchers
+# Data Fetchers & Classification
 # ==========================================
 def _get_entries_sqlite():
     """Fetch all entries from SQLite and group them by title."""
@@ -299,53 +337,89 @@ def _get_entries_sqlite():
         return {}
     return entries
 
-def _get_sorted_index_html(titles, args, css_file):
-    """Generates the main index.html content."""
-    content = ""
+def _classify_entry_type(entry):
+    """Classifies an entry based on its source endpoint."""
+    src = entry['source']
+    if 'wiki_pages' in src or 'wiki_page' in src:
+        return 'Wiki'
+    if 'artist_commentary' in src:
+        return 'Artist Commentary'
+    if 'artist' in src:
+        return 'Artists'
+    if 'pool' in src:
+        return 'Pools'
+    if 'note' in src:
+        return 'Notes'
+    if 'post' in src:
+        return 'Posts'
+    return 'Other'
 
-    # Simple list vs Sorted buckets
-    if args.sort:
-        buckets = defaultdict(list)
-        for t in titles:
-            bk = _get_bucket(t)
-            link = _make_link(t, t, relative_to_bucket=None)
-            buckets[bk].append(link)
+def _write_category_index_html(path, category, titles, css_file):
+    """Generates a sub-index HTML page for a specific category."""
+    # Context "category" creates links like ../pages/bucket/file.html
+    links = [_make_link(t, t, context="category") for t in titles]
 
-        keys = sorted(buckets.keys())
-        if '#' in keys:
-            keys.remove('#')
-            keys.insert(0, '#')
+    style = "column-count: 3; list-style: none; padding: 0;"
+    # Split for pylint
+    list_items = "\n".join([f"<li>{l}</li>" for l in links])
+    content = f"<ul style='{style}'>\n{list_items}\n</ul>"
 
-        for k in keys:
-            style = (
-                "list-style: none; padding: 0; "
-                "display: flex; flex-wrap: wrap; gap: 10px;"
-            )
-            content += f"<h2>{k.upper()}</h2>\n<ul style='{style}'>\n"
-            for link in buckets[k]:
-                content += f"<li style='flex: 1 0 200px;'>{link}</li>\n"
-            content += "</ul>\n"
-    else:
-        links = [_make_link(t, t, relative_to_bucket=None) for t in titles]
-        style = "column-count: 3;"
-        # Split line to satisfy pylint 100 char limit
-        list_items = "\n".join([f"<li>{l}</li>" for l in links])
-        content = f"<ul style='{style}'>\n{list_items}\n</ul>"
-
-    return f"""<!DOCTYPE html>
+    # Category pages are 1 deep: category/index.html -> ../style.css
+    html_content = f"""<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Wiki Index</title>
-    <link rel="stylesheet" href="{css_file}">
+    <title>Index: {category}</title>
+    <link rel="stylesheet" href="../{css_file}">
 </head>
 <body>
     <div class="page-container">
-        <h1>Wiki Index</h1>
+        <div class="nav"><a href="../index.html">← Back to Dashboard</a></div>
+        <h1>Index: {category}</h1>
+        <p class="meta-info">{len(titles)} Entries</p>
         {content}
     </div>
 </body>
 </html>"""
+    with path.open("w", encoding="utf-8") as f:
+        f.write(html_content)
+
+def _write_dashboard_html(path, categories, css_file):
+    """Generates the main dashboard landing page."""
+    grid_html = ""
+    for cat_name, titles in sorted(categories.items()):
+        count = len(titles)
+        # Folder name: lowercase and spaces allowed (OS permits) or sanitized
+        folder_name = _sanitize_fs_name(cat_name).lower()
+        # Link to the folder's index
+        safe_link = f"{folder_name}/index.html"
+
+        grid_html += f"""
+        <a href="{safe_link}" class="dashboard-card">
+            <h3>{cat_name}</h3>
+            <span>{count} Entries</span>
+        </a>
+        """
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Wiki Archive Dashboard</title>
+    <link rel="stylesheet" href="{css_file}">
+</head>
+<body>
+    <div class="page-container">
+        <h1>Wiki Archive Dashboard</h1>
+        <p>Select a category to browse the index.</p>
+        <div class="dashboard-grid">
+            {grid_html}
+        </div>
+    </div>
+</body>
+</html>"""
+    with path.open("w", encoding="utf-8") as f:
+        f.write(html_content)
 
 def _score_wiki_entry(row):
     """Scores an entry to determine if it should be the 'Main' page."""
@@ -370,35 +444,51 @@ def create_index(args):
         print("[ERROR] No wiki entries found.")
         return
 
-    print(f"[INFO] Found {len(grouped_entries)} unique titles. Generating static site...")
+    print(f"[INFO] Found {len(grouped_entries)} unique titles. Generating site...")
 
+    # Create root dirs
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "pages").mkdir(exist_ok=True)
 
     css_file = _write_css_file(out_dir)
 
+    # Bucket titles by Category
+    categories = defaultdict(list)
     count = 0
-    for _, rows in grouped_entries.items():
+
+    for title, rows in grouped_entries.items():
         # Sort by Score DESC, then Date DESC
         rows.sort(
             key=lambda x: (_score_wiki_entry(x), x['updated_at'] or ""),
             reverse=True
         )
-
         main_entry = rows[0]
         revisions = rows[1:] if len(rows) > 1 else []
 
+        # Write the Content Page
         _write_static_page(out_dir, main_entry, revisions, css_file)
+
+        # Classify for Index
+        cat = _classify_entry_type(main_entry)
+        categories[cat].append(title)
+
         count += 1
         if count % 1000 == 0:
             print(f"   ...processed {count} titles", end="\r")
 
     print(f"[✓] Generated pages for {count} titles in '{out_dir}/pages/'")
 
-    index_html = _get_sorted_index_html(sorted(grouped_entries.keys()), args, css_file)
-    with (out_dir / "index.html").open("w", encoding="utf-8") as f:
-        f.write(index_html)
-    print(f"[✓] Main index created at '{out_dir}/index.html'")
+    # Generate Sub-Indexes in nested folders
+    for cat, titles in categories.items():
+        folder_name = _sanitize_fs_name(cat).lower()
+        cat_dir = out_dir / folder_name
+        cat_dir.mkdir(exist_ok=True)
+
+        _write_category_index_html(cat_dir / "index.html", cat, titles, css_file)
+
+    # Generate Dashboard
+    _write_dashboard_html(out_dir / "index.html", categories, css_file)
+    print(f"[✓] Dashboard created at '{out_dir}/index.html'")
 
 
 # ==========================================
