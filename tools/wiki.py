@@ -2,6 +2,7 @@
 """Wiki management tools (Indexing and Danbooru Imports)."""
 import re
 import sqlite3
+from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,9 @@ from functions.db_cache import get_shimmie_db_credentials
 
 DANBOORU_URL = "https://danbooru.donmai.us/wiki_pages.json"
 SQLITE_DB = Path("database/danbooru_wiki_cache.db")
+POSTS_DB = Path("database/posts_cache.db")
+
+CategoryConfig = namedtuple('CategoryConfig', ['prefix', 'title', 'col'])
 
 # ==========================================
 # Shared DB Helper
@@ -24,8 +28,8 @@ def _unique_names(names):
 # ==========================================
 # Tool 1: Create Wiki Index
 # ==========================================
-def _fetch_tag_dict(cursor, prefix):
-    """Helper to fetch dict of tags to reduce local variables."""
+def _fetch_tag_dict_pg(cursor, prefix):
+    """Helper to fetch dict of tags from Postgres."""
     if prefix:
         cursor.execute(f"SELECT tag FROM tags WHERE tag ILIKE '{prefix}%' ORDER BY tag ASC;")
         return {t[0][len(prefix):]: t[0] for t in cursor.fetchall()}
@@ -36,9 +40,30 @@ def _fetch_tag_dict(cursor, prefix):
     )
     return {t[0]: t[0] for t in cursor.fetchall()}
 
-def _sort_category(textfile, cursor, prefix, title_header):
+def _fetch_tag_dict_sqlite(cursor, column, prefix):
+    """Helper to fetch unique tags from posts_cache.db column."""
+    tags = set()
+    try:
+        cursor.execute(f"SELECT {column} FROM posts")
+        for row in cursor:
+            if row[0]:
+                for tag in row[0].split(','):
+                    t = tag.strip()
+                    if t:
+                        tags.add(t)
+    except sqlite3.Error:
+        return {}
+
+    return {t: f"{prefix}{t}" if prefix else t for t in tags}
+
+def _sort_category(textfile, cursor, cat_config, source_type="pg"):
     """A unified function to sort and replace tags for any category."""
-    tag_dict = _fetch_tag_dict(cursor, prefix)
+    prefix, title_header, col = cat_config
+
+    if source_type == "sqlite":
+        tag_dict = _fetch_tag_dict_sqlite(cursor, col, prefix)
+    else:
+        tag_dict = _fetch_tag_dict_pg(cursor, prefix)
 
     with textfile.open("r", encoding="utf-8") as file:
         content = file.read()
@@ -49,7 +74,6 @@ def _sort_category(textfile, cursor, prefix, title_header):
 
     pattern = re.compile(r'\[\[([^\(\)]+?)\]\]')
 
-    # FIX: Inline list comprehensions to drop local variable count
     if prefix:
         lines = pattern.sub(replace_tag, content).splitlines()
         unique_lines = _unique_names([line for line in lines if line.startswith(f'[[{prefix}')])
@@ -58,61 +82,113 @@ def _sort_category(textfile, cursor, prefix, title_header):
     combined_tags = set(list(tag_dict.keys()) + [t.strip() for t in pattern.findall(content)])
     return f"== {title_header} ==\n" + "\n".join(sorted([f'[[{tag}]]' for tag in combined_tags]))
 
+def _generate_sorted_output(out_path, conn, source_type):
+    """Generates the sorted output using the appropriate DB connection."""
+    cursor = conn.cursor()
+
+    # Map (prefix, title, sqlite_column)
+    categories = {
+        "c": CategoryConfig("character:", "Characters", "character"),
+        "s": CategoryConfig("series:", "Series", "series"),
+        "a": CategoryConfig("artist:", "Artists", "artist"),
+        "g": CategoryConfig("", "General", "general")
+    }
+
+    sections = {}
+    for key, config in categories.items():
+        print(f"   - Processing {config.title}...")
+        sections[key] = _sort_category(out_path, cursor, config, source_type)
+
+    return sections
+
+def _get_titles_pg(spath):
+    """Fetch wiki titles from Postgres."""
+    db_config = get_shimmie_db_credentials(spath)
+    if not db_config:
+        print(f"[ERROR] Could not load DB credentials from {spath}")
+        return None
+    try:
+        with psycopg2.connect(**db_config) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT title FROM wiki_pages ORDER BY title ASC")
+                return [f"[[{p[0].replace(' ', '_')}]]" for p in cursor.fetchall()]
+    except psycopg2.Error as err:
+        print(f"[ERROR] Postgres error: {err}")
+        return None
+
+def _get_titles_sqlite():
+    """Fetch wiki titles from local SQLite cache."""
+    if not SQLITE_DB.exists():
+        print(f"[ERROR] No Shimmie path provided and {SQLITE_DB} not found.")
+        print("Run 'import-wikis' first to populate the cache.")
+        return None
+    print(f"[INFO] Running in Offline Mode using {SQLITE_DB}")
+    try:
+        with sqlite3.connect(SQLITE_DB) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT title FROM wiki_cache ORDER BY title ASC")
+            return [f"[[{p[0].replace(' ', '_')}]]" for p in cursor.fetchall()]
+    except sqlite3.Error as err:
+        print(f"[ERROR] SQLite error: {err}")
+        return None
+
+def _handle_sorting(args, out_path):
+    """Handles the optional sorting logic."""
+    print(f"Sorting tags from {args.output}...")
+    sections = {}
+
+    if args.spath:
+        db_config = get_shimmie_db_credentials(args.spath)
+        if not db_config:
+            return
+        try:
+            with psycopg2.connect(**db_config) as conn:
+                sections = _generate_sorted_output(out_path, conn, "pg")
+        except psycopg2.Error as err:
+            print(f"[ERROR] Postgres sorting error: {err}")
+            return
+    else:
+        if not POSTS_DB.exists():
+            print(f"[WARNING] Skipping sort: {POSTS_DB} not found.")
+            return
+
+        print(f"[INFO] Sorting using tags from {POSTS_DB}...")
+        try:
+            with sqlite3.connect(POSTS_DB) as conn:
+                sections = _generate_sorted_output(out_path, conn, "sqlite")
+        except sqlite3.Error as err:
+            print(f"[ERROR] SQLite sorting error: {err}")
+            return
+
+    if sections:
+        order = args.order.split(",") if args.order else []
+        final_output = "\n\n".join(sections[s] for s in order if s in sections)
+        sorted_path = out_path.with_name(out_path.stem + "_sorted.txt")
+        with sorted_path.open("w", encoding="utf-8") as file:
+            file.write(final_output)
+        print(f"[✓] Sorted tags written to {sorted_path}.")
+
 def create_index(args):
     """Main execution for creating and sorting the wiki index."""
-    db_config = get_shimmie_db_credentials(args.spath)
-    if not db_config:
-        print(f"[ERROR] Could not load DB credentials from {args.spath}")
-        return
     out_path = Path(args.output)
-    conn = None
 
-    if not out_path.exists():
-        try:
-            conn = psycopg2.connect(**db_config)
-            cursor = conn.cursor()
-            cursor.execute("SELECT title FROM wiki_pages ORDER BY title ASC")
-            wiki_urls = cursor.fetchall()
+    # 1. Fetch Titles
+    if args.spath:
+        wiki_links = _get_titles_pg(args.spath)
+    else:
+        wiki_links = _get_titles_sqlite()
 
-            wiki_links = [f"[[{page[0].replace(' ', '_')}]]" for page in wiki_urls]
+    if wiki_links is None:
+        return
 
-            with out_path.open('w', encoding="utf-8") as f:
-                f.write("\n".join(wiki_links))
-            print(f"[✓] Wiki index created at {args.output}.")
-        except psycopg2.Error as err:
-            print(f"[ERROR] Database error: {err}")
-        finally:
-            if conn:
-                cursor.close()
-                conn.close()
+    # 2. Write Index File
+    with out_path.open('w', encoding="utf-8") as f:
+        f.write("\n".join(wiki_links))
+    print(f"[✓] Wiki index created at {args.output}.")
 
-    if out_path.exists() and args.sort:
-        print(f"Sorting the tags from {args.output}...")
-        try:
-            conn = psycopg2.connect(**db_config)
-            cursor = conn.cursor()
-
-            sections = {
-                "c": _sort_category(out_path, cursor, "character:", "Characters"),
-                "s": _sort_category(out_path, cursor, "series:", "Series"),
-                "a": _sort_category(out_path, cursor, "artist:", "Artists"),
-                "g": _sort_category(out_path, cursor, "", "General")
-            }
-
-            order = args.order.split(",") if args.order else []
-            final_output = "\n\n".join(sections[s] for s in order if s in sections)
-
-            sorted_path = out_path.with_name(out_path.stem + "_sorted.txt")
-            with sorted_path.open("w", encoding="utf-8") as file:
-                file.write(final_output)
-            print(f"[✓] Sorted tags written to {sorted_path}.")
-
-        except psycopg2.Error as err:
-            print(f"[ERROR] Database error during sorting: {err}")
-        finally:
-            if conn:
-                cursor.close()
-                conn.close()
+    # 3. Sort Tags (Optional)
+    if args.sort:
+        _handle_sorting(args, out_path)
 
 
 # ==========================================
@@ -319,23 +395,33 @@ def _fetch_and_cache(args):
 
 def import_danbooru(args):
     """Main execution for fetching and importing Danbooru wikis."""
-    db_config = get_shimmie_db_credentials(args.spath)
-    if not db_config:
-        print(f"[ERROR] Could not load DB credentials from {args.spath}")
-        return
+    if args.spath:
+        db_config = get_shimmie_db_credentials(args.spath)
+        if not db_config:
+            print(f"[ERROR] Could not load DB credentials from {args.spath}")
+            return
+        print("=== Wiki Import Summary (Online) ===")
+        print(f"📚  Database:       {db_config['dbname']}")
+    else:
+        print("=== Wiki Import Summary (Offline Cache) ===")
+        print("💽  Target:         SQLite Cache Only")
 
-    print("=== Wiki Import Summary ===")
-    print(f"📚  Database:       {db_config['dbname']}")
-    print(f"👤  User:           {db_config['user']}")
     print(f"📄  Pages:          {args.start_page} to {args.start_page + args.pages}")
     print(f"🔄  Update Cache:   {'Yes' if args.update_cache else 'No'}")
-    print(f"📝  Update Exist:   {'Yes' if args.update_existing else 'No'}\n")
 
     if args.clear_cache and SQLITE_DB.exists():
         SQLITE_DB.unlink()
         print("🧹 Cleared wiki cache.")
 
     cache_conn = _fetch_and_cache(args)
+
+    # If no spath provided, stop here (Cache creation complete)
+    if not args.spath:
+        print(f"\n[✓] Wiki data cached to {SQLITE_DB}")
+        cache_conn.close()
+        return
+
+    # Continue with Postgres import if spath exists
     cache_cur = cache_conn.cursor()
 
     pg_conn = psycopg2.connect(**db_config)

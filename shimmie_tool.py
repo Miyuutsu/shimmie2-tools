@@ -33,7 +33,7 @@ def _add_csv_parser(subparsers):
 def _add_wiki_index_parser(subparsers):
     """Adds the wiki-index command."""
     parser = subparsers.add_parser("wiki-index", help="Create or sort wiki index")
-    parser.add_argument("--spath", required=True, help="Path to shimmie root")
+    parser.add_argument("--spath", help="Path to shimmie root (Optional for offline mode)")
     parser.add_argument("--output", type=str, default="wiki_index.txt", help="Output file")
     parser.add_argument("--sort", action="store_true", help="Enable sorting of tags")
     parser.add_argument(
@@ -43,7 +43,7 @@ def _add_wiki_index_parser(subparsers):
 def _add_import_wikis_parser(subparsers):
     """Adds the import-wikis command."""
     parser = subparsers.add_parser("import-wikis", help="Import Danbooru wikis")
-    parser.add_argument("--spath", required=True, help="Path to shimmie root")
+    parser.add_argument("--spath", help="Path to shimmie root (Optional for cache-only mode)")
     parser.add_argument("--start-page", type=int, default=1)
     parser.add_argument("--pages", type=int, default=200)
     parser.add_argument("--update-existing", action="store_true")
