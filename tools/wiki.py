@@ -111,7 +111,7 @@ def _get_titles_pg(spath):
         with psycopg2.connect(**db_config) as conn:
             with conn.cursor() as cursor:
                 cursor.execute("SELECT title FROM wiki_pages ORDER BY title ASC")
-                return [f"[[{p[0].replace(' ', '_')}]]" for p in cursor.fetchall()]
+                return [f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>' for p in cursor.fetchall()]
     except psycopg2.Error as err:
         print(f"[ERROR] Postgres error: {err}")
         return None
@@ -127,7 +127,7 @@ def _get_titles_sqlite():
         with sqlite3.connect(SQLITE_DB) as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT title FROM wiki_cache ORDER BY title ASC")
-            return [f"[[{p[0].replace(' ', '_')}]]" for p in cursor.fetchall()]
+            return [f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>' for p in cursor.fetchall()]
     except sqlite3.Error as err:
         print(f"[ERROR] SQLite error: {err}")
         return None
