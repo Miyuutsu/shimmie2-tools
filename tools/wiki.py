@@ -1,10 +1,12 @@
 # pylint: disable=duplicate-code
 """Wiki management tools (Indexing and Danbooru Imports)."""
 import re
+import html
 import sqlite3
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote, urljoin
 
 import psycopg2
 import requests
@@ -18,192 +20,257 @@ except ImportError:
     get_protected_session = None
     AntiBotSolver = None
 
-DANBOORU_URL = "https://danbooru.donmai.us/wiki_pages.json"
+BASE_BOORU_URL = "https://danbooru.donmai.us/"
 SQLITE_DB = Path("database/danbooru_wiki_cache.db")
 POSTS_DB = Path("database/posts_cache.db")
 
 CategoryConfig = namedtuple('CategoryConfig', ['prefix', 'title', 'col'])
 
 # ==========================================
-# Shared DB Helper
+# Static Site Generator Helpers
 # ==========================================
-def _unique_names(names):
-    """Return unique names while maintaining the order."""
-    seen = set()
-    return [name for name in names if not (name in seen or seen.add(name))]
+def _sanitize_fs_name(name):
+    """
+    Sanitizes a wiki title for use as a filename.
+    Replaces unsafe FS chars (/, \\, :, *, ?, ", <, >, |) with underscore.
+    Keeps ' and ; as requested, but handles them carefully.
+    """
+    # Replace dangerous characters
+    clean = re.sub(r'[<>:"/\\|?*]', '_', name)
+    # Strip leading/trailing spaces or dots (Windows doesn't like trailing dots)
+    return clean.strip(" .")
 
-# ==========================================
-# Tool 1: Create Wiki Index
-# ==========================================
-def _fetch_tag_dict_pg(cursor, prefix):
-    """Helper to fetch dict of tags from Postgres."""
-    if prefix:
-        cursor.execute(f"SELECT tag FROM tags WHERE tag ILIKE '{prefix}%' ORDER BY tag ASC;")
-        return {t[0][len(prefix):]: t[0] for t in cursor.fetchall()}
+def _get_bucket(name):
+    """Determines the subdirectory bucket (a, b, ..., #) for a file."""
+    if not name:
+        return "misc"
+    char = name[0].lower()
+    if 'a' <= char <= 'z':
+        return char
+    if '0' <= char <= '9':
+        return "#"
+    return "misc"
 
-    cursor.execute(
-        "SELECT tag FROM tags WHERE tag NOT ILIKE 'artist:%' "
-        "AND tag NOT ILIKE 'character:%' AND tag NOT ILIKE 'series:%' ORDER BY tag ASC;"
-    )
-    return {t[0]: t[0] for t in cursor.fetchall()}
+def _make_link(target, label=None, relative_to_bucket=None):
+    """Creates a relative HTML link to another wiki page."""
+    safe_target = _sanitize_fs_name(target.replace(' ', '_'))
+    bucket = _get_bucket(safe_target)
 
-def _fetch_tag_dict_sqlite(cursor, column, prefix):
-    """Helper to fetch unique tags from posts_cache.db column."""
-    tags = set()
-    try:
-        cursor.execute(f"SELECT {column} FROM posts")
-        for row in cursor:
-            if row[0]:
-                for tag in row[0].split(','):
-                    t = tag.strip()
-                    if t:
-                        tags.add(t)
-    except sqlite3.Error:
-        return {}
-
-    return {t: f"{prefix}{t}" if prefix else t for t in tags}
-
-def _sort_category(textfile, cursor, cat_config, source_type="pg"):
-    """A unified function to sort and replace tags for any category."""
-    prefix, title_header, col = cat_config
-
-    if source_type == "sqlite":
-        tag_dict = _fetch_tag_dict_sqlite(cursor, col, prefix)
+    if relative_to_bucket:
+        # Link from pages/X/file.html -> pages/Y/target.html
+        # Path is ../Y/target.html
+        href = f"../{bucket}/{quote(safe_target)}.html"
     else:
-        tag_dict = _fetch_tag_dict_pg(cursor, prefix)
+        # Link from root index.html -> pages/Y/target.html
+        href = f"pages/{bucket}/{quote(safe_target)}.html"
 
-    with textfile.open("r", encoding="utf-8") as file:
-        content = file.read()
+    return f'<a href="{href}">{html.escape(label or target)}</a>'
 
-    def replace_tag(match):
-        name = match.group(1).strip()
-        return f"[[{tag_dict[name]}]]" if name in tag_dict else match.group(0)
+def _shimmie_to_html(text, current_bucket):
+    """
+    Converts Shimmie markup (BBCode-ish) to simple HTML for static viewing.
+    """
+    if not text:
+        return ""
 
-    pattern = re.compile(r'\[\[([^\(\)]+?)\]\]')
+    # Escape HTML first
+    text = html.escape(text)
 
-    if prefix:
-        lines = pattern.sub(replace_tag, content).splitlines()
-        unique_lines = _unique_names([line for line in lines if line.startswith(f'[[{prefix}')])
-        return f"== {title_header} ==\n\n" + "\n".join(unique_lines)
+    # Headers
+    text = re.sub(r'\[h(\d)\](.*?)\[/h\1\]', r'<h\1>\2</h\1>', text)
 
-    combined_tags = set(list(tag_dict.keys()) + [t.strip() for t in pattern.findall(content)])
-    return f"== {title_header} ==\n" + "\n".join(sorted([f'[[{tag}]]' for tag in combined_tags]))
+    # Formatting
+    text = re.sub(r'\[b\](.*?)\[/b\]', r'<strong>\1</strong>', text)
+    text = re.sub(r'\[i\](.*?)\[/i\]', r'<em>\1</em>', text)
+    text = re.sub(r'\[u\](.*?)\[/u\]', r'<u>\1</u>', text)
+    text = re.sub(r'\[s\](.*?)\[/s\]', r'<s>\1</s>', text)
 
-def _generate_sorted_output(out_path, conn, source_type):
-    """Generates the sorted output using the appropriate DB connection."""
-    cursor = conn.cursor()
+    # Links: [[Target]] or [[Target|Label]]
+    def link_repl(match):
+        content = match.group(1)
+        if '|' in content:
+            target, label = content.split('|', 1)
+            return _make_link(target, label, current_bucket)
+        return _make_link(content, content, current_bucket)
 
-    # Map (prefix, title, sqlite_column)
-    categories = {
-        "c": CategoryConfig("character:", "Characters", "character"),
-        "s": CategoryConfig("series:", "Series", "series"),
-        "a": CategoryConfig("artist:", "Artists", "artist"),
-        "g": CategoryConfig("", "General", "general")
-    }
+    text = re.sub(r'\[\[(.*?)\]\]', link_repl, text)
 
-    sections = {}
-    for key, config in categories.items():
-        print(f"   - Processing {config.title}...")
-        sections[key] = _sort_category(out_path, cursor, config, source_type)
+    # External Links [url=...]...[/url]
+    text = re.sub(
+        r'\[url=([^\]]+)\](.*?)\[/url\]',
+        r'<a href="\1" target="_blank">\2</a>',
+        text
+    )
 
-    return sections
+    # Newlines to <br>
+    text = text.replace('\n', '<br>')
 
-def _get_titles_pg(spath):
-    """Fetch wiki titles from Postgres."""
+    return text
+
+def _write_static_page(out_dir, title, body):
+    """Writes a single HTML page."""
+    safe_name = _sanitize_fs_name(title.replace(' ', '_'))
+    bucket = _get_bucket(safe_name)
+
+    bucket_dir = out_dir / "pages" / bucket
+    bucket_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = bucket_dir / f"{safe_name}.html"
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{html.escape(title)}</title>
+    <style>
+        body {{
+            font-family: sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 0 10px;
+            line-height: 1.6;
+        }}
+        a {{ color: #007bff; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+        .nav {{ margin-bottom: 20px; font-size: 0.9em; }}
+    </style>
+</head>
+<body>
+    <div class="nav">
+        <a href="../../index.html">← Back to Index</a>
+    </div>
+    <h1>{html.escape(title)}</h1>
+    <div>
+        {_shimmie_to_html(body, bucket)}
+    </div>
+</body>
+</html>"""
+
+    with file_path.open("w", encoding="utf-8") as f:
+        f.write(html_content)
+
+# ==========================================
+# Data Fetchers
+# ==========================================
+def _get_entries_pg(spath):
+    """Fetch all (title, body) pairs from Postgres."""
     db_config = get_shimmie_db_credentials(spath)
     if not db_config:
         print(f"[ERROR] Could not load DB credentials from {spath}")
-        return None
+        return []
     try:
         with psycopg2.connect(**db_config) as conn:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT title FROM wiki_pages ORDER BY title ASC")
-                # HTML Version
-                return [
-                    f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>'
-                    for p in cursor.fetchall()
-                ]
+                cursor.execute("SELECT title, body FROM wiki_pages ORDER BY title ASC")
+                return cursor.fetchall()
     except psycopg2.Error as err:
         print(f"[ERROR] Postgres error: {err}")
-        return None
+        return []
 
-def _get_titles_sqlite():
-    """Fetch wiki titles from local SQLite cache."""
+def _get_entries_sqlite():
+    """Fetch all (title, body) pairs from SQLite cache."""
     if not SQLITE_DB.exists():
         print(f"[ERROR] No Shimmie path provided and {SQLITE_DB} not found.")
-        print("Run 'import-wikis' first to populate the cache.")
-        return None
-    print(f"[INFO] Running in Offline Mode using {SQLITE_DB}")
+        return []
     try:
         with sqlite3.connect(SQLITE_DB) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT title FROM wiki_cache ORDER BY title ASC")
-            # HTML Version
-            return [
-                f'<a href="/wiki/{p[0].replace(" ", "_")}">{p[0]}</a><br>'
-                for p in cursor.fetchall()
-            ]
+            cursor.execute("SELECT title, body FROM wiki_cache ORDER BY title ASC")
+            return cursor.fetchall()
     except sqlite3.Error as err:
         print(f"[ERROR] SQLite error: {err}")
-        return None
+        return []
 
-def _handle_sorting(args, out_path):
-    """Handles the optional sorting logic."""
-    print(f"Sorting tags from {args.output}...")
-    sections = {}
+def _get_sorted_index_html(entries, args):
+    """Generates the main index.html content."""
 
-    if args.spath:
-        db_config = get_shimmie_db_credentials(args.spath)
-        if not db_config:
-            return
-        try:
-            with psycopg2.connect(**db_config) as conn:
-                sections = _generate_sorted_output(out_path, conn, "pg")
-        except psycopg2.Error as err:
-            print(f"[ERROR] Postgres sorting error: {err}")
-            return
+    # 1. Build Dictionary of Links
+    links = []
+    for title, _ in entries:
+        links.append(_make_link(title, title, relative_to_bucket=None))
+
+    content = ""
+
+    if args.sort:
+        buckets = defaultdict(list)
+        for title, _ in entries:
+            bk = _get_bucket(title)
+            link = _make_link(title, title, relative_to_bucket=None)
+            buckets[bk].append(link)
+
+        keys = sorted(buckets.keys())
+        if '#' in keys:
+            keys.remove('#')
+            keys.insert(0, '#')
+
+        for k in keys:
+            content += f"<h2>{k.upper()}</h2>\n<ul>\n"
+            for link in buckets[k]:
+                content += f"<li>{link}</li>\n"
+            content += "</ul>\n"
+
     else:
-        if not POSTS_DB.exists():
-            print(f"[WARNING] Skipping sort: {POSTS_DB} not found.")
-            return
+        content = "<ul>\n" + "\n".join([f"<li>{l}</li>" for l in links]) + "\n</ul>"
 
-        print(f"[INFO] Sorting using tags from {POSTS_DB}...")
-        try:
-            with sqlite3.connect(POSTS_DB) as conn:
-                sections = _generate_sorted_output(out_path, conn, "sqlite")
-        except sqlite3.Error as err:
-            print(f"[ERROR] SQLite sorting error: {err}")
-            return
-
-    if sections:
-        order = args.order.split(",") if args.order else []
-        final_output = "\n\n".join(sections[s] for s in order if s in sections)
-        sorted_path = out_path.with_name(out_path.stem + "_sorted.txt")
-        with sorted_path.open("w", encoding="utf-8") as file:
-            file.write(final_output)
-        print(f"[✓] Sorted tags written to {sorted_path}.")
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Wiki Index</title>
+    <style>
+        body {{ font-family: sans-serif; max-width: 900px; margin: 20px auto; padding: 20px; }}
+        h1 {{ text-align: center; }}
+        h2 {{ border-bottom: 1px solid #ccc; margin-top: 30px; }}
+        ul {{ list-style-type: none; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; }}
+        li {{ flex: 1 0 200px; }}
+        a {{ text-decoration: none; color: #333; }}
+        a:hover {{ color: #007bff; }}
+    </style>
+</head>
+<body>
+    <h1>Wiki Index</h1>
+    {content}
+</body>
+</html>"""
 
 def create_index(args):
-    """Main execution for creating and sorting the wiki index."""
-    out_path = Path(args.output)
+    """Main execution for creating the static wiki site."""
+    out_dir = Path(args.output)
 
-    # 1. Fetch Titles
+    # 1. Fetch Data
+    print("[INFO] Fetching wiki data...")
     if args.spath:
-        wiki_links = _get_titles_pg(args.spath)
+        entries = _get_entries_pg(args.spath)
     else:
-        wiki_links = _get_titles_sqlite()
+        entries = _get_entries_sqlite()
 
-    if wiki_links is None:
+    if not entries:
+        print("[ERROR] No wiki entries found.")
         return
 
-    # 2. Write Index File
-    with out_path.open('w', encoding="utf-8") as f:
-        f.write("\n".join(wiki_links))
-    print(f"[✓] Wiki index created at {args.output}.")
+    print(f"[INFO] Found {len(entries)} pages. Generating static site...")
 
-    # 3. Sort Tags (Optional)
-    if args.sort:
-        _handle_sorting(args, out_path)
+    # 2. Create Directory Structure
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "pages").mkdir(exist_ok=True)
+
+    # 3. Generate Individual Pages
+    count = 0
+    for title, body in entries:
+        _write_static_page(out_dir, title, body)
+        count += 1
+        if count % 1000 == 0:
+            print(f"   ...processed {count} pages", end="\r")
+
+    print(f"[✓] Generated {count} HTML pages in '{out_dir}/pages/'")
+
+    # 4. Generate Main Index
+    index_html = _get_sorted_index_html(entries, args)
+    with (out_dir / "index.html").open("w", encoding="utf-8") as f:
+        f.write(index_html)
+
+    print(f"[✓] Main index created at '{out_dir}/index.html'")
 
 
 # ==========================================
@@ -366,8 +433,11 @@ def _insert_or_update_pg(pg_cur, title, body, existing_titles, update_existing=F
 
 def _get_page_data(session, page, args, solver):
     """Helper to fetch a single page of data, handling retries and captcha."""
+    # Construct the full target URL based on the selected endpoint
+    target_url = urljoin(BASE_BOORU_URL, args.endpoint)
+
     try:
-        resp = session.get(DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30)
+        resp = session.get(target_url, params={"page": page, "limit": 1000}, timeout=30)
 
         # === CAPTCHA INTERCEPT ===
         if args.captcha and solver:
@@ -376,7 +446,7 @@ def _get_page_data(session, page, args, solver):
                 if solver.solve(session, resp.text, resp.url):
                     print("[INFO] Retrying original request...")
                     resp = session.get(
-                        DANBOORU_URL, params={"page": page, "limit": 1000}, timeout=30
+                        target_url, params={"page": page, "limit": 1000}, timeout=30
                     )
                 else:
                     print("[ERROR] Failed to solve captcha. Skipping page.")
@@ -392,9 +462,17 @@ def _get_page_data(session, page, args, solver):
 
 def _process_wiki_entry(cursor, entry, args):
     """Processes a single wiki entry and updates the cache."""
-    title, body, entry_id = entry.get("title", ""), entry.get("body", ""), entry.get("id")
-    if not title or not body or not entry_id:
+    # Support both standard wiki format and artist_version format
+    title = entry.get("title") or entry.get("name")
+    entry_id = entry.get("id")
+
+    if not title or not entry_id:
         return
+
+    # Handle body: standard wiki vs artist versions (urls list)
+    body = entry.get("body", "")
+    if not body and "urls" in entry and isinstance(entry["urls"], list):
+        body = "\n".join(entry["urls"])
 
     body = body.replace('\r\n', '\n').strip()
     title = title.strip()
@@ -411,12 +489,12 @@ def _process_wiki_entry(cursor, entry, args):
         cursor.execute("""
             INSERT OR REPLACE INTO wiki_cache (id, title, body, updated_at, imported)
             VALUES (?, ?, ?, ?, 0)
-        """, (entry_id, title, body, entry["updated_at"]))
+        """, (entry_id, title, body, entry.get("updated_at", "")))
     else:
         if args.update_cache and body.strip() != row[0].strip():
             cursor.execute(
                 "UPDATE wiki_cache SET body = ?, updated_at = ? WHERE title = ?",
-                (body, entry["updated_at"], title)
+                (body, entry.get("updated_at", ""), title)
             )
         else:
             cursor.execute(
@@ -468,6 +546,7 @@ def import_danbooru(args):
         print("💽  Target:         SQLite Cache Only")
 
     print(f"📄  Pages:          {args.start_page} to {args.start_page + args.pages}")
+    print(f"🔗  Endpoint:       {args.endpoint}")
     print(f"🔄  Update Cache:   {'Yes' if args.update_cache else 'No'}")
 
     if args.clear_cache and SQLITE_DB.exists():

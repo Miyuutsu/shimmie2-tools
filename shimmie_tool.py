@@ -32,10 +32,10 @@ def _add_csv_parser(subparsers):
 
 def _add_wiki_index_parser(subparsers):
     """Adds the wiki-index command."""
-    parser = subparsers.add_parser("wiki-index", help="Create or sort wiki index")
+    parser = subparsers.add_parser("wiki-index", help="Create static HTML wiki site")
     parser.add_argument("--spath", help="Path to shimmie root (Optional for offline mode)")
-    parser.add_argument("--output", type=str, default="wiki_index.txt", help="Output file")
-    parser.add_argument("--sort", action="store_true", help="Enable sorting of tags")
+    parser.add_argument("--output", type=str, default="wiki_html", help="Output directory path")
+    parser.add_argument("--sort", action="store_true", help="Enable sorting of tags in index")
     parser.add_argument(
         "--order", type=str, default="c,s,a,g", help="Sort order (Default: c,s,a,g)"
     )
@@ -52,8 +52,13 @@ def _add_import_wikis_parser(subparsers):
     )
     parser.add_argument("--update-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
-    # Added captcha flag here
     parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
+    # Added endpoint argument
+    parser.add_argument(
+        "--endpoint",
+        default="wiki_pages.json",
+        help="API endpoint to fetch (e.g., wiki_pages.json, wiki_versions.json, artist_versions.json)"
+    )
 
 def _add_csv2sqlite_parser(subparsers):
     """Adds the csv2sqlite command."""
