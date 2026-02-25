@@ -99,7 +99,7 @@ def _init_dbs(root_output_path, gdl_db_path):
     if gdl_db_path:
         gdl_path = Path(gdl_db_path)
         gdl_path.parent.mkdir(parents=True, exist_ok=True)
-        gdl_conn = sqlite3.connect(gdl_path, check_same_thread=False)
+        gdl_conn = sqlite3.connect(gdl_path, check_same_thread=False, timeout=30)
         gdl_conn.executescript(CREATE_GDL_DB)
 
     return local_conn, gdl_conn, local_db_path
@@ -318,7 +318,6 @@ def _download_file(task, db_ctx):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # FIX: Use cookies/headers from the authenticated session
             resp = requests.get(
                 file_url,
                 stream=True,
@@ -328,10 +327,8 @@ def _download_file(task, db_ctx):
             )
             resp.raise_for_status()
 
-            # Validate Content-Type to catch HTML error pages masquerading as 200 OK
             content_type = resp.headers.get('Content-Type', '')
             if 'text/html' in content_type:
-                # If we asked for an image but got HTML, it's a captcha/block page
                 _log_error(task.output_path, task.source_context, post['id'], "Got HTML instead of image (Possible Block/Captcha)")
                 return f"[Error] ID {post['id']} returned HTML (blocked)."
 
@@ -341,7 +338,6 @@ def _download_file(task, db_ctx):
                         return "[Aborted] Shutdown triggered."
                     f.write(chunk)
 
-            # Additional sanity check on file size
             if out_path.stat().st_size < 1024 and 'text/html' not in content_type:
                 _log_error(task.output_path, task.source_context, post['id'], "File too small (<1KB). Suspicious.")
 
@@ -432,19 +428,14 @@ def _reached_id_limit(posts_batch, end_id) -> Tuple[bool, List]:
     filtered = []
     hit_limit = False
     for p in posts_batch:
-        # If current ID <= End ID, we have reached the "After" point.
         if p.get('id', 0) <= end_id:
             hit_limit = True
-            break # Stop processing this batch
+            break
         filtered.append(p)
     return hit_limit, filtered
 
 def _probe_smart_resume(ctx: FetchContext, target_id_str) -> bool:
-    """
-    Checks Page 1000.
-    If 'target_id' is NEWER than the oldest post on Page 1000,
-    we are in the shallow end and can use Threaded Mode.
-    """
+    """Checks Page 1000 for shallow/deep determination."""
     if not target_id_str:
         return False
 
@@ -473,7 +464,8 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
     all_posts = []
     batch_size = max(5, min(ctx.args.threads, 50))
 
-    current_page = start_page
+    # FIX: Ensure we have a valid int for math operations
+    current_page = start_page if start_page is not None else 1
     base_api = f"{ctx.base_url}/posts.json"
     next_start_id = None
 
@@ -673,7 +665,7 @@ def _configure_download(args):
 
     if cli_start_arg.isdigit():
         req_page = int(cli_start_arg)
-        if req_page != 1:
+        if req_page != 1 or start_page is None:
             start_page = req_page
             start_id = None
 
