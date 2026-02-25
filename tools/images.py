@@ -92,7 +92,7 @@ def _init_dbs(root_output_path, gdl_db_path):
     root_output_path.mkdir(parents=True, exist_ok=True)
     local_db_path = root_output_path / "global_downloads.db"
 
-    local_conn = sqlite3.connect(local_db_path, check_same_thread=False)
+    local_conn = sqlite3.connect(local_db_path, check_same_thread=False, timeout=30)
     local_conn.executescript(CREATE_LOCAL_DB)
 
     gdl_conn = None
@@ -120,7 +120,7 @@ def _log_error(root_path, context, post_id, message):
 def _save_checkpoint(db_path, tags, page_num, post_id):
     """Records a mapping of Page -> ID to allow deep jumping later."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(db_path, timeout=30) as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO checkpoints (search_query, page_num, post_id) VALUES (?, ?, ?)",
                 (tags, page_num, str(post_id))
@@ -131,7 +131,7 @@ def _save_checkpoint(db_path, tags, page_num, post_id):
 def _get_checkpoint_id(db_path, tags, page_num):
     """Attempts to find a post ID for a given page number from history."""
     try:
-        with sqlite3.connect(db_path) as conn:
+        with sqlite3.connect(db_path, timeout=30) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT post_id, page_num FROM checkpoints WHERE search_query = ? AND page_num <= ? "
@@ -301,7 +301,7 @@ def _download_file(task, db_ctx):
     )
     filename = "".join(x for x in filename if x.isalnum() or x in "._-")
 
-    safe_folder = "".join(x for x in task.search_query[:50] if x.isalnum() or x in "_-") or "misc"
+    safe_folder = "".join(x for x in task.search_query[:50] if x.isalnum() or x in " ._-").strip() or "misc"
     target_dir = task.output_path / safe_folder
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -371,8 +371,8 @@ def _download_worker(task: DownloadTask, db_path):
     if SHUTDOWN_EVENT.is_set():
         return "[Aborted] Shutdown pending."
 
-    local_conn = sqlite3.connect(db_path)
-    gdl_conn = sqlite3.connect(task.gdl_db_path) if task.gdl_db_path else None
+    local_conn = sqlite3.connect(db_path, timeout=30)
+    gdl_conn = sqlite3.connect(task.gdl_db_path, timeout=30) if task.gdl_db_path else None
 
     do_dedup = getattr(task.args, 'global_dedup', False)
     db_ctx = DbContext(local_conn, gdl_conn, task.sitename, do_dedup)
