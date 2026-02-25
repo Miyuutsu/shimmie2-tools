@@ -1,5 +1,5 @@
 """
-Image Downloader with Threaded API, Subfolders, Checkpoints, and WAL Support.
+Image Downloader with Threaded API, Subfolders, Checkpoints, WAL Support, and Error Logging.
 """
 import time
 import sqlite3
@@ -16,8 +16,9 @@ from urllib3.util.retry import Retry
 
 from functions.captcha import get_protected_session, AntiBotSolver
 
-# Global event for safe shutdown
+# Global event for safe shutdown and logging lock
 SHUTDOWN_EVENT = threading.Event()
+LOG_LOCK = threading.Lock()
 PAGINATION_LIMIT = 1000
 
 # Schema for the local resume DB
@@ -71,6 +72,7 @@ class DownloadTask(NamedTuple):
     sitename: str
     base_url: str
     search_query: str
+    source_context: str # e.g. "Page 50" or "ID b12345"
 
 class FetchContext(NamedTuple):
     """Container for API fetch arguments to reduce complexity."""
@@ -100,6 +102,19 @@ def _init_dbs(root_output_path, gdl_db_path):
 
     return local_conn, gdl_conn, local_db_path
 
+def _log_error(root_path, context, post_id, message):
+    """Writes an error to the error.log file in a thread-safe manner."""
+    log_file = root_path / "error.log"
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"[{timestamp}] [Ctx: {context}] [ID: {post_id}] {message}\n"
+
+    with LOG_LOCK:
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(entry)
+        except Exception as e: # pylint: disable=broad-exception-caught
+            print(f"[!] Failed to write to error log: {e}")
+
 def _save_checkpoint(db_path, tags, page_num, post_id):
     """Records a mapping of Page -> ID to allow deep jumping later."""
     try:
@@ -116,7 +131,6 @@ def _get_checkpoint_id(db_path, tags, page_num):
     try:
         with sqlite3.connect(db_path) as conn:
             cur = conn.cursor()
-            # Find the closest checkpoint <= page_num
             cur.execute(
                 "SELECT post_id, page_num FROM checkpoints WHERE search_query = ? AND page_num <= ? "
                 "ORDER BY page_num DESC LIMIT 1",
@@ -224,7 +238,7 @@ def _check_exists(post_id, target_path, db_ctx: DbContext):
             (str(post_id), str(target_path))
         )
         if cur.fetchone():
-            return True, "[Skip] Already downloaded in this search."
+            return True, "[Skip] ID {post['id']} Already downloaded in this search."
 
     # 2. Gallery-DL DB Check
     if db_ctx.gdl:
@@ -232,7 +246,7 @@ def _check_exists(post_id, target_path, db_ctx: DbContext):
         entry_key = f"{db_ctx.sitename} {post_id}"
         gdl_cur.execute("SELECT 1 FROM archive WHERE entry = ?", (entry_key,))
         if gdl_cur.fetchone():
-            return True, "[Skip] Found in Gallery-DL archive."
+            return True, "[Skip] ID {post['id']} Found in Gallery-DL archive."
 
     return False, None
 
@@ -273,11 +287,13 @@ def _construct_tag_string(post):
     return "\n".join(final_tags)
 
 def _download_file(task, db_ctx):
-    """Handles the actual file I/O."""
+    """Handles the actual file I/O with retries and logging."""
     post = task.post
     file_url = post.get('file_url') or post.get('large_file_url')
 
     if not file_url:
+        msg = "No file_url found (Access Denied or Deleted)"
+        _log_error(task.output_path, task.source_context, post['id'], msg)
         return f"[Skip] ID {post['id']} has no file_url."
 
     if file_url.startswith("/"):
@@ -303,21 +319,44 @@ def _download_file(task, db_ctx):
         _record_success(task, post.get('md5', ''), out_path, db_ctx)
         return f"[Found] ID {post['id']} exists on disk."
 
-    try:
-        resp = requests.get(file_url, stream=True, timeout=60)
-        resp.raise_for_status()
+    # Retry Logic for Download
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # We use a fresh request for the stream to avoid pool contamination on breaks
+            resp = requests.get(file_url, stream=True, timeout=60)
+            resp.raise_for_status()
 
-        with open(out_path, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if SHUTDOWN_EVENT.is_set():
-                    return "[Aborted] Shutdown triggered."
-                f.write(chunk)
+            with open(out_path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if SHUTDOWN_EVENT.is_set():
+                        return "[Aborted] Shutdown triggered."
+                    f.write(chunk)
 
-        return out_path
-    except Exception as e: # pylint: disable=broad-exception-caught
-        if out_path.exists():
-            out_path.unlink()
-        raise e
+            # If we got here, success
+            return out_path
+
+        except (requests.RequestException, ConnectionError, OSError) as e:
+            # Check for specific "Connection reset by peer" usually in e.args
+            is_reset = "Connection reset by peer" in str(e) or "104" in str(e)
+
+            if attempt < max_retries - 1:
+                sleep_time = 2 * (attempt + 1)
+                reason = "Connection Reset" if is_reset else "Network Error"
+                print(f"[!] Retry {attempt+1}/{max_retries} for ID {post['id']} ({reason}). Sleeping {sleep_time}s...")
+                time.sleep(sleep_time)
+                # Ensure we clean up partial file
+                if out_path.exists():
+                    out_path.unlink()
+            else:
+                # Final failure
+                err_msg = f"Failed after {max_retries} retries. Last error: {str(e)}"
+                _log_error(task.output_path, task.source_context, post['id'], err_msg)
+                if out_path.exists():
+                    out_path.unlink()
+                raise e
+
+    return f"[Error] ID {post['id']} failed to download."
 
 def _download_worker(task: DownloadTask, db_path):
     """Worker function."""
@@ -345,6 +384,7 @@ def _download_worker(task: DownloadTask, db_path):
         return res
 
     except Exception as e: # pylint: disable=broad-exception-caught
+        _log_error(task.output_path, task.source_context, task.post.get('id'), str(e))
         return f"[Error] ID {task.post.get('id')}: {e}"
     finally:
         local_conn.close()
@@ -396,11 +436,9 @@ def _probe_smart_resume(ctx: FetchContext, target_id_str) -> bool:
     Checks Page 1000.
     If 'target_id' is NEWER than the oldest post on Page 1000,
     we are in the shallow end and can use Threaded Mode.
-    Returns True if we should use Threaded Mode (Shallow).
-    Returns False if we must use Sequential Mode (Deep).
     """
     if not target_id_str:
-        return False # No target, standard logic applies
+        return False
 
     try:
         target_id = int(target_id_str.strip('ab'))
@@ -416,7 +454,6 @@ def _probe_smart_resume(ctx: FetchContext, target_id_str) -> bool:
         if target_id > limit_id:
             print(f"[✓] Target ID {target_id} is shallow (>{limit_id}). Using Fast Threaded Mode.")
             return True
-
         print(f"[!] Target ID {target_id} is deep (<{limit_id}). Using Safe Sequential Mode.")
         return False
 
@@ -426,7 +463,6 @@ def _probe_smart_resume(ctx: FetchContext, target_id_str) -> bool:
 def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict], Optional[str]]:
     """Handles the threaded page-based fetching loop."""
     all_posts = []
-    # Dynamic batch size to match threads, clamped between 5 and 50
     batch_size = max(5, min(ctx.args.threads, 50))
 
     current_page = start_page
@@ -461,7 +497,6 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
                 break
 
             batch_has_data = False
-            # Sort by page number to maintain order
             batch_results = sorted(
                 [(futures[f], f.result()) for f in as_completed(futures)],
                 key=lambda x: x[0]
@@ -479,9 +514,13 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
                     return all_posts, None
 
                 hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
+
+                # Tag source page for error logging
+                for p in filtered_data:
+                    p['_source_page'] = f"Page {p_num}"
+
                 all_posts.extend(filtered_data)
 
-                # Checkpoint occasional pages (e.g. every 10th page in batch)
                 if filtered_data and p_num % 10 == 0:
                     _save_checkpoint(ctx.db_path, ctx.tags, p_num, filtered_data[0]['id'])
 
@@ -498,7 +537,6 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
                     return all_posts, None
 
             if not batch_has_data:
-                # If we got no data but need to switch to sequential
                 if last_batch_min_id or (all_posts and all_posts[-1].get('id')):
                     last_id = last_batch_min_id if last_batch_min_id else all_posts[-1]['id']
                     next_start_id = f"b{last_id}"
@@ -519,7 +557,6 @@ def _fetch_sequential_loop(ctx: FetchContext, start_id: str) -> List[dict]:
     all_posts = []
     base_api = f"{ctx.base_url}/posts.json"
     current_id_param = start_id
-    pages_fetched = 0
 
     print("\n--- Fetching API Metadata (Sequential ID Mode) ---")
 
@@ -535,17 +572,12 @@ def _fetch_sequential_loop(ctx: FetchContext, start_id: str) -> List[dict]:
             break
 
         hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
+
+        # Tag source for error logging
+        for p in filtered_data:
+            p['_source_page'] = f"ID {current_id_param}"
+
         all_posts.extend(filtered_data)
-
-        pages_fetched += 1
-
-        # Checkpoint every 5 sequential pages
-        if filtered_data and pages_fetched % 5 == 0:
-            # We don't have a real "page number" here, so we use a high number or -1?
-            # Or we simply don't checkpoint sequential mode because it's ID based anyway.
-            # Ideally we record the ID associated with this tag set for future reference
-            # but "Page" is meaningless here.
-            pass
 
         if hit_limit:
             print(f"\n[✓] Reached End-ID limit ({ctx.end_id}). Stopping.")
@@ -571,19 +603,12 @@ def _fetch_all_posts_threaded(ctx: FetchContext, start_page: int, start_id: Opti
     """Orchestrates the hybrid fetching strategy."""
     all_posts = []
 
-    # SMART RESUME:
-    # If start_id is provided, verify if it's actually deep.
-    # If it's shallow (exists before page 1000), revert to threaded mode to be fast.
     forced_threaded = False
     if start_id:
         if _probe_smart_resume(ctx, start_id):
             forced_threaded = True
-            # We don't use the start_id for threaded mode logic directly,
-            # we just start from Page 1 (or calculated approx page) and filter later?
-            # Actually threaded mode grabs pages. We can't tell threaded mode "start at ID X".
-            # We can only say "Start at Page 1".
             start_page = 1
-            start_id = None # Clear this so it enters threaded block
+            start_id = None
 
     use_sequential = (
         (start_page is not None and start_page >= PAGINATION_LIMIT) or
@@ -601,7 +626,6 @@ def _fetch_all_posts_threaded(ctx: FetchContext, start_page: int, start_id: Opti
             use_sequential = False
 
     if use_sequential:
-        # Determine start ID if not explicitly provided
         if not start_id:
             if all_posts and all_posts[-1].get('id'):
                 start_id = f"b{all_posts[-1]['id']}"
@@ -639,7 +663,6 @@ def _configure_download(args):
 
     tags, start_page, start_id, base_url = _parse_input_query(args.tags or args.query, args.base_url)
 
-    # CLI Override Logic & Checkpoint Lookup
     cli_start_arg = str(args.start_page).strip()
 
     if cli_start_arg.isdigit():
@@ -648,10 +671,8 @@ def _configure_download(args):
             start_page = req_page
             start_id = None
 
-            # Checkpoint Lookup for Deep Pages
             if req_page >= PAGINATION_LIMIT:
                 sitename_temp, _ = _get_site_details(session, base_url)
-                # We need DB path to lookup
                 out_path_temp = Path(args.output)
                 if args.output == "downloads": out_path_temp = out_path_temp / sitename_temp
                 db_path_temp = out_path_temp / "global_downloads.db"
@@ -681,7 +702,6 @@ def _configure_download(args):
     if args.output == "downloads" and sitename:
         root_output_path = Path(sitename)
 
-    # Initialize DB here to ensure schema exists for checkpoints
     l_conn, _, db_path = _init_dbs(root_output_path, args.gdl_db)
     l_conn.close()
 
@@ -727,7 +747,6 @@ def run(args):
     if not all_posts:
         return
 
-    # Final DB init for workers
     l_conn, g_conn, db_path = _init_dbs(root_output_path, args.gdl_db)
     l_conn.close()
     if g_conn: g_conn.close()
@@ -739,7 +758,8 @@ def run(args):
         tasks.append(DownloadTask(
             post=p, args=args, output_path=root_output_path,
             gdl_db_path=args.gdl_db, sitename=sitename, base_url=ctx.base_url,
-            search_query=ctx.tags
+            search_query=ctx.tags,
+            source_context=p.get('_source_page', 'Unknown')
         ))
 
     executor = ThreadPoolExecutor(max_workers=args.threads)
@@ -754,7 +774,6 @@ def run(args):
         print("\n\n[!] SHUTDOWN TRIGGERED. Waiting for active downloads to finish...")
         SHUTDOWN_EVENT.set()
         executor.shutdown(wait=True)
-        # Flush WAL
         try:
             with sqlite3.connect(db_path) as conn:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
