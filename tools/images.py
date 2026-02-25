@@ -7,7 +7,7 @@ import re
 import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import NamedTuple, Optional, Tuple, List, Union
+from typing import NamedTuple, Optional, Tuple, List, Union, Dict
 from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
@@ -72,7 +72,9 @@ class DownloadTask(NamedTuple):
     sitename: str
     base_url: str
     search_query: str
-    source_context: str # e.g. "Page 50" or "ID b12345"
+    source_context: str
+    cookies: Dict
+    headers: Dict
 
 class FetchContext(NamedTuple):
     """Container for API fetch arguments to reduce complexity."""
@@ -83,7 +85,7 @@ class FetchContext(NamedTuple):
     base_url: str
     end_page: Optional[int]
     end_id: Optional[int]
-    db_path: Path # Needed for checkpointing
+    db_path: Path
 
 def _init_dbs(root_output_path, gdl_db_path):
     """Initialize the global tracking DB in the root output folder."""
@@ -202,11 +204,7 @@ def _parse_input_query(query, default_base):
     return tags, start_page, start_id, detected_base
 
 def _parse_end_condition(value):
-    """
-    Parses the end condition argument.
-    - "10" -> Page 10 (int)
-    - "a12345" -> Stop at ID 12345 (str)
-    """
+    """Parses the end condition argument."""
     if not value:
         return None, None
 
@@ -223,7 +221,6 @@ def _check_exists(post_id, target_path, db_ctx: DbContext):
     """Checks if a post should be skipped."""
     cur = db_ctx.local.cursor()
 
-    # 1. Local DB Check
     if db_ctx.global_dedup:
         cur.execute(
             "SELECT filepath FROM downloads WHERE post_id = ? AND status = 'completed'",
@@ -238,15 +235,14 @@ def _check_exists(post_id, target_path, db_ctx: DbContext):
             (str(post_id), str(target_path))
         )
         if cur.fetchone():
-            return True, "[Skip] ID {post['id']} Already downloaded in this search."
+            return True, "[Skip] Already downloaded in this search."
 
-    # 2. Gallery-DL DB Check
     if db_ctx.gdl:
         gdl_cur = db_ctx.gdl.cursor()
         entry_key = f"{db_ctx.sitename} {post_id}"
         gdl_cur.execute("SELECT 1 FROM archive WHERE entry = ?", (entry_key,))
         if gdl_cur.fetchone():
-            return True, "[Skip] ID {post['id']} Found in Gallery-DL archive."
+            return True, "[Skip] Found in Gallery-DL archive."
 
     return False, None
 
@@ -287,7 +283,7 @@ def _construct_tag_string(post):
     return "\n".join(final_tags)
 
 def _download_file(task, db_ctx):
-    """Handles the actual file I/O with retries and logging."""
+    """Handles the actual file I/O with retries, logging, and auth passing."""
     post = task.post
     file_url = post.get('file_url') or post.get('large_file_url')
 
@@ -319,13 +315,25 @@ def _download_file(task, db_ctx):
         _record_success(task, post.get('md5', ''), out_path, db_ctx)
         return f"[Found] ID {post['id']} exists on disk."
 
-    # Retry Logic for Download
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # We use a fresh request for the stream to avoid pool contamination on breaks
-            resp = requests.get(file_url, stream=True, timeout=60)
+            # FIX: Use cookies/headers from the authenticated session
+            resp = requests.get(
+                file_url,
+                stream=True,
+                timeout=60,
+                cookies=task.cookies,
+                headers=task.headers
+            )
             resp.raise_for_status()
+
+            # Validate Content-Type to catch HTML error pages masquerading as 200 OK
+            content_type = resp.headers.get('Content-Type', '')
+            if 'text/html' in content_type:
+                # If we asked for an image but got HTML, it's a captcha/block page
+                _log_error(task.output_path, task.source_context, post['id'], "Got HTML instead of image (Possible Block/Captcha)")
+                return f"[Error] ID {post['id']} returned HTML (blocked)."
 
             with open(out_path, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
@@ -333,11 +341,13 @@ def _download_file(task, db_ctx):
                         return "[Aborted] Shutdown triggered."
                     f.write(chunk)
 
-            # If we got here, success
+            # Additional sanity check on file size
+            if out_path.stat().st_size < 1024 and 'text/html' not in content_type:
+                _log_error(task.output_path, task.source_context, post['id'], "File too small (<1KB). Suspicious.")
+
             return out_path
 
         except (requests.RequestException, ConnectionError, OSError) as e:
-            # Check for specific "Connection reset by peer" usually in e.args
             is_reset = "Connection reset by peer" in str(e) or "104" in str(e)
 
             if attempt < max_retries - 1:
@@ -345,11 +355,9 @@ def _download_file(task, db_ctx):
                 reason = "Connection Reset" if is_reset else "Network Error"
                 print(f"[!] Retry {attempt+1}/{max_retries} for ID {post['id']} ({reason}). Sleeping {sleep_time}s...")
                 time.sleep(sleep_time)
-                # Ensure we clean up partial file
                 if out_path.exists():
                     out_path.unlink()
             else:
-                # Final failure
                 err_msg = f"Failed after {max_retries} retries. Last error: {str(e)}"
                 _log_error(task.output_path, task.source_context, post['id'], err_msg)
                 if out_path.exists():
@@ -515,7 +523,6 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
 
                 hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
 
-                # Tag source page for error logging
                 for p in filtered_data:
                     p['_source_page'] = f"Page {p_num}"
 
@@ -573,7 +580,6 @@ def _fetch_sequential_loop(ctx: FetchContext, start_id: str) -> List[dict]:
 
         hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
 
-        # Tag source for error logging
         for p in filtered_data:
             p['_source_page'] = f"ID {current_id_param}"
 
@@ -753,13 +759,19 @@ def run(args):
 
     print("\n--- Starting Downloads (Ctrl+C to stop safely) ---")
 
+    # FIX: Correctly extract cookies from MozillaCookieJar
+    cookies = requests.utils.dict_from_cookiejar(ctx.session.cookies)
+    headers = dict(ctx.session.headers)
+
     tasks = []
     for p in all_posts:
         tasks.append(DownloadTask(
             post=p, args=args, output_path=root_output_path,
             gdl_db_path=args.gdl_db, sitename=sitename, base_url=ctx.base_url,
             search_query=ctx.tags,
-            source_context=p.get('_source_page', 'Unknown')
+            source_context=p.get('_source_page', 'Unknown'),
+            cookies=cookies,
+            headers=headers
         ))
 
     executor = ThreadPoolExecutor(max_workers=args.threads)
