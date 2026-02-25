@@ -3,7 +3,7 @@ import argparse
 import sys
 
 from tools import csv_builder
-from tools import db, wiki
+from tools import db, images, wiki
 
 from functions.common import get_cpu_threads
 
@@ -53,7 +53,6 @@ def _add_import_wikis_parser(subparsers):
     parser.add_argument("--update-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
     parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
-    # Added endpoint argument
     parser.add_argument(
         "--endpoint",
         default="wiki_pages.json",
@@ -82,6 +81,36 @@ def _add_update_ratings_parser(subparsers):
     parser.add_argument("-q", "--qmax", type=int, default=250, help="Max questionable rating")
     parser.add_argument("-s", "--smax", type=int, default=50, help="Max safe rating")
 
+def _add_download_parser(subparsers):
+    """Adds the download command."""
+    parser = subparsers.add_parser("download", help="Download images from a Booru")
+
+    # Target Config (Allow Positional URL OR --tags)
+    parser.add_argument("query", nargs="?", help="URL to scrape OR tags to search")
+    parser.add_argument("--tags", help="Explicit tags (overrides query)")
+
+    parser.add_argument("--base-url", default="https://danbooru.donmai.us", help="Booru base URL")
+    parser.add_argument("--sitename", default="auto", help="Sitename for Gallery-DL history (default: auto-detect)")
+
+    # Limits & Threads
+    parser.add_argument("--limit", type=int, default=100, help="Posts per page (max 100)")
+    parser.add_argument("--start-page", type=str, default=1, help="Start page")
+    parser.add_argument("--end-page", type=str, default="0", help="End page or ID (e.g. 50 or a12345)")
+    parser.add_argument("--sleep", type=float, default=1.0, help="Delay between API pages")
+    parser.add_argument("--threads", type=int, default=4, help="Download threads")
+
+    # Output & History
+    parser.add_argument("--output", default="downloads", help="Output directory")
+    parser.add_argument("--filename-fmt", default="{sitename}_{id}_{md5}.{ext}",
+                        help="Filename format (avail: {id}, {md5}, {sitename}, {ext})")
+    parser.add_argument("--gdl-db", help="Path to existing gallery-dl archive.db for dedup")
+    parser.add_argument("--global-dedup", action="store_true", help="Skip download if post exists in ANY folder")
+    parser.add_argument("--sidecar", action="store_true", default=True, help="Save tags to .txt")
+    parser.add_argument("--no-sidecar", dest="sidecar", action="store_false", help="Disable sidecars")
+
+    # Auth
+    parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
+
 def setup_parser():
     """Constructs the argument parser."""
     parser = argparse.ArgumentParser(
@@ -105,6 +134,7 @@ def setup_parser():
     _add_csv2sqlite_parser(subparsers)
     _add_precache_parser(subparsers)
     _add_update_ratings_parser(subparsers)
+    _add_download_parser(subparsers)
 
     return parser, parser_csv, subparsers
 
@@ -146,6 +176,7 @@ def main():
         "csv2sqlite": db.csv_to_sqlite,
         "precache": db.precache_posts,
         "update-ratings": db.update_ratings,
+        "download": images.run,
     }
 
     if args.command == "make-csv":
