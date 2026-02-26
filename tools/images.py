@@ -769,11 +769,24 @@ def run(args):
     executor = ThreadPoolExecutor(max_workers=args.threads)
     futures = {executor.submit(_download_worker, t, str(db_path)): t for t in tasks}
     completed = 0
+    consecutive_skips = 0  # Initialize counter
 
     try:
         for future in as_completed(futures):
-            print(f"[{completed + 1}/{len(tasks)}] {future.result()}")
+            res = future.result()
+            print(f"[{completed + 1}/{len(tasks)}] {res}")
             completed += 1
+
+            # [NEW] Check for abort condition
+            if res.startswith("[Skip]") or res.startswith("[Found]"):
+                consecutive_skips += 1
+            else:
+                consecutive_skips = 0
+
+            if args.abort > 0 and consecutive_skips >= args.abort:
+                print(f"\n[!] Abort limit reached ({args.abort} consecutive skips). Stopping...")
+                raise KeyboardInterrupt  # Trigger safe shutdown
+
     except KeyboardInterrupt:
         print("\n\n[!] SHUTDOWN TRIGGERED. Waiting for active downloads to finish...")
         SHUTDOWN_EVENT.set()

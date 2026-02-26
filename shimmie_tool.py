@@ -105,6 +105,7 @@ def _add_download_parser(subparsers):
                         help="Filename format (avail: {id}, {md5}, {sitename}, {ext})")
     parser.add_argument("--gdl-db", help="Path to existing gallery-dl archive.db for dedup")
     parser.add_argument("--global-dedup", action="store_true", help="Skip download if post exists in ANY folder")
+    parser.add_argument("--abort", type=int, default=10, help="Abort after N consecutive skips (default: 10)")
     parser.add_argument("--sidecar", action="store_true", default=True, help="Save tags to .txt")
     parser.add_argument("--no-sidecar", dest="sidecar", action="store_false", help="Disable sidecars")
 
