@@ -87,7 +87,7 @@ class AntiBotSolver:
             return False
         return False
 
-def get_protected_session():
+def get_protected_session(cookie_file=None):
     """Initializes a robust session with cookies and retries."""
     session = requests.Session()
 
@@ -100,7 +100,7 @@ def get_protected_session():
     # Headers & Cookies
     session.headers.update({"User-Agent": USER_AGENT})
 
-    if Path(COOKIES_FILE).exists():
+    if cookie_file and Path(cookie_file).exists():
         try:
             cj = MozillaCookieJar(COOKIES_FILE)
             cj.load(ignore_discard=True, ignore_expires=True)
@@ -108,7 +108,7 @@ def get_protected_session():
             print(f"[INFO] Loaded cookies from {COOKIES_FILE}")
         except (LoadError, OSError) as e:
             print(f"[WARNING] Failed to load cookies: {e}")
-    else:
-        print(f"[INFO] No cookies found at {COOKIES_FILE}. Proceeding without auth.")
+    elif cookie_file:
+        print(f"[WARNING] No cookies found at {cookie_file}. Proceeding without auth.")
 
     return session

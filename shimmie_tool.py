@@ -87,10 +87,19 @@ def _add_download_parser(subparsers):
 
     # Target Config (Allow Positional URL OR --tags)
     parser.add_argument("query", nargs="?", help="URL to scrape OR tags to search")
-    parser.add_argument("--tags", help="Explicit tags (overrides query)")
+    parser.add_argument("--tags", help="Explicit tags (Require ALL given tags in the result, overrides query)")
+    parser.add_argument("--or-tags", help="Require AT LEAST ONE of these tags")
+    parser.add_argument("--filter-tags", help="Tags to filter out (functions as negative tags)")
+    parser.add_argument("--unless-tags", help="If matched, ignores the filter tags")
 
     parser.add_argument("--base-url", default="https://danbooru.donmai.us", help="Booru base URL")
+    parser.add_argument("--proxy", help="SOCKS5 proxy for native Tor routing (e.g. socks5h://127.0.0.1:9050)")
     parser.add_argument("--sitename", default="auto", help="Sitename for Gallery-DL history (default: auto-detect)")
+
+    # File & Sorting Filters
+    parser.add_argument("--mime-types", nargs="+", help="Filter by mime-type (e.g., image video)")
+    parser.add_argument("--mimes", nargs="+", help="Filter by exact mime (e.g., png gif mp4)")
+    parser.add_argument("--order", choices=["asc", "desc", "random", "score"], default="desc", help="Sort order of results")
 
     # Limits & Threads
     parser.add_argument("--limit", type=int, default=100, help="Posts per page (max 100)")
@@ -106,11 +115,13 @@ def _add_download_parser(subparsers):
     parser.add_argument("--gdl-db", help="Path to existing gallery-dl archive.db for dedup")
     parser.add_argument("--global-dedup", action="store_true", help="Skip download if post exists in ANY folder")
     parser.add_argument("--abort", type=int, default=10, help="Abort after N consecutive skips (default: 10)")
+    parser.add_argument("--resume", action="store_true", help="Auto-resume from last saved page checkpoint")
     parser.add_argument("--sidecar", action="store_true", default=True, help="Save tags to .txt")
     parser.add_argument("--no-sidecar", dest="sidecar", action="store_false", help="Disable sidecars")
 
     # Auth
     parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
+    parser.add_argument("--cookies", type=str, help="Path to Netscape formatted cookies.txt")
 
 def setup_parser():
     """Constructs the argument parser."""
