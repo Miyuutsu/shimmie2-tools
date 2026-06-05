@@ -246,7 +246,7 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
     thumb_path = Path(args.prefix) / "thumbnails" / rel_path if args.thumbnail else ""
 
     if res_data.exists:
-        thumb_file = Path(args.image_path) / "thumbnails" / rel_path
+        thumb_file = get_thumbnail_path(image, args)
         return None, str(thumb_file) if args.thumbnail else None
 
     tag_str, rating, tag_list, best_source = compile_metadata(

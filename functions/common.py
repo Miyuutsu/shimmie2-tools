@@ -26,12 +26,3 @@ def compute_md5(image_path: Path) -> str:
         for chunk in iter(lambda: f.read(4096), b""):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
-
-def validate_float(value):
-    """Validate if a number is a float between 0.00 and 1.00 and multiple of 0.01"""
-    value = float(value)
-    if value < 0.00 or value > 1.00:
-        raise ValueError(f"Value must be between 0.00 and 1.00. Given: {value}")
-    if round(value*100) % 1 != 0:
-        raise ValueError(f"Value must be a multiple of 0.01. Given: {value}")
-    return value
