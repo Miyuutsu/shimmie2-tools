@@ -97,48 +97,79 @@ def _add_download_parser(subparsers):
     """Adds the download command."""
     parser = subparsers.add_parser("download", help="Download images from a Booru")
 
-    # Target Config (Allow Positional URL OR --tags)
+    # Target Config
     parser.add_argument("query", nargs="?", help="URL to scrape OR tags to search")
     parser.add_argument("--tags", help="Explicit tags (overrides query)")
+    parser.add_argument("--or-tags", help="Require AT LEAST ONE of these tags")
+    parser.add_argument(
+        "--filter-tags", help="Tags to filter out (functions as negative tags)"
+    )
+    parser.add_argument(
+        "--unless-tags", help="If matched, ignores the filter tags"
+    )
 
-    parser.add_argument("--base-url", default="https://danbooru.donmai.us", help="Booru base URL")
-    parser.add_argument("--sitename",
-                        default="auto",
-                        help="Sitename for Gallery-DL history (default: auto-detect)"
+    parser.add_argument(
+        "--base-url", default="https://danbooru.donmai.us", help="Booru base URL"
+    )
+    parser.add_argument(
+        "--proxy", help="SOCKS5 proxy for native Tor routing (e.g. socks5h://127.0.0.1:9050)"
+    )
+    parser.add_argument(
+        "--sitename",
+        default="auto",
+        help="Sitename for Gallery-DL history (default: auto-detect)"
+    )
+
+    # File & Sorting Filters
+    parser.add_argument(
+        "--mime-types", nargs="+", help="Filter by mime-type (e.g., image video)"
+    )
+    parser.add_argument(
+        "--mimes", nargs="+", help="Filter by exact mime (e.g., png gif mp4)"
+    )
+    parser.add_argument(
+        "--order",
+        choices=["asc", "desc", "random", "score"],
+        default="desc",
+        help="Sort order of results"
     )
 
     # Limits & Threads
     parser.add_argument("--limit", type=int, default=100, help="Posts per page (max 100)")
     parser.add_argument("--start-page", type=str, default=1, help="Start page")
-    parser.add_argument("--end-page",
-                        type=str, default="0", help="End page or ID (e.g. 50 or a12345)")
+    parser.add_argument(
+        "--end-page", type=str, default="0", help="End page or ID (e.g. 50 or a12345)"
+    )
     parser.add_argument("--sleep", type=float, default=1.0, help="Delay between API pages")
     parser.add_argument("--threads", type=int, default=4, help="Download threads")
 
     # Output & History
     parser.add_argument("--output", default="downloads", help="Output directory")
     parser.add_argument(
-        "--filename-fmt",
-        default="{sitename}_{id}_{md5}.{ext}",
-        help="Filename format (avail: {id}, {md5}, {sitename}, {ext})"
+        "--filename-fmt", default="{sitename}_{id}_{md5}.{ext}", help="Filename format"
     )
     parser.add_argument(
-        "--gdl-db",
-        help="Path to existing gallery-dl archive.db for dedup"
+        "--gdl-db", help="Path to existing gallery-dl archive.db for dedup"
     )
-    parser.add_argument("--global-dedup",
-                        action="store_true", help="Skip download if post exists in ANY folder")
-    parser.add_argument("--abort",
-                        type=int, default=10, help="Abort after N consecutive skips (default: 10)")
     parser.add_argument(
-        "--sidecar", action="store_true", default=True, help="Save tags to .txt"
+        "--global-dedup",
+        action="store_true",
+        help="Skip download if post exists in ANY folder"
     )
+    parser.add_argument(
+        "--abort", type=int, default=10, help="Abort after N consecutive skips (default: 10)"
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Auto-resume from last saved page checkpoint"
+    )
+    parser.add_argument("--sidecar", action="store_true", default=True, help="Save tags to .txt")
     parser.add_argument(
         "--no-sidecar", dest="sidecar", action="store_false", help="Disable sidecars"
     )
 
     # Auth
     parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
+    parser.add_argument("--cookies", type=str, help="Path to Netscape formatted cookies.txt")
 
 def setup_parser():
     """Constructs the argument parser."""

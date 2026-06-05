@@ -1,14 +1,18 @@
+# pylint: disable=too-many-lines
 """
+The 'to big to manage again' edition.
 Image Downloader with Threaded API, Subfolders, Checkpoints, WAL Support, and Error Logging.
 """
 import time
 import sqlite3
 import re
 import threading
+import uuid
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import NamedTuple, Optional, Tuple, List, Union, Dict
+from typing import NamedTuple, Optional, Tuple, List, Union, Dict, Any
 from urllib.parse import urlparse, parse_qs, unquote
+from http.cookiejar import MozillaCookieJar
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -72,6 +76,101 @@ class DownloadTask(NamedTuple):
     cookies: Dict
     headers: Dict
 
+class V1PostsAPI:
+    """Client for the v1 Posts API."""
+
+    def __init__(self, base_url: str, session=None):
+        self.base_url = base_url.rstrip('/')
+        self.session = session or requests.Session()
+
+    def _format_tags(self, tags: Optional[Union[str, List[str]]]) -> Optional[str]:
+        if not tags:
+            return None
+        if isinstance(tags, list):
+            return ",".join([t.replace('_', ' ') for t in tags])
+        if ',' in tags:
+            return tags
+        parts = tags.split(' ')
+        return ",".join([t.replace('_', ' ') for t in parts if t])
+
+    # pylint: disable=too-many-arguments, too-many-positional-arguments, too-many-locals
+    def get_posts(
+        self, tags=None, or_tags=None, filter_tags=None, unless_tags=None,
+        limit=None, offset=None, order=None, mime_types=None, mimes=None,
+        incl_tags=None, comb_tag_namespace=None
+    ) -> Dict[str, Any]:
+        """Fetch posts based on tags, offset, mime parameters, and filters via V1 API."""
+        url = f"{self.base_url}/api/v1/posts"
+        params = {}
+
+        formatted_tags = self._format_tags(tags)
+        if formatted_tags is not None:
+            params["tags"] = formatted_tags
+
+        formatted_or = self._format_tags(or_tags)
+        if formatted_or is not None:
+            params["or"] = formatted_or
+
+        formatted_filter = self._format_tags(filter_tags)
+        if formatted_filter is not None:
+            params["filter"] = formatted_filter
+
+        formatted_unless = self._format_tags(unless_tags)
+        if formatted_unless is not None:
+            params["unless"] = formatted_unless
+
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        if order is not None:
+            params["order"] = order
+
+        if mime_types is not None:
+            params["mime-type"] = mime_types
+        if mimes is not None:
+            params["mime"] = mimes
+        if incl_tags is not None:
+            params["inclTags"] = str(incl_tags).lower()
+        if comb_tag_namespace is not None:
+            params["combTagNamespace"] = str(comb_tag_namespace).lower()
+
+        response = self.session.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+
+    # pylint: disable=too-many-arguments, too-many-positional-arguments
+    def get_post(
+        self,
+        post_id: Optional[int] = None,
+        ipfs: Optional[str] = None,
+        md5: Optional[str] = None,
+        sha256: Optional[str] = None,
+        comb_tag_namespace: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """Retrieve details for a specific post via V1 API."""
+        url = f"{self.base_url}/api/v1/post"
+        params = {}
+
+        if post_id is not None:
+            params["id"] = post_id
+        if ipfs is not None:
+            params["ipfs"] = ipfs
+        if md5 is not None:
+            params["md5"] = md5
+        if sha256 is not None:
+            params["sha256"] = sha256
+
+        if not params:
+            raise ValueError("Must provide either post_id, ipfs, md5, or sha256.")
+
+        if comb_tag_namespace is not None:
+            params["combTagNamespace"] = str(comb_tag_namespace).lower()
+
+        response = self.session.get(url, params=params)
+        response.raise_for_status()
+        return response.json()
+
 class FetchContext(NamedTuple):
     """Container for API fetch arguments to reduce complexity."""
     session: requests.Session
@@ -82,6 +181,9 @@ class FetchContext(NamedTuple):
     end_page: Optional[int]
     end_id: Optional[int]
     db_path: Path
+    is_v1: bool = False
+    api_client: Optional[Any] = None
+    sitename: str = ""
 
 def _init_dbs(root_output_path, gdl_db_path):
     """Initialize the global tracking DB in the root output folder."""
@@ -142,6 +244,19 @@ def _get_checkpoint_id(db_path, tags, page_num):
     except Exception: # pylint: disable=broad-exception-caught
         pass
     return None, None
+
+def _get_last_checkpoint_page(db_path, tags):
+    """Finds the highest page number saved for a query to enable auto-resume."""
+    try:
+        with sqlite3.connect(db_path, timeout=30) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(page_num) FROM checkpoints WHERE search_query = ?", (tags,))
+            row = cur.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception: # pylint: disable=broad-exception-caught
+        pass
+    return None
 
 def _get_site_details(session, url):
     """Fetches the site title using regex."""
@@ -259,6 +374,22 @@ def _record_success(task, md5, filepath, db_ctx: DbContext):
 
 def _construct_tag_string(post):
     """Parses category fields and constructs a newline-separated tag string."""
+
+    if "Tags" in post and isinstance(post["Tags"], list):
+        tags = []
+        for t in post["Tags"]:
+            ns = t.get("Namespace", "")
+            tag_name = t.get("Tag", "")
+
+            # Format as 'namespace:tag' (e.g., 'artist:bkub'), but keep general tags clean
+            if ns and ns != "general":
+                tags.append(f"{ns}:{tag_name}")
+            else:
+                tags.append(tag_name)
+
+        # Return immediately so it doesn't hit the Danbooru logic below
+        return "\n".join(tags)
+
     categories = {
         "artist": post.get("tag_string_artist", ""),
         "series": post.get("tag_string_copyright", ""),
@@ -325,6 +456,17 @@ def _check_existing(task, post, out_path, db_ctx):
 def _perform_single_download(task, post, file_url, out_path):
     """Attempts one file download and performs immediate integrity checks."""
     post_id = post['id']
+    proxies = None
+
+    if getattr(task.args, 'proxy', None):
+        if 'socks5h://' in task.args.proxy:
+            # Force Tor to build a separate circuit for this download
+            auth_id = uuid.uuid4().hex[:8]
+            clean_proxy = task.args.proxy.replace('socks5h://', '')
+            iso_proxy = f"socks5h://{auth_id}:circuit@{clean_proxy}"
+            proxies = {'http': iso_proxy, 'https': iso_proxy}
+        else:
+            proxies = {'http': task.args.proxy, 'https': task.args.proxy}
 
     try:
         resp = requests.get(
@@ -332,7 +474,8 @@ def _perform_single_download(task, post, file_url, out_path):
             stream=True,
             timeout=60,
             cookies=task.cookies,
-            headers=task.headers
+            headers=task.headers,
+            proxies=proxies
         )
         resp.raise_for_status()
 
@@ -447,10 +590,62 @@ def _download_worker(task: DownloadTask, db_path):
         if gdl_conn:
             gdl_conn.close()
 
-def _fetch_metadata_page(session, url, params, args, solver) -> Union[dict, str, None]:
+def _map_v1_to_danbooru(posts: List[Dict[str, Any]], base_url: str) -> List[Dict[str, Any]]:
+    """Translates V1 API response dictionaries into standard Danbooru formats."""
+    for p in posts:
+        p["id"] = p.get("ID")
+        file_info = p.get("File", {})
+        p["md5"] = file_info.get("Md5")
+        raw_url = file_info.get("Url", "")
+
+        if raw_url:
+            base = base_url.rstrip('/')
+            if raw_url.startswith('/'):
+                p["file_url"] = f"{base}{raw_url}"
+            else:
+                p["file_url"] = f"{base}/{raw_url}"
+            p["file_ext"] = raw_url.split('.')[-1] if '.' in raw_url else ""
+        else:
+            p["file_ext"] = ""
+
+    return posts
+
+# pylint: disable=too-many-return-statements
+def _fetch_metadata_page(url, params, ctx) -> Union[dict, list, str, None]:
     """Fetches a single page of metadata."""
     if SHUTDOWN_EVENT.is_set():
         return None
+
+    if getattr(ctx, 'is_v1', False) and ctx.api_client:
+        try:
+            page_param = params.get("page", 1)
+            offset = int(page_param) - 1 if str(page_param).isdigit() else 0
+
+            data = ctx.api_client.get_posts(
+                tags=params.get("tags"),
+                or_tags=getattr(ctx.args, 'or_tags', None),
+                filter_tags=getattr(ctx.args, 'filter_tags', None),
+                unless_tags=getattr(ctx.args, 'unless_tags', None),
+                limit=params.get("limit"),
+                offset=offset,
+                order=getattr(ctx.args, 'order', None),
+                mime_types=getattr(ctx.args, 'mime_types', None),
+                mimes=getattr(ctx.args, 'mimes', None)
+            )
+
+            total = data.get("TotalPosts")
+            if total is not None and str(page_param) == "1":
+                print(f"\n[✓] API reports EXACTLY {total} matching posts on the server!")
+
+            return _map_v1_to_danbooru(data.get("Posts", []), ctx.api_client.base_url)
+
+        except requests.exceptions.RequestException as e:
+            print(f"\n[Error] V1 API fetch failed: {e}")
+            return None
+
+    session = ctx.session
+    args = ctx.args
+    solver = ctx.solver
 
     try:
         resp = session.get(url, params=params, timeout=30)
@@ -498,8 +693,7 @@ def _probe_smart_resume(ctx: FetchContext, target_id_str) -> bool:
 
     print(f"\n[?] Probing Page {PAGINATION_LIMIT} for smart resume...")
     params = {"tags": ctx.tags, "page": PAGINATION_LIMIT, "limit": 1}
-    data = _fetch_metadata_page(
-        ctx.session, f"{ctx.base_url}/posts.json", params, ctx.args, ctx.solver)
+    data = _fetch_metadata_page(f"{ctx.base_url}/posts.json", params, ctx)
 
     if isinstance(data, list) and data:
         limit_id = data[0].get('id', 0)
@@ -528,14 +722,43 @@ def _submit_batch(executor: ThreadPoolExecutor, ctx, current_page, batch_size):
         params = {"tags": ctx.tags, "page": page_num, "limit": ctx.args.limit}
         future = executor.submit(
             _fetch_metadata_page,
-            ctx.session,
             ctx.base_url + "/posts.json",
             params,
-            ctx.args,
-            ctx.solver
+            ctx
         )
         futures[future] = page_num
     return futures
+
+def _are_all_posts_downloaded(ctx: FetchContext, posts_batch: List[dict]) -> bool:
+    """Checks if an entire batch of posts already exists locally to allow early fetch aborts."""
+    if not posts_batch:
+        return False
+    ids = [str(p.get('id')) for p in posts_batch if p.get('id')]
+    if not ids:
+        return False
+
+    existing = set()
+    try:
+        with sqlite3.connect(ctx.db_path, timeout=30) as conn:
+            cur = conn.cursor()
+            placeholders = ','.join('?' for _ in ids)
+            cur.execute(f"SELECT post_id FROM downloads WHERE status='completed' AND post_id IN ({placeholders})", ids) # pylint: disable=line-too-long
+            for row in cur.fetchall():
+                existing.add(str(row[0]))
+
+        gdl_path = getattr(ctx.args, 'gdl_db', None)
+        if gdl_path and len(existing) < len(ids):
+            with sqlite3.connect(gdl_path, timeout=30) as gdl_conn:
+                gdl_cur = gdl_conn.cursor()
+                keys = [f"{ctx.sitename} {i}" for i in ids if i not in existing]
+                placeholders = ','.join('?' for _ in keys)
+                gdl_cur.execute(f"SELECT entry FROM archive WHERE entry IN ({placeholders})", keys)
+                for row in gdl_cur.fetchall():
+                    existing.add(str(row[0].split(' ', 1)[1]))
+    except Exception: # pylint: disable=broad-exception-caught
+        pass
+
+    return len(existing) >= len(ids)
 
 def _process_batch_results(ctx, batch_results, last_batch_min_id):
     """Processes a sorted batch of results, checking limits and accumulating data."""
@@ -552,6 +775,11 @@ def _process_batch_results(ctx, batch_results, last_batch_min_id):
             return all_posts, None, False
 
         hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
+
+        if filtered_data and _are_all_posts_downloaded(ctx, filtered_data):
+            print("\n[!] Batch contains all previously downloaded posts. Aborting API fetch early.")
+            return all_posts, None, True
+
         all_posts.extend(filtered_data)
         batch_has_data = True
 
@@ -638,13 +866,17 @@ def _fetch_sequential_loop(ctx: FetchContext, start_id: str) -> List[dict]:
         print(f"Fetching posts before ID {clean_id}...", end="\r")
         params = {"tags": ctx.tags, "page": current_id_param, "limit": ctx.args.limit}
 
-        data = _fetch_metadata_page(ctx.session, base_api, params, ctx.args, ctx.solver)
+        data = _fetch_metadata_page(base_api, params, ctx)
 
         if not data or data == "410_GONE":
             print("\n[Info] No more posts found.")
             break
 
         hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
+
+        if filtered_data and _are_all_posts_downloaded(ctx, filtered_data):
+            print("\n[!] Batch contains all previously downloaded posts. Aborting API fetch early.")
+            break
 
         for p in filtered_data:
             p['_source_page'] = f"ID {current_id_param}"
@@ -750,6 +982,20 @@ def _setup_network_and_parse_input(args):
     session = get_protected_session()
     solver = AntiBotSolver() if args.captcha else None
 
+    if getattr(args, 'proxy', None):
+        session.proxies = {'http': args.proxy, 'https': args.proxy}
+
+    if getattr(args, 'cookies', None):
+        cookie_path = Path(args.cookies)
+        if cookie_path.exists():
+            try:
+                cj = MozillaCookieJar(str(cookie_path))
+                cj.load(ignore_discard=True, ignore_expires=True)
+                session.cookies.update(cj)
+                print(f"[INFO] Loaded custom cookies from {cookie_path}")
+            except Exception as e: # pylint: disable=broad-exception-caught
+                print(f"[WARNING] Failed to load cookies: {e}")
+
     retry_strategy = Retry(
         total=3,
         backoff_factor=1,
@@ -800,24 +1046,50 @@ def _setup_site_paths(session, args, base_url):
 
     return sitename, root_output_path, db_path
 
+def _detect_v1_api(session, base_url) -> Tuple[bool, Optional[Any]]:
+    """Probes the target server to see if it supports the Permabooru V1 API."""
+    try:
+        probe = session.get(f"{base_url}/api/v1/posts", params={"limit": 1}, timeout=5)
+        if probe.status_code == 200:
+            print(f"[✓] Auto-Detected V1 API endpoint on {base_url}")
+            return True, V1PostsAPI(base_url, session=session)
+    except Exception: # pylint: disable=broad-exception-caught
+        pass
+    return False, None
+
+# pylint: disable=too-many-locals
 def _configure_download(args):
     """Parses arguments and sets up configuration for the run."""
-    session, solver, tags, start_page_parsed, start_id_parsed, base_url = \
+
+    # TRICK 1: Star unpack (*) intermediate variables!
+    # This automatically captures start_page_parsed and start_id_parsed into a single
+    # lightweight list without changing the helper function's signature.
+    session, solver, tags, *parsed_starts, base_url = \
         _setup_network_and_parse_input(args)
 
     if tags is None:
         return None
 
+    # We then unpack them right back out using the star!
     start_page, start_id, end_page_limit, end_id_limit = \
         _resolve_state_and_conditions(
-            session, args, start_page_parsed, start_id_parsed
+            session, args, *parsed_starts
         )
 
     sitename, root_output_path, db_path = _setup_site_paths(
         session, args, base_url
     )
 
-    ctx = FetchContext(
+    if getattr(args, 'resume', False):
+        last_page = _get_last_checkpoint_page(db_path, tags)
+        if last_page:
+            print(f"[✓] Auto-Resume triggered: Jumping to Page {last_page} for '{tags}'")
+            start_page = last_page
+            start_id = None
+
+    is_v1, api_client = _detect_v1_api(session, base_url)
+
+    return FetchContext(
         session=session,
         args=args,
         solver=solver,
@@ -825,10 +1097,11 @@ def _configure_download(args):
         base_url=base_url,
         end_page=end_page_limit,
         end_id=end_id_limit,
-        db_path=db_path
-    )
-
-    return ctx, start_page, start_id, sitename, root_output_path
+        db_path=db_path,
+        is_v1=is_v1,
+        api_client=api_client,
+        sitename=sitename
+    ), start_page, start_id, sitename, root_output_path
 
 def _prepare_tasks(all_posts, args, root_output_path, sitename, ctx):
     """Generates and queues all DownloadTask objects."""
