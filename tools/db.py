@@ -158,7 +158,9 @@ def _update_single_image(pg_cur, image_id, tag_rating_map, smax, qmax):
 
     total_score = 0
     for tag in tags:
-        weight = tag_rating_map.get(tag)
+        clean_tag = tag[6:] if tag.startswith("tagai:") else tag
+
+        weight = tag_rating_map.get(clean_tag)
         if weight is None:
             continue
         if weight == 1 and total_score == 0:

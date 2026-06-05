@@ -138,7 +138,9 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
     """Determines rating based on tag weights or fallback to database if available"""
     total_score = 0
     for tag in tags:
-        weight = rating_map.get(tag, 0)
+        clean_tag = tag[6:] if tag.startswith("tagai:") else tag
+
+        weight = rating_map.get(clean_tag, 0)
         if weight > 1:
             total_score += weight
         elif weight == 1 and total_score == 0:

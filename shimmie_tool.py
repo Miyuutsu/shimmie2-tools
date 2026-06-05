@@ -2,10 +2,27 @@
 import argparse
 import sys
 
-from tools import csv_builder
-from tools import db, images, wiki
+from tools import csv_builder, db, images, wiki, ai_auditor
 
 from functions.common import get_cpu_threads
+
+def _add_audit_ratings_parser(subparsers):
+    """Adds the audit-ratings command."""
+    parser = subparsers.add_parser("audit-ratings", help="Audit safe images using AI Tagger submodule")
+
+    # Independent action flags
+    parser.add_argument("--scan", action="store_true", help="Run the AI model and stage tags/ratings")
+    parser.add_argument("--review", action="store_true", help="Print a summary of the staged changes")
+    parser.add_argument("--apply", action="store_true", help="Push staged tags/ratings to Shimmie")
+    parser.add_argument("--revert", action="store_true", help="Undo the last applied batch of AI changes")
+
+    parser.add_argument("--spath", required=True, help="Path to Shimmie root")
+    parser.add_argument("--thumbs", help="Path to thumbnails (Defaults to spath/data/thumbs)")
+
+    # Model and Thresholds
+    parser.add_argument("--model", choices=["vit", "vit-large", "swinv2", "convnext", "eva02"], default="eva02", help="SmilingWolf model to use")
+    parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag confidence threshold")
+    parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag confidence threshold")
 
 def _add_csv_parser(subparsers):
     """Adds the make-csv command."""
@@ -202,6 +219,7 @@ def setup_parser():
     _add_precache_parser(subparsers)
     _add_update_ratings_parser(subparsers)
     _add_download_parser(subparsers)
+    _add_audit_ratings_parser(subparsers)
 
     return parser, parser_csv, subparsers
 
@@ -245,6 +263,7 @@ def main():
         "precache": db.precache_posts,
         "update-ratings": db.update_ratings,
         "download": images.run,
+        "audit-ratings": ai_auditor.run_auditor,
     }
 
     if args.command == "make-csv":
