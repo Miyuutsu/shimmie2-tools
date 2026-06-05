@@ -16,12 +16,10 @@ from urllib3.util.retry import Retry
 
 from functions.captcha import get_protected_session, AntiBotSolver
 
-# Global event for safe shutdown and logging lock
 SHUTDOWN_EVENT = threading.Event()
 LOG_LOCK = threading.Lock()
 PAGINATION_LIMIT = 1000
 
-# Schema for the local resume DB
 CREATE_LOCAL_DB = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -38,7 +36,6 @@ CREATE TABLE IF NOT EXISTS downloads (
 );
 CREATE INDEX IF NOT EXISTS idx_post_id ON downloads(post_id);
 
--- New Table: Checkpoints for Deep Jumping
 CREATE TABLE IF NOT EXISTS checkpoints (
     search_query TEXT,
     page_num INTEGER,
@@ -48,7 +45,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 """
 
-# Schema for Gallery-DL compatibility
 CREATE_GDL_DB = """
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS archive (
@@ -122,9 +118,11 @@ def _save_checkpoint(db_path, tags, page_num, post_id):
     try:
         with sqlite3.connect(db_path, timeout=30) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO checkpoints (search_query, page_num, post_id) VALUES (?, ?, ?)",
+                """INSERT OR REPLACE INTO checkpoints (search_query, page_num, post_id)
+                VALUES (?, ?, ?);""",
                 (tags, page_num, str(post_id))
             )
+
     except Exception as e: # pylint: disable=broad-exception-caught
         print(f"[Warning] Failed to save checkpoint: {e}")
 
@@ -134,8 +132,8 @@ def _get_checkpoint_id(db_path, tags, page_num):
         with sqlite3.connect(db_path, timeout=30) as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT post_id, page_num FROM checkpoints WHERE search_query = ? AND page_num <= ? "
-                "ORDER BY page_num DESC LIMIT 1",
+                "SELECT post_id, page_num FROM checkpoints WHERE search_query = ? AND page_num <= ?"
+                " ORDER BY page_num DESC LIMIT 1",
                 (tags, page_num)
             )
             row = cur.fetchone()
@@ -282,85 +280,139 @@ def _construct_tag_string(post):
 
     return "\n".join(final_tags)
 
-def _download_file(task, db_ctx):
-    """Handles the actual file I/O with retries, logging, and auth passing."""
-    post = task.post
-    file_url = post.get('file_url') or post.get('large_file_url')
+def _setup_file_path(task, post):
+    """Handles path determination and initial setup."""
+    post_id = post['id']
 
+    file_url = post.get('file_url') or post.get('large_file_url')
     if not file_url:
         msg = "No file_url found (Access Denied or Deleted)"
-        _log_error(task.output_path, task.source_context, post['id'], msg)
-        return f"[Skip] ID {post['id']} has no file_url."
+        _log_error(task.output_path, task.source_context, post_id, msg)
+        return None, None, f"[Skip] ID {post_id} has no file_url."
 
     if file_url.startswith("/"):
         file_url = f"{task.base_url}{file_url}"
 
     ext = post.get('file_ext') or Path(file_url).suffix.strip('.')
+
     filename = task.args.filename_fmt.format(
-        id=post['id'], md5=post.get('md5', ''), sitename=task.sitename, ext=ext
+        id=post_id, md5=post.get('md5', ''), sitename=task.sitename, ext=ext
     )
     filename = "".join(x for x in filename if x.isalnum() or x in "._-")
 
-    safe_folder = "".join(x for x in task.search_query[:50] if x.isalnum() or x in " ._-").strip() or "misc"
+    safe_folder = "".join(
+        x for x in task.search_query[:50] if x.isalnum() or x in " ._-").strip() or "misc"
+
     target_dir = task.output_path / safe_folder
     target_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = target_dir / filename
 
-    exists, msg = _check_exists(post['id'], out_path, db_ctx)
-    if exists:
-        return msg
+    return file_url, out_path, f"[Ready] ID {post_id} path set."
+
+def _check_existing(task, post, out_path, db_ctx):
+    """Checks if the file is already recorded or exists locally."""
+    exists_db, msg_db = _check_exists(post['id'], out_path, db_ctx)
+    if exists_db:
+        return msg_db
 
     if out_path.exists():
         _record_success(task, post.get('md5', ''), out_path, db_ctx)
         return f"[Found] ID {post['id']} exists on disk."
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            resp = requests.get(
-                file_url,
-                stream=True,
-                timeout=60,
-                cookies=task.cookies,
-                headers=task.headers
+    return None
+
+def _perform_single_download(task, post, file_url, out_path):
+    """Attempts one file download and performs immediate integrity checks."""
+    post_id = post['id']
+
+    try:
+        resp = requests.get(
+            file_url,
+            stream=True,
+            timeout=60,
+            cookies=task.cookies,
+            headers=task.headers
+        )
+        resp.raise_for_status()
+
+        content_type = resp.headers.get('Content-Type', '')
+        if 'text/html' in content_type:
+            _log_error(
+                task.output_path, task.source_context, post_id,
+                "Got HTML instead of image (Possible Block/Captcha)"
             )
-            resp.raise_for_status()
+            return f"[Error] ID {post_id} returned HTML (blocked)."
 
-            content_type = resp.headers.get('Content-Type', '')
-            if 'text/html' in content_type:
-                _log_error(task.output_path, task.source_context, post['id'], "Got HTML instead of image (Possible Block/Captcha)")
-                return f"[Error] ID {post['id']} returned HTML (blocked)."
+        with open(out_path, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if SHUTDOWN_EVENT.is_set():
+                    return "[Aborted] Shutdown triggered."
+                f.write(chunk)
 
-            with open(out_path, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    if SHUTDOWN_EVENT.is_set():
-                        return "[Aborted] Shutdown triggered."
-                    f.write(chunk)
+        if out_path.stat().st_size < 1024 and 'text/html' not in content_type:
+            _log_error(
+                task.output_path, task.source_context, post_id,
+                "File too small (<1KB). Suspicious."
+            )
+            return f"[Suspicious] ID {post_id} file is suspiciously small."
 
-            if out_path.stat().st_size < 1024 and 'text/html' not in content_type:
-                _log_error(task.output_path, task.source_context, post['id'], "File too small (<1KB). Suspicious.")
+        return out_path
 
-            return out_path
+    except (requests.RequestException, ConnectionError, OSError) as e:
+        return e
 
-        except (requests.RequestException, ConnectionError, OSError) as e:
-            is_reset = "Connection reset by peer" in str(e) or "104" in str(e)
+def _handle_retry_or_final_failure(task, out_path, e, attempt, max_retries):
+    """Manages the logic for retrying or handling final failure/cleanup."""
+    post_id = task.post['id']
+    is_reset = "Connection reset by peer" in str(e) or "104" in str(e)
 
-            if attempt < max_retries - 1:
-                sleep_time = 2 * (attempt + 1)
-                reason = "Connection Reset" if is_reset else "Network Error"
-                print(f"[!] Retry {attempt+1}/{max_retries} for ID {post['id']} ({reason}). Sleeping {sleep_time}s...")
-                time.sleep(sleep_time)
-                if out_path.exists():
-                    out_path.unlink()
-            else:
-                err_msg = f"Failed after {max_retries} retries. Last error: {str(e)}"
-                _log_error(task.output_path, task.source_context, post['id'], err_msg)
-                if out_path.exists():
-                    out_path.unlink()
-                raise e
+    if attempt < max_retries - 1:
+        sleep_time = 2 * (attempt + 1)
+        reason = "Connection Reset" if is_reset else "Network Error"
+        print(f"[!] Retry {attempt+1}/{max_retries} for ID {post_id} ({reason}).")
+        print(f"Sleeping {sleep_time}s...")
 
-    return f"[Error] ID {post['id']} failed to download."
+        if out_path.exists():
+            out_path.unlink()
+    else:
+        err_msg = f"Failed after {max_retries} retries. Last error: {str(e)}"
+        _log_error(task.output_path, task.source_context, post_id, err_msg)
+
+        if out_path.exists():
+            out_path.unlink()
+
+        raise e
+
+def _attempt_download(task, post, file_url, out_path):
+    """Handles the actual file I/O with retries, logging, and auth passing."""
+    post_id = post['id']
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        result = _perform_single_download(task, post, file_url, out_path)
+
+        if isinstance(result, str):
+            return result
+
+        if isinstance(result, Exception):
+            _handle_retry_or_final_failure(task, out_path, result, attempt, max_retries)
+
+    return f"[Error] ID {post_id} failed to download."
+
+def _download_file(task, db_ctx):
+    """Handles the actual file I/O with retries, logging, and auth passing."""
+    post = task.post
+
+    file_url, out_path, msg = _setup_file_path(task, post)
+    if not file_url:
+        return msg
+
+    existing_msg = _check_existing(task, post, out_path, db_ctx)
+    if existing_msg:
+        return existing_msg
+
+    return _attempt_download(task, post, file_url, out_path)
 
 def _download_worker(task: DownloadTask, db_path):
     """Worker function."""
@@ -446,7 +498,8 @@ def _probe_smart_resume(ctx: FetchContext, target_id_str) -> bool:
 
     print(f"\n[?] Probing Page {PAGINATION_LIMIT} for smart resume...")
     params = {"tags": ctx.tags, "page": PAGINATION_LIMIT, "limit": 1}
-    data = _fetch_metadata_page(ctx.session, f"{ctx.base_url}/posts.json", params, ctx.args, ctx.solver)
+    data = _fetch_metadata_page(
+        ctx.session, f"{ctx.base_url}/posts.json", params, ctx.args, ctx.solver)
 
     if isinstance(data, list) and data:
         limit_id = data[0].get('id', 0)
@@ -459,14 +512,73 @@ def _probe_smart_resume(ctx: FetchContext, target_id_str) -> bool:
     print("[!] Probe failed or page empty. Defaulting to sequential.")
     return False
 
+def _submit_batch(executor: ThreadPoolExecutor, ctx, current_page, batch_size):
+    """Submits futures for a range of pages up to batch_size."""
+    futures = {}
+    for i in range(batch_size):
+        page_num = current_page + i
+        if ctx.end_page and page_num > ctx.end_page:
+            break
+
+        if page_num >= PAGINATION_LIMIT:
+            print(f"\n[Info] Page {page_num} reached. Switching to ID Mode.")
+            break
+
+        print(f"Queueing page {page_num}...", end="\r")
+        params = {"tags": ctx.tags, "page": page_num, "limit": ctx.args.limit}
+        future = executor.submit(
+            _fetch_metadata_page,
+            ctx.session,
+            ctx.base_url + "/posts.json",
+            params,
+            ctx.args,
+            ctx.solver
+        )
+        futures[future] = page_num
+    return futures
+
+def _process_batch_results(ctx, batch_results, last_batch_min_id):
+    """Processes a sorted batch of results, checking limits and accumulating data."""
+    all_posts = []
+    batch_has_data = False
+
+    for p_num, data in batch_results:
+        if data == "410_GONE":
+            print(f"\n[Info] Page {p_num} hit limit. Switching modes...")
+            return all_posts, last_batch_min_id, True
+
+        if not data:
+            print(f"\n[Info] Page {p_num} is empty or failed. Stopping fetch.")
+            return all_posts, None, False
+
+        hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
+        all_posts.extend(filtered_data)
+        batch_has_data = True
+
+        for p in filtered_data:
+            p['_source_page'] = f"Page {p_num}"
+
+        if filtered_data and p_num % 10 == 0:
+            _save_checkpoint(ctx.db_path, ctx.tags, p_num, filtered_data[0]['id'])
+
+        if hit_limit:
+            print(f"\n[✓] Reached End-ID limit ({ctx.end_id}). Stopping.")
+            return all_posts, None, True
+
+        last_batch_min_id = filtered_data[-1].get('id')
+
+        if len(data) < ctx.args.limit:
+            print(f"\n[Info] Page {p_num} has partial data. End of results.")
+            return all_posts, None, False
+
+    return all_posts, last_batch_min_id, batch_has_data
+
 def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict], Optional[str]]:
     """Handles the threaded page-based fetching loop."""
     all_posts = []
     batch_size = max(5, min(ctx.args.threads, 50))
 
-    # FIX: Ensure we have a valid int for math operations
     current_page = start_page if start_page is not None else 1
-    base_api = f"{ctx.base_url}/posts.json"
     next_start_id = None
 
     print(f"\n--- Fetching API Metadata (Threaded Page Mode - Batch {batch_size}) ---")
@@ -476,78 +588,40 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
             if ctx.end_page and current_page > ctx.end_page:
                 break
 
-            futures = {}
-            for i in range(batch_size):
-                page_num = current_page + i
-                if ctx.end_page and page_num > ctx.end_page:
-                    break
-
-                if page_num >= PAGINATION_LIMIT:
-                    print(f"\n[Info] Page {page_num} reached. Switching to ID Mode.")
-                    break
-
-                print(f"Queueing page {page_num}...", end="\r")
-                params = {"tags": ctx.tags, "page": page_num, "limit": ctx.args.limit}
-                future = executor.submit(
-                    _fetch_metadata_page, ctx.session, base_api, params, ctx.args, ctx.solver
-                )
-                futures[future] = page_num
+            futures = _submit_batch(executor, ctx, current_page, batch_size)
 
             if not futures:
                 break
 
+            last_batch_min_id = None
             batch_has_data = False
+
             batch_results = sorted(
                 [(futures[f], f.result()) for f in as_completed(futures)],
                 key=lambda x: x[0]
             )
 
-            last_batch_min_id = None
-
-            for p_num, data in batch_results:
-                if data == "410_GONE":
-                    print(f"\n[Info] Page {p_num} hit limit. Switching modes...")
-                    break
-
-                if not data:
-                    print(f"\n[Info] Page {p_num} is empty or failed. Stopping fetch.")
-                    return all_posts, None
-
-                hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
-
-                for p in filtered_data:
-                    p['_source_page'] = f"Page {p_num}"
-
-                all_posts.extend(filtered_data)
-
-                if filtered_data and p_num % 10 == 0:
-                    _save_checkpoint(ctx.db_path, ctx.tags, p_num, filtered_data[0]['id'])
-
-                if hit_limit:
-                    print(f"\n[✓] Reached End-ID limit ({ctx.end_id}). Stopping.")
-                    return all_posts, None
-
-                batch_has_data = True
-                if filtered_data:
-                    last_batch_min_id = filtered_data[-1].get('id')
-
-                if len(data) < ctx.args.limit:
-                    print(f"\n[Info] Page {p_num} has partial data. End of results.")
-                    return all_posts, None
+            all_posts, last_batch_min_id, batch_has_data = \
+                _process_batch_results(ctx, batch_results, last_batch_min_id)
 
             if not batch_has_data:
-                if last_batch_min_id or (all_posts and all_posts[-1].get('id')):
-                    last_id = last_batch_min_id if last_batch_min_id else all_posts[-1]['id']
+                if last_batch_min_id:
+                    next_start_id = f"b{last_batch_min_id}"
+                elif all_posts and all_posts[-1].get('id'):
+                    last_id = all_posts[-1]['id']
                     next_start_id = f"b{last_id}"
+                else:
                     break
-                return all_posts, None
-
-            current_page += batch_size
-            time.sleep(ctx.args.sleep)
 
             if current_page >= PAGINATION_LIMIT and last_batch_min_id:
                 next_start_id = f"b{last_batch_min_id}"
                 break
+
+            if batch_has_data and next_start_id:
+                break
+
+            current_page += batch_size
+            time.sleep(ctx.args.sleep)
 
     return all_posts, next_start_id
 
@@ -636,8 +710,43 @@ def _fetch_all_posts_threaded(ctx: FetchContext, start_page: int, start_id: Opti
     print(f"\n[✓] Metadata fetched. Found {len(all_posts)} posts.")
     return all_posts
 
-def _configure_download(args):
-    """Parses arguments and sets up configuration for the run."""
+def _resolve_start_state(session, args):
+    """
+    Parses the command-line start argument (page or ID) and resolves
+    the starting state, including checkpoint lookups if pagination is used.
+    """
+    cli_start_arg = str(args.start_page).strip()
+
+    if cli_start_arg.isdigit():
+        req_page = int(cli_start_arg)
+
+        if req_page != 1:
+            sitename, _ = _get_site_details(session, args.base_url)
+
+            root_path = Path(args.output)
+            if args.output == "downloads" and sitename:
+                root_path = Path(sitename)
+
+            db_path = root_path / "global_downloads.db"
+
+            if db_path.exists():
+                print(f"[?] Looking for checkpoint near Page {req_page}...")
+                cp_id, cp_page = _get_checkpoint_id(db_path, args.tags or args.query, req_page)
+                if cp_id:
+                    print(f"[✓] Found checkpoint! Page {cp_page} -> ID {cp_id}")
+                    return None, f"b{cp_id}"
+                print(f"[!] No checkpoint found. Cannot jump to Page {req_page}. Starting from 1.")
+                return 1, None
+
+            return req_page, None
+
+    elif cli_start_arg.lower().startswith(('a', 'b')):
+        return None, cli_start_arg
+
+    return 1, None
+
+def _setup_network_and_parse_input(args):
+    """Handles session setup, anti-bot solver, and initial URL parsing."""
     session = get_protected_session()
     solver = AntiBotSolver() if args.captcha else None
 
@@ -657,41 +766,27 @@ def _configure_download(args):
 
     if not (args.tags or args.query):
         print("[Error] You must provide a URL or tags.")
-        return None
+        return session, solver, None, None, None, None
 
-    tags, start_page, start_id, base_url = _parse_input_query(args.tags or args.query, args.base_url)
+    tags, start_page_parsed, start_id_parsed, base_url = _parse_input_query(
+        args.tags or args.query, args.base_url
+    )
 
-    cli_start_arg = str(args.start_page).strip()
+    return session, solver, tags, start_page_parsed, start_id_parsed, base_url
 
-    if cli_start_arg.isdigit():
-        req_page = int(cli_start_arg)
-        if req_page != 1 or start_page is None:
-            start_page = req_page
-            start_id = None
+def _resolve_state_and_conditions(session, args, start_page_parsed, start_id_parsed):
+    """Handles resolving initial state and setting end conditions."""
+    resolved_start_page, resolved_start_id = _resolve_start_state(session, args)
 
-            if req_page >= PAGINATION_LIMIT:
-                sitename_temp, _ = _get_site_details(session, base_url)
-                out_path_temp = Path(args.output)
-                if args.output == "downloads": out_path_temp = out_path_temp / sitename_temp
-                db_path_temp = out_path_temp / "global_downloads.db"
-
-                if db_path_temp.exists():
-                    print(f"[?] Looking for checkpoint near Page {req_page}...")
-                    cp_id, cp_page = _get_checkpoint_id(db_path_temp, tags, req_page)
-                    if cp_id:
-                        print(f"[✓] Found checkpoint! Page {cp_page} -> ID {cp_id}")
-                        start_page = None
-                        start_id = f"b{cp_id}"
-                    else:
-                        print(f"[!] No checkpoint found. Cannot jump to Page {req_page}. Starting from 1.")
-                        start_page = 1
-
-    elif cli_start_arg.lower().startswith(('a', 'b')):
-        start_id = cli_start_arg
-        start_page = None
+    start_page = resolved_start_page if resolved_start_page is not None else start_page_parsed
+    start_id = resolved_start_id if resolved_start_id else start_id_parsed
 
     end_page_limit, end_id_limit = _parse_end_condition(args.end_page)
 
+    return start_page, start_id, end_page_limit, end_id_limit
+
+def _setup_site_paths(session, args, base_url):
+    """Handles sitename determination and root path calculation/DB init."""
     sitename = args.sitename
     if sitename == "auto":
         sitename, base_url = _get_site_details(session, base_url)
@@ -703,16 +798,99 @@ def _configure_download(args):
     l_conn, _, db_path = _init_dbs(root_output_path, args.gdl_db)
     l_conn.close()
 
+    return sitename, root_output_path, db_path
+
+def _configure_download(args):
+    """Parses arguments and sets up configuration for the run."""
+    session, solver, tags, start_page_parsed, start_id_parsed, base_url = \
+        _setup_network_and_parse_input(args)
+
+    if tags is None:
+        return None
+
+    start_page, start_id, end_page_limit, end_id_limit = \
+        _resolve_state_and_conditions(
+            session, args, start_page_parsed, start_id_parsed
+        )
+
+    sitename, root_output_path, db_path = _setup_site_paths(
+        session, args, base_url
+    )
+
     ctx = FetchContext(
-        session=session, args=args, solver=solver, tags=tags,
-        base_url=base_url, end_page=end_page_limit, end_id=end_id_limit,
+        session=session,
+        args=args,
+        solver=solver,
+        tags=tags,
+        base_url=base_url,
+        end_page=end_page_limit,
+        end_id=end_id_limit,
         db_path=db_path
     )
 
     return ctx, start_page, start_id, sitename, root_output_path
 
+def _prepare_tasks(all_posts, args, root_output_path, sitename, ctx):
+    """Generates and queues all DownloadTask objects."""
+    cookies = requests.utils.dict_from_cookiejar(ctx.session.cookies)
+    headers = dict(ctx.session.headers)
+
+    tasks = []
+    for p in all_posts:
+        tasks.append(DownloadTask(
+            post=p, args=args, output_path=root_output_path,
+            gdl_db_path=args.gdl_db, sitename=sitename, base_url=ctx.base_url,
+            search_query=ctx.tags,
+            source_context=p.get('_source_page', 'Unknown'),
+            cookies=cookies,
+            headers=headers
+        ))
+    return tasks
+
+def _monitor_and_execute_tasks(tasks, args, db_path):
+    """Submits tasks, monitors results for completion/abort, and handles KeyboardInterrupt."""
+    executor = ThreadPoolExecutor(max_workers=args.threads)
+    futures = {executor.submit(_download_worker, t, str(db_path)): t for t in tasks}
+    completed = 0
+    consecutive_skips = 0
+
+    try:
+        for future in as_completed(futures):
+            res = future.result()
+            print(f"[{completed + 1}/{len(tasks)}] {res}")
+            completed += 1
+
+            if res.startswith("[Skip]") or res.startswith("[Found]"):
+                consecutive_skips += 1
+            else:
+                consecutive_skips = 0
+
+            if args.abort > 0 and consecutive_skips >= args.abort:
+                print(f"\n[!] Abort limit reached ({args.abort} consecutive skips). Stopping...")
+                raise KeyboardInterrupt
+
+        executor.shutdown(wait=True)
+
+    except KeyboardInterrupt:
+        _execute_shutdown_sequence(executor, db_path)
+
+def _execute_shutdown_sequence(executor, db_path):
+    """Performs graceful shutdown, event signaling, and WAL checkpointing."""
+    print("\n\n[!] SHUTDOWN TRIGGERED. Waiting for active downloads to finish...")
+    SHUTDOWN_EVENT.set()
+    executor.shutdown(wait=True)
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        print("[✓] WAL Checkpointed.")
+    except Exception as e: # pylint: disable=broad-exception-caught
+        print(f"[!] Failed to checkpoint WAL: {e}")
+
+    print("[✓] Safe shutdown complete.")
+
 def run(args):
-    """Main entry point."""
+    """Main entry point. Orchestrates config, fetch, and download."""
     config = _configure_download(args)
     if not config:
         return
@@ -747,55 +925,11 @@ def run(args):
 
     l_conn, g_conn, db_path = _init_dbs(root_output_path, args.gdl_db)
     l_conn.close()
-    if g_conn: g_conn.close()
+    if g_conn:
+        g_conn.close()
+
+    tasks = _prepare_tasks(all_posts, args, root_output_path, sitename, ctx)
 
     print("\n--- Starting Downloads (Ctrl+C to stop safely) ---")
 
-    # FIX: Correctly extract cookies from MozillaCookieJar
-    cookies = requests.utils.dict_from_cookiejar(ctx.session.cookies)
-    headers = dict(ctx.session.headers)
-
-    tasks = []
-    for p in all_posts:
-        tasks.append(DownloadTask(
-            post=p, args=args, output_path=root_output_path,
-            gdl_db_path=args.gdl_db, sitename=sitename, base_url=ctx.base_url,
-            search_query=ctx.tags,
-            source_context=p.get('_source_page', 'Unknown'),
-            cookies=cookies,
-            headers=headers
-        ))
-
-    executor = ThreadPoolExecutor(max_workers=args.threads)
-    futures = {executor.submit(_download_worker, t, str(db_path)): t for t in tasks}
-    completed = 0
-    consecutive_skips = 0  # Initialize counter
-
-    try:
-        for future in as_completed(futures):
-            res = future.result()
-            print(f"[{completed + 1}/{len(tasks)}] {res}")
-            completed += 1
-
-            # [NEW] Check for abort condition
-            if res.startswith("[Skip]") or res.startswith("[Found]"):
-                consecutive_skips += 1
-            else:
-                consecutive_skips = 0
-
-            if args.abort > 0 and consecutive_skips >= args.abort:
-                print(f"\n[!] Abort limit reached ({args.abort} consecutive skips). Stopping...")
-                raise KeyboardInterrupt  # Trigger safe shutdown
-
-    except KeyboardInterrupt:
-        print("\n\n[!] SHUTDOWN TRIGGERED. Waiting for active downloads to finish...")
-        SHUTDOWN_EVENT.set()
-        executor.shutdown(wait=True)
-        try:
-            with sqlite3.connect(db_path) as conn:
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            print("[✓] WAL Checkpointed.")
-        except Exception as e: # pylint: disable=broad-exception-caught
-            print(f"[!] Failed to checkpoint WAL: {e}")
-
-        print("[✓] Safe shutdown complete.")
+    _monitor_and_execute_tasks(tasks, args, db_path)

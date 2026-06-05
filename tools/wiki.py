@@ -1,4 +1,3 @@
-# pylint: disable=duplicate-code
 """Wiki management tools (Universal Indexing, Static Site Gen, and Archiving)."""
 import re
 import html
@@ -340,18 +339,23 @@ def _get_entries_sqlite():
 def _classify_entry_type(entry):
     """Classifies an entry based on its source endpoint."""
     src = entry['source']
-    if 'wiki_pages' in src or 'wiki_page' in src:
-        return 'Wiki'
-    if 'artist_commentary' in src:
-        return 'Artist Commentary'
-    if 'artist' in src:
-        return 'Artists'
-    if 'pool' in src:
-        return 'Pools'
-    if 'note' in src:
-        return 'Notes'
-    if 'post' in src:
-        return 'Posts'
+
+    # Mapping keywords to their corresponding return categories.
+    classification_map = {
+        'wiki_pages': 'Wiki',
+        'wiki_page': 'Wiki',
+        'artist_commentary': 'Artist Commentary',
+        'artist': 'Artists',
+        'pool': 'Pools',
+        'note': 'Notes',
+        'post': 'Posts'
+    }
+
+    for keyword, category in classification_map.items():
+        if keyword in src:
+            return category
+
+    # This is your ultimate fallback condition, ensuring all inputs are handled.
     return 'Other'
 
 def _write_category_index_html(path, category, titles, css_file):
@@ -532,6 +536,7 @@ def _format_entry_body(entry, endpoint):
     This creates the "textual content" for our static site.
     """
     body_parts = []
+    meta = []
 
     # 1. Base Body (if present)
     if entry.get("body"):
@@ -542,44 +547,59 @@ def _format_entry_body(entry, endpoint):
         body_parts.append(f"[h4]Description[/h4]\n{entry['original_description']}")
 
     # 2. Metadata Extraction
-    meta = []
-
     # Artists
-    if "artist" in endpoint:
-        if "group_name" in entry and entry["group_name"]:
-            meta.append(f"Group: {entry['group_name']}")
-        if "other_names" in entry and entry["other_names"]:
-            meta.append(f"Aliases: {entry['other_names']}")
-        if "urls" in entry:
-            urls = entry["urls"]
-            if isinstance(urls, list):
-                ulist = "\n".join(
-                    [f" * {u.get('url', u) if isinstance(u, dict) else u}" for u in urls]
-                )
-                body_parts.append(f"[h4]Links[/h4]\n{ulist}")
+    # Define keyword checks and associated actions (the "map" executed internally)
+    # Note: We must handle side effects (modifying meta/body_parts) within the loop.
+    keyword_actions = [
+        ('artist', lambda:_handle_artist(entry, meta, body_parts)),
+        ('pool', lambda:_handle_pool(entry, body_parts)),
+        ('note', lambda:_handle_note(entry, meta)),
+        ('commentary', lambda:_handle_commentary(entry, body_parts))
+    ]
 
-    # Pools
-    if "pool" in endpoint and "post_ids" in entry:
+    # We use a loop structure to replace sequential IFs/ELIFs for the endpoint checks
+    for key, action in keyword_actions:
+        if key in endpoint:
+            # Execute the specific handler logic for that keyword
+            action()
+
+    # --- 3. Metadata Finalization ---
+
+    if meta:
+        body_parts.insert(0, "[b]Metadata:[/b]\n" + "\n".join(meta) + "\n\n---")
+
+    return "\n\n".join(body_parts)
+
+def _handle_artist(entry, meta, body_parts):
+    # Original Artist Logic moved here
+    if "group_name" in entry and entry["group_name"]:
+        meta.append(f"Group: {entry['group_name']}")
+    if "other_names" in entry and entry["other_names"]:
+        meta.append(f"Aliases: {entry['other_names']}")
+    if "urls" in entry:
+        urls = entry["urls"]
+        if isinstance(urls, list):
+            ulist = "\n".join([f"* {u.get('url', u) if isinstance(u, dict) else u}" for u in urls])
+            body_parts.append(f"[h4]Links[/h4]\n{ulist}")
+
+def _handle_pool(entry, body_parts):
+    # Original Pool Logic moved here
+    if "post_ids" in entry:
         pids = entry["post_ids"]
         if isinstance(pids, list):
             count = len(pids)
             body_parts.append(f"\n[b]Contains {count} posts.[/b]")
 
-    # Notes
-    if "note" in endpoint and "x" in entry and "y" in entry:
+def _handle_note(entry, meta):
+    # Original Note Logic moved here
+    if "x" in entry and "y" in entry:
         meta.append(f"Coordinates: X={entry['x']}, Y={entry['y']}")
         meta.append(f"Size: {entry.get('width', '?')}x{entry.get('height', '?')}")
 
-    # Commentary
-    if "commentary" in endpoint:
-        if "translated_description" in entry and entry["translated_description"]:
-            body_parts.append(f"[h4]Translation[/h4]\n{entry['translated_description']}")
-
-    # Prepend Metadata
-    if meta:
-        body_parts.insert(0, "[b]Metadata:[/b]\n" + "\n".join(meta) + "\n\n---")
-
-    return "\n\n".join(body_parts)
+def _handle_commentary(entry, body_parts):
+    # Original Commentary Logic moved here
+    if "translated_description" in entry and entry["translated_description"]:
+        body_parts.append(f"[h4]Translation[/h4]\n{entry['translated_description']}")
 
 def _get_entry_title(entry, endpoint):
     """Determines the display title based on endpoint type."""
@@ -671,7 +691,7 @@ def _get_page_data(session, page, endpoint, args, solver):
                     return None
             return None
 
-    except Exception as e:
+    except Exception as e: # pylint: disable=broad-exception-caught
         print(f"[ERROR] Fetch failed: {e}")
         return None
 

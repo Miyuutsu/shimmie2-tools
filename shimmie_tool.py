@@ -9,10 +9,14 @@ from functions.common import get_cpu_threads
 
 def _add_csv_parser(subparsers):
     """Adds the make-csv command."""
-    parser = subparsers.add_parser("make-csv", help="Create a CSV for Shimmie2 import")
+    parser = subparsers.add_parser(
+        "make-csv", help="Create a CSV for Shimmie2 import"
+    )
     parser.add_argument("--batch", type=int, default=20, help="Batch size")
     parser.add_argument(
-        "--create-map", dest="create_map_csv", help="Mine tags and create a CSV map"
+        "--create-map",
+        dest="create_map_csv",
+        help="Mine tags and create a CSV map"
     )
     parser.add_argument("--images", dest="image_path", help="Path to images directory")
     parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
@@ -22,7 +26,10 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--smax", default=50, help="Max safe rating.")
     parser.add_argument("--spath", help="Path to shimmie root")
     parser.add_argument(
-        "--threads", type=int, default=get_cpu_threads() // 2, help="Thread count"
+        "--threads",
+        type=int,
+        default=get_cpu_threads() // 2,
+        help="Thread count"
     )
     parser.add_argument("--thumbnail", action="store_true", help="Generate thumbnails")
     parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
@@ -32,7 +39,9 @@ def _add_csv_parser(subparsers):
 
 def _add_wiki_index_parser(subparsers):
     """Adds the wiki-index command."""
-    parser = subparsers.add_parser("wiki-index", help="Create static HTML wiki site")
+    parser = subparsers.add_parser(
+        "wiki-index", help="Create static HTML wiki site"
+    )
     parser.add_argument("--spath", help="Path to shimmie root (Optional for offline mode)")
     parser.add_argument("--output", type=str, default="wiki_html", help="Output directory path")
     parser.add_argument("--sort", action="store_true", help="Enable sorting of tags in index")
@@ -48,11 +57,14 @@ def _add_import_wikis_parser(subparsers):
     parser.add_argument("--pages", type=int, default=200)
     parser.add_argument("--update-existing", action="store_true")
     parser.add_argument(
-        "--convert", choices=["raw", "markdown", "html", "shimmie"], default="shimmie"
+        "--convert",
+        choices=["raw", "markdown", "html", "shimmie"],
+        default="shimmie"
     )
     parser.add_argument("--update-cache", action="store_true")
     parser.add_argument("--clear-cache", action="store_true")
-    parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
+    parser.add_argument(
+        "--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
     parser.add_argument(
         "--endpoint",
         default="wiki_pages.json",
@@ -90,24 +102,40 @@ def _add_download_parser(subparsers):
     parser.add_argument("--tags", help="Explicit tags (overrides query)")
 
     parser.add_argument("--base-url", default="https://danbooru.donmai.us", help="Booru base URL")
-    parser.add_argument("--sitename", default="auto", help="Sitename for Gallery-DL history (default: auto-detect)")
+    parser.add_argument("--sitename",
+                        default="auto",
+                        help="Sitename for Gallery-DL history (default: auto-detect)"
+    )
 
     # Limits & Threads
     parser.add_argument("--limit", type=int, default=100, help="Posts per page (max 100)")
     parser.add_argument("--start-page", type=str, default=1, help="Start page")
-    parser.add_argument("--end-page", type=str, default="0", help="End page or ID (e.g. 50 or a12345)")
+    parser.add_argument("--end-page",
+                        type=str, default="0", help="End page or ID (e.g. 50 or a12345)")
     parser.add_argument("--sleep", type=float, default=1.0, help="Delay between API pages")
     parser.add_argument("--threads", type=int, default=4, help="Download threads")
 
     # Output & History
     parser.add_argument("--output", default="downloads", help="Output directory")
-    parser.add_argument("--filename-fmt", default="{sitename}_{id}_{md5}.{ext}",
-                        help="Filename format (avail: {id}, {md5}, {sitename}, {ext})")
-    parser.add_argument("--gdl-db", help="Path to existing gallery-dl archive.db for dedup")
-    parser.add_argument("--global-dedup", action="store_true", help="Skip download if post exists in ANY folder")
-    parser.add_argument("--abort", type=int, default=10, help="Abort after N consecutive skips (default: 10)")
-    parser.add_argument("--sidecar", action="store_true", default=True, help="Save tags to .txt")
-    parser.add_argument("--no-sidecar", dest="sidecar", action="store_false", help="Disable sidecars")
+    parser.add_argument(
+        "--filename-fmt",
+        default="{sitename}_{id}_{md5}.{ext}",
+        help="Filename format (avail: {id}, {md5}, {sitename}, {ext})"
+    )
+    parser.add_argument(
+        "--gdl-db",
+        help="Path to existing gallery-dl archive.db for dedup"
+    )
+    parser.add_argument("--global-dedup",
+                        action="store_true", help="Skip download if post exists in ANY folder")
+    parser.add_argument("--abort",
+                        type=int, default=10, help="Abort after N consecutive skips (default: 10)")
+    parser.add_argument(
+        "--sidecar", action="store_true", default=True, help="Save tags to .txt"
+    )
+    parser.add_argument(
+        "--no-sidecar", dest="sidecar", action="store_false", help="Disable sidecars"
+    )
 
     # Auth
     parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
