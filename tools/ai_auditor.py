@@ -53,16 +53,24 @@ def _init_databases():
     return q_conn, s_conn, r_conn
 
 def _get_safe_images(pg_cur, all_ratings=False):
-    """Fetches images instantly. Duplicate tag handling is deferred to Postgres."""
-    query = "SELECT id, hash, rating FROM images"
+    """Optimized fetch using a single JOIN, completely eliminating N+1 query stalls."""
+    query = """
+        SELECT i.id, i.hash, i.rating, t.tag
+        FROM images i
+        LEFT JOIN image_tags it ON i.id = it.image_id
+        LEFT JOIN tags t ON it.tag_id = t.id
+    """
     if not all_ratings:
-        query += " WHERE rating = 's'"
+        query += " WHERE i.rating = 's'"
 
     pg_cur.execute(query)
 
     safe_images = {}
-    for img_id, img_hash, rating in pg_cur.fetchall():
-        safe_images[img_hash] = {"id": img_id, "rating": rating}
+    for img_id, img_hash, rating, tag in pg_cur.fetchall():
+        if img_hash not in safe_images:
+            safe_images[img_hash] = {"id": img_id, "rating": rating, "tags": set()}
+        if tag:
+            safe_images[img_hash]["tags"].add(tag)
 
     return safe_images
 
@@ -104,9 +112,9 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
         print(f"Staging read-only symlinks to {staging_dir}...")
         for img_hash in tqdm.tqdm(safe_images, desc="Staging Symlinks"):
             real_thumb = _resolve_shimmie_thumb_path(thumbs_base_dir, img_hash).resolve() # Force absolute
-        if real_thumb.exists():
-            os.symlink(str(real_thumb), str(staging_dir / f"{img_hash}.jpg"))
-            staged_count += 1
+            if real_thumb.exists():
+                os.symlink(str(real_thumb), str(staging_dir / f"{img_hash}.jpg"))
+                staged_count += 1
 
         if staged_count == 0:
             print("[ERROR] No thumbnails found matching the database records.")
