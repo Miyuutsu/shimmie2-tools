@@ -18,16 +18,19 @@ QUARANTINE_DB = Path(__file__).parent.parent / "database" / "ai_quarantine_cache
 REVERT_DB = Path(__file__).parent.parent / "database" / "ai_revert_log.db"
 
 def _init_databases():
-    """Initializes both the permanent quarantine and the temporary staging DBs."""
+    """Initializes the quarantine, staging, and revert databases with full schema and indexes."""
     STAGING_DB.parent.mkdir(parents=True, exist_ok=True)
 
+    # Quarantine: Stores AI tags with confidence scores
     q_conn = sqlite3.connect(QUARANTINE_DB)
     q_conn.execute("""
         CREATE TABLE IF NOT EXISTS ai_tags (
             image_hash TEXT, tag TEXT, confidence REAL, UNIQUE(image_hash, tag)
         )
     """)
+    q_conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_tags_hash ON ai_tags(image_hash)")
 
+    # Staging: Proposals awaiting application
     s_conn = sqlite3.connect(STAGING_DB)
     s_conn.execute("""
         CREATE TABLE IF NOT EXISTS pending_upgrades (
@@ -39,7 +42,9 @@ def _init_databases():
             image_id INTEGER, tag TEXT, UNIQUE(image_id, tag)
         )
     """)
+    s_conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_tags_id ON pending_tags(image_id)")
 
+    # Revert Ledger: Records for rollback
     r_conn = sqlite3.connect(REVERT_DB)
     r_conn.execute("CREATE TABLE IF NOT EXISTS runs (batch_id TEXT PRIMARY KEY, ts DATETIME DEFAULT CURRENT_TIMESTAMP)")
     r_conn.execute("CREATE TABLE IF NOT EXISTS rating_reverts (batch_id TEXT, image_id INTEGER, old_rating TEXT)")
@@ -47,19 +52,19 @@ def _init_databases():
 
     return q_conn, s_conn, r_conn
 
-def _get_safe_images(pg_cur):
-    """Fetches all 'Safe' images and their existing tags."""
-    pg_cur.execute("SELECT id, hash FROM images WHERE rating = 's'")
-    safe_images = pg_cur.fetchall()
+def _get_safe_images(pg_cur, all_ratings=False):
+    """Fetches images instantly. Duplicate tag handling is deferred to Postgres."""
+    query = "SELECT id, hash, rating FROM images"
+    if not all_ratings:
+        query += " WHERE rating = 's'"
 
-    image_data = {}
-    for img_id, img_hash in safe_images:
-        pg_cur.execute("""
-            SELECT t.tag FROM tags t JOIN image_tags it ON t.id = it.tag_id WHERE it.image_id = %s
-        """, (img_id,))
-        current_tags = {row[0] for row in pg_cur.fetchall()}
-        image_data[img_hash] = {"id": img_id, "tags": current_tags}
-    return image_data
+    pg_cur.execute(query)
+
+    safe_images = {}
+    for img_id, img_hash, rating in pg_cur.fetchall():
+        safe_images[img_hash] = {"id": img_id, "rating": rating}
+
+    return safe_images
 
 def _resolve_shimmie_thumb_path(base_dir: Path, md5_hash: str) -> Path:
     return base_dir / md5_hash[0:2] / md5_hash[2:4] / md5_hash
@@ -83,9 +88,9 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
     """Executes the AI model and saves proposals to the staging DB."""
     venv_python = _ensure_submodule_installed()
 
-    print("Fetching 'Safe' images from Shimmie...")
-    safe_images = _get_safe_images(pg_cur)
-    print(f"Found {len(safe_images)} safe images to audit.")
+    print(f"Fetching {'all' if args.all else 'Safe'} images from Shimmie...")
+    safe_images = _get_safe_images(pg_cur, all_ratings=args.all)
+    print(f"Found {len(safe_images)} images to audit.")
 
     thumbs_base_dir = Path(args.thumbs) if args.thumbs else Path(args.spath) / "data" / "thumbs"
     if not thumbs_base_dir.exists():
@@ -98,23 +103,23 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
 
         print(f"Staging read-only symlinks to {staging_dir}...")
         for img_hash in tqdm.tqdm(safe_images, desc="Staging Symlinks"):
-            real_thumb = _resolve_shimmie_thumb_path(thumbs_base_dir, img_hash)
-            if real_thumb.exists():
-                os.symlink(real_thumb, staging_dir / f"{img_hash}.jpg")
-                staged_count += 1
+            real_thumb = _resolve_shimmie_thumb_path(thumbs_base_dir, img_hash).resolve() # Force absolute
+        if real_thumb.exists():
+            os.symlink(str(real_thumb), str(staging_dir / f"{img_hash}.jpg"))
+            staged_count += 1
 
         if staged_count == 0:
-            print("[ERROR] No thumbnails found matching the safe images.")
+            print("[ERROR] No thumbnails found matching the database records.")
             return
 
-        # Use run_json.py so we get the rating dictionary!
         tagger_script = SUBMODULE_PATH / "run_json.py"
         cmd = [
-            str(venv_python), str(tagger_script),
-            "--dir", str(staging_dir),
-            "--model", args.model,
-            "--gen_threshold", str(args.gen_threshold),
-            "--char_threshold", str(args.char_threshold)
+            str(venv_python), "-u", str(tagger_script),
+            f"--model={args.model}",
+            f"--batch_size={args.batch}",
+            f"--gen_threshold={args.gen_threshold}",
+            f"--char_threshold={args.char_threshold}",
+            str(staging_dir)
         ]
 
         print(f"[INFO] Launching Inference (Model: {args.model})...")
@@ -134,41 +139,47 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
                 continue
 
             data = safe_images[img_hash]
+            current_rating = data['rating']
 
             with open(json_file, 'r', encoding='utf-8') as f:
                 output = json.load(f)
 
             ratings = output.get("rating", {})
-            ai_tags = output.get("general", []) + output.get("character", [])
+            char_tags = output.get("character", {})
+            gen_tags = output.get("general", {})
+            all_tags = {**char_tags, **gen_tags}
 
             # --- RATING LOGIC ---
-            new_rating = 's'
+            # Ratings are computed and staged, but will be ignored if --tags-only is passed to apply
+            new_rating = current_rating
             if ratings.get("explicit", 0) > args.gen_threshold:
                 new_rating = 'e'
             elif ratings.get("questionable", 0) > args.gen_threshold or ratings.get("sensitive", 0) > args.gen_threshold:
                 new_rating = 'q'
 
-            if new_rating != 's':
+            if new_rating != current_rating:
                 s_cur.execute(
                     "INSERT OR REPLACE INTO pending_upgrades (image_id, image_hash, current_rating, new_rating) VALUES (?, ?, ?, ?)",
-                    (data['id'], img_hash, 's', new_rating)
+                    (data['id'], img_hash, current_rating, new_rating)
                 )
                 queued_upgrades += 1
 
-            # --- TAG LOGIC ---
-            for tag in ai_tags:
+            # --- CONSOLIDATED TAG LOGIC ---
+            for tag, confidence in all_tags.items():
                 tag = tag.replace(" ", "_").lower()
-                if tag in data['tags']:
-                    continue
 
-                q_cur.execute("INSERT OR IGNORE INTO ai_tags (image_hash, tag, confidence) VALUES (?, ?, ?)", (img_hash, tag, 1.0))
-                s_cur.execute("INSERT OR IGNORE INTO pending_tags (image_id, tag) VALUES (?, ?)", (data['id'], tag))
+                # 1. Log every AI thought to quarantine for future analysis
+                q_cur.execute("INSERT OR IGNORE INTO ai_tags (image_hash, tag, confidence) VALUES (?, ?, ?)",
+                              (img_hash, tag, confidence))
+
+                # 2. Stage new tags for Shimmie application (Postgres handles duplicates later)
+                s_cur.execute("INSERT OR IGNORE INTO pending_tags (image_id, tag) VALUES (?, ?)",
+                              (data['id'], tag))
                 queued_tags += 1
 
     print(f"\n[✓] Scan Complete. Staged in {STAGING_DB.name}:")
     print(f"    - Proposed Rating Upgrades: {queued_upgrades}")
     print(f"    - Proposed Shadow Tags: {queued_tags}")
-    print("Run `audit-ratings --action apply` to commit these changes to Shimmie.")
 
 def _run_review(s_cur):
     """Prints a high-level summary of the staging database."""
@@ -191,10 +202,12 @@ def _run_review(s_cur):
         print(f"  tagai:{tag} (Added to {count} images)")
 
     s_cur.execute("SELECT COUNT(DISTINCT image_id) FROM pending_tags")
-    total_tagged = s_cur.fetchone()[0]
+    row = s_cur.fetchone()
+    total_tagged = row[0] if row else 0
     print(f"\n  Total Images receiving new tags: {total_tagged}")
 
-def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur):
+
+def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=False):
     """Reads the staging DB, logs the state for reverting, and pushes to Postgres."""
     print(f"\nReading staging database ({STAGING_DB.name})...")
 
@@ -202,14 +215,16 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur):
     r_cur.execute("INSERT INTO runs (batch_id) VALUES (?)", (batch_id,))
 
     # 1. Apply Ratings & Log
-    s_cur.execute("SELECT image_id, current_rating, new_rating FROM pending_upgrades")
-    upgrades = s_cur.fetchall()
+    upgrades = []
+    if not tags_only:
+        s_cur.execute("SELECT image_id, current_rating, new_rating FROM pending_upgrades")
+        upgrades = s_cur.fetchall()
 
-    for img_id, old_rating, new_rating in upgrades:
-        r_cur.execute("INSERT INTO rating_reverts (batch_id, image_id, old_rating) VALUES (?, ?, ?)", (batch_id, img_id, old_rating))
-        pg_cur.execute("UPDATE images SET rating = %s WHERE id = %s", (new_rating, img_id))
+        for img_id, old_rating, new_rating in upgrades:
+            r_cur.execute("INSERT INTO rating_reverts (batch_id, image_id, old_rating) VALUES (?, ?, ?)", (batch_id, img_id, old_rating))
+            pg_cur.execute("UPDATE images SET rating = %s WHERE id = %s", (new_rating, img_id))
 
-    # 2. Apply Tags & Log
+    # 2. Apply Tags & Log (Inside _run_apply)
     s_cur.execute("SELECT image_id, tag FROM pending_tags")
     tags = s_cur.fetchall()
 
@@ -217,9 +232,16 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur):
         prefixed_tag = f"tagai:{raw_tag}"
         tag_id = _ensure_tag_exists(pg_cur, prefixed_tag)
 
-        # Log it so we know to sever this link if we revert
         r_cur.execute("INSERT INTO tag_reverts (batch_id, image_id, tag_id) VALUES (?, ?, ?)", (batch_id, img_id, tag_id))
-        pg_cur.execute("INSERT INTO image_tags (image_id, tag_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (img_id, tag_id))
+
+        # Insert tag link and return 1 if successful (meaning it wasn't a duplicate)
+        pg_cur.execute("""
+            INSERT INTO image_tags (image_id, tag_id) VALUES (%s, %s)
+            ON CONFLICT DO NOTHING RETURNING 1
+        """, (img_id, tag_id))
+
+        if pg_cur.fetchone(): # If successfully inserted, update the tag count
+            pg_cur.execute("UPDATE tags SET count = count + 1 WHERE id = %s", (tag_id,))
 
     pg_conn.commit()
     r_conn.commit()
@@ -230,9 +252,13 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur):
     s_conn.commit()
 
     print(f"\n[✓] Apply Complete (Batch ID: {batch_id}).")
-    print(f"    - Pushed {len(upgrades)} rating upgrades to Shimmie.")
+    if not tags_only:
+        print(f"    - Pushed {len(upgrades)} rating upgrades to Shimmie.")
+    else:
+        print("    - Rating upgrades skipped (--tags-only passed).")
     print(f"    - Pushed {len(tags)} shadow tags to Shimmie.")
     print("    - Changes safely logged to Revert Ledger.")
+
 
 def _run_revert(pg_conn, pg_cur, r_conn, r_cur):
     """Finds the most recently applied batch and rolls it back."""
@@ -255,9 +281,11 @@ def _run_revert(pg_conn, pg_cur, r_conn, r_cur):
     r_cur.execute("SELECT image_id, tag_id FROM tag_reverts WHERE batch_id = ?", (batch_id,))
     tag_rows = r_cur.fetchall()
     for img_id, tag_id in tag_rows:
-        pg_cur.execute("DELETE FROM image_tags WHERE image_id = %s AND tag_id = %s", (img_id, tag_id))
+        pg_cur.execute("DELETE FROM image_tags WHERE image_id = %s AND tag_id = %s RETURNING 1", (img_id, tag_id))
+        if pg_cur.fetchone():
+            pg_cur.execute("UPDATE tags SET count = GREATEST(count - 1, 0) WHERE id = %s", (tag_id,))
 
-    # 3. Clean up Orphaned AI Tags (Tags that now have 0 images assigned to them)
+    # 3. Clean up Orphaned AI Tags
     pg_cur.execute("""
         DELETE FROM tags
         WHERE tag LIKE 'tagai:%'
@@ -299,7 +327,7 @@ def run_auditor(args):
         if args.review:
             _run_review(s_cur)
         if args.apply:
-            _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur)
+            _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=args.tags_only)
         if args.revert:
             _run_revert(pg_conn, pg_cur, r_conn, r_cur)
     finally:

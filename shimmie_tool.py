@@ -15,12 +15,15 @@ def _add_audit_ratings_parser(subparsers):
     parser.add_argument("--review", action="store_true", help="Print a summary of the staged changes")
     parser.add_argument("--apply", action="store_true", help="Push staged tags/ratings to Shimmie")
     parser.add_argument("--revert", action="store_true", help="Undo the last applied batch of AI changes")
+    parser.add_argument("--all", action="store_true", help="Scan ALL images, regardless of current rating.")
+    parser.add_argument("--tags-only", action="store_true", help="When applying, only push shadow tags and ignore rating upgrades.")
 
     parser.add_argument("--spath", required=True, help="Path to Shimmie root")
     parser.add_argument("--thumbs", help="Path to thumbnails (Defaults to spath/data/thumbs)")
 
     # Model and Thresholds
     parser.add_argument("--model", choices=["vit", "vit-large", "swinv2", "convnext", "eva02"], default="eva02", help="SmilingWolf model to use")
+    parser.add_argument("--batch", type=int, default=20, help="Batch size for the AI inference")
     parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag confidence threshold")
     parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag confidence threshold")
 
