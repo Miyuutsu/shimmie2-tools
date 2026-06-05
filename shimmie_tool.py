@@ -71,6 +71,13 @@ def _add_import_wikis_parser(subparsers):
         help="Comma-separated endpoints (e.g. wiki_pages.json,pools.json)"
     )
 
+def _add_sync_wikis_parser(subparsers):
+    """Adds the sync-wikis command."""
+    parser = subparsers.add_parser("sync-wikis", help="Sync offline SQLite wiki cache to Shimmie2")
+    parser.add_argument("--spath", required=True, help="Path to shimmie root")
+    parser.add_argument("--update-existing", action="store_true",
+                        help="Overwrite existing pages in Shimmie")
+
 def _add_csv2sqlite_parser(subparsers):
     """Adds the csv2sqlite command."""
     parser = subparsers.add_parser("csv2sqlite", help="Convert CSV to SQLite")
@@ -233,6 +240,7 @@ def main():
     dispatch = {
         "wiki-index": wiki.create_index,
         "import-wikis": wiki.import_danbooru,
+        "sync-wikis": wiki.sync_to_shimmie,
         "csv2sqlite": db.csv_to_sqlite,
         "precache": db.precache_posts,
         "update-ratings": db.update_ratings,

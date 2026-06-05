@@ -6,8 +6,12 @@ import sqlite3
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote, urljoin
+from datetime import datetime
 
+import psycopg2
 import requests
+
+from functions.db_cache import get_shimmie_db_credentials
 
 # Optional import to allow modularity without crashing if file is missing
 try:
@@ -717,6 +721,109 @@ def _fetch_and_cache(args, endpoint):
             _process_wiki_entry(cur, entry, endpoint, args.update_cache)
     conn.commit()
     return conn
+
+def _apply_custom_html_wrapper(raw_body):
+    """Translates raw Danbooru/BBCode into your custom Shimmie HTML layout."""
+    # Convert basic formatting
+    html_body = raw_body.replace('\n\n', '</p>\n<p>').replace('\n', '<br>')
+    html_body = re.sub(r'\[b\](.*?)\[/b\]', r'<strong>\1</strong>', html_body)
+    html_body = re.sub(r'\[i\](.*?)\[/i\]', r'<em>\1</em>', html_body)
+    html_body = re.sub(r'\[h4\](.*?)\[/h4\]', r'<h4>\1</h4>', html_body)
+
+    # Convert [[Target|Label]] and [[Target]] to your wiki-tag-link class
+    def link_repl(match):
+        content = match.group(1)
+        if '|' in content:
+            target, label = content.split('|', 1)
+            return f'<a href="{target.replace(" ", "_")}" class="wiki-tag-link">{label}</a>'
+        return f'<a href="{content.replace(" ", "_")}" class="wiki-tag-link">{content}</a>'
+
+    html_body = re.sub(r'\[\[(.*?)\]\]', link_repl, html_body)
+
+    # Wrap in your custom semantic container
+    return f"""[html]
+        <div class="wiki-container">
+        <div class="wiki-content">
+        <p>{html_body}</p>
+        </div>
+        </div>
+        [/html]"""
+
+def _insert_or_update_pg(pg_cur, title, raw_body, existing_titles, update_existing):
+    """Safely pushes the formatted HTML to Postgres."""
+    html_body = _apply_custom_html_wrapper(raw_body)
+
+    if title not in existing_titles:
+        pg_cur.execute("""
+            INSERT INTO wiki_pages (owner_id, owner_ip, date, title, revision, locked, body)
+            VALUES (1, '127.0.0.1', %s, %s, 1, false, %s)
+        """, (datetime.now(), title, html_body))
+        return "inserted"
+
+    if update_existing:
+        pg_cur.execute(
+            "SELECT revision, body FROM wiki_pages WHERE title = %s ORDER BY revision DESC LIMIT 1",
+            (title,)
+        )
+        current = pg_cur.fetchone()
+        if current:
+            current_rev, current_body = current
+            if '[[shimmie:lock]]' in current_body:
+                return "skipped_locked"
+            if html_body.strip() != current_body.strip():
+                pg_cur.execute("""
+                    INSERT INTO wiki_pages (owner_id, owner_ip, date, title, revision, locked, body)
+                    VALUES (1, '127.0.0.1', %s, %s, %s, false, %s)
+                """, (datetime.now(), title, current_rev + 1, html_body))
+                return "updated"
+    return "skipped"
+
+def sync_to_shimmie(args):
+    """Pulls from SQLite cache, formats to HTML, and pushes to Postgres."""
+    db_config = get_shimmie_db_credentials(args.spath)
+    if not db_config:
+        print(f"[ERROR] Could not load DB credentials from {args.spath}")
+        return
+
+    print("=== Wiki Sync Summary ===")
+    print(f"📚 Target DB: {db_config['dbname']}")
+
+    conn, cache_cur = _init_cache()
+
+    try:
+        pg_conn = psycopg2.connect(**db_config)
+        pg_conn.set_client_encoding('UTF8')
+        pg_cur = pg_conn.cursor()
+    except psycopg2.Error as err:
+        print(f"[ERROR] Postgres connection failed: {err}")
+        return
+
+    # Get existing titles to prevent blind overwriting
+    pg_cur.execute("SELECT title FROM wiki_pages")
+    existing_titles = {row[0] for row in pg_cur.fetchall()}
+
+    cache_cur.execute("SELECT title, body FROM wiki_cache WHERE imported = 0")
+    rows = cache_cur.fetchall()
+    print(f"📥 {len(rows)} wiki pages queued for HTML formatting and import.")
+
+    results = {"inserted": 0, "updated": 0, "skipped": 0, "skipped_locked": 0}
+
+    for title, body in rows:
+        result = _insert_or_update_pg(pg_cur, title, body, existing_titles, args.update_existing)
+        results[result] += 1
+
+        # Mark as imported in SQLite if we successfully pushed it
+        if result in ("inserted", "updated"):
+            cache_cur.execute("UPDATE wiki_cache SET imported = 1 WHERE title = ?", (title,))
+
+    pg_conn.commit()
+    conn.commit()
+    pg_conn.close()
+    conn.close()
+
+    print(f"\n✅ Inserted: {results['inserted']}")
+    print(f"🔁 Updated:  {results['updated']}")
+    print(f"⏭️ Skipped:  {results['skipped']} ({results['skipped_locked']} locked)")
 
 def import_danbooru(args):
     """Main CLI Entry Point."""
