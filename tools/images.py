@@ -1,6 +1,6 @@
 # pylint: disable=too-many-lines
 """
-The 'to big to manage again' edition.
+The 'too big to manage again' edition.
 Image Downloader with Threaded API, Subfolders, Checkpoints, WAL Support, and Error Logging.
 """
 import time
@@ -535,6 +535,9 @@ def _attempt_download(task, post, file_url, out_path):
     for attempt in range(max_retries):
         result = _perform_single_download(task, post, file_url, out_path)
 
+        if isinstance(result, Path):
+            return result
+
         if isinstance(result, str):
             return result
 
@@ -762,25 +765,28 @@ def _are_all_posts_downloaded(ctx: FetchContext, posts_batch: List[dict]) -> boo
 
 def _process_batch_results(ctx, batch_results, last_batch_min_id):
     """Processes a sorted batch of results, checking limits and accumulating data."""
-    all_posts = []
+    batch_posts = []
     batch_has_data = False
+    abort_fetch = False
 
     for p_num, data in batch_results:
         if data == "410_GONE":
             print(f"\n[Info] Page {p_num} hit limit. Switching modes...")
-            return all_posts, last_batch_min_id, True
+            return batch_posts, last_batch_min_id, True, False
 
         if not data:
             print(f"\n[Info] Page {p_num} is empty or failed. Stopping fetch.")
-            return all_posts, None, False
+            return batch_posts, None, False, True
 
         hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
 
         if filtered_data and _are_all_posts_downloaded(ctx, filtered_data):
-            print("\n[!] Batch contains all previously downloaded posts. Aborting API fetch early.")
-            return all_posts, None, True
+            print(
+                f"\n[!] Page {p_num} contains all previously downloaded posts. Aborting API fetch.")
+            batch_posts.extend(filtered_data)
+            return batch_posts, None, True, True
 
-        all_posts.extend(filtered_data)
+        batch_posts.extend(filtered_data)
         batch_has_data = True
 
         for p in filtered_data:
@@ -791,15 +797,15 @@ def _process_batch_results(ctx, batch_results, last_batch_min_id):
 
         if hit_limit:
             print(f"\n[✓] Reached End-ID limit ({ctx.end_id}). Stopping.")
-            return all_posts, None, True
+            return batch_posts, None, True, True
 
         last_batch_min_id = filtered_data[-1].get('id')
 
         if len(data) < ctx.args.limit:
             print(f"\n[Info] Page {p_num} has partial data. End of results.")
-            return all_posts, None, False
+            return batch_posts, None, batch_has_data, True
 
-    return all_posts, last_batch_min_id, batch_has_data
+    return batch_posts, last_batch_min_id, batch_has_data, abort_fetch
 
 def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict], Optional[str]]:
     """Handles the threaded page-based fetching loop."""
@@ -829,8 +835,13 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
                 key=lambda x: x[0]
             )
 
-            all_posts, last_batch_min_id, batch_has_data = \
+            batch_posts, last_batch_min_id, batch_has_data, abort_fetch = \
                 _process_batch_results(ctx, batch_results, last_batch_min_id)
+
+            all_posts.extend(batch_posts)
+
+            if abort_fetch:
+                break
 
             if not batch_has_data:
                 if last_batch_min_id:
@@ -991,7 +1002,10 @@ def _setup_network_and_parse_input(args):
             try:
                 cj = MozillaCookieJar(str(cookie_path))
                 cj.load(ignore_discard=True, ignore_expires=True)
-                session.cookies.update(cj)
+
+                for cookie in cj:
+                    session.cookies.set_cookie(cookie)
+
                 print(f"[INFO] Loaded custom cookies from {cookie_path}")
             except Exception as e: # pylint: disable=broad-exception-caught
                 print(f"[WARNING] Failed to load cookies: {e}")
@@ -1051,9 +1065,13 @@ def _detect_v1_api(session, base_url) -> Tuple[bool, Optional[Any]]:
     try:
         probe = session.get(f"{base_url}/api/v1/posts", params={"limit": 1}, timeout=5)
         if probe.status_code == 200:
-            print(f"[✓] Auto-Detected V1 API endpoint on {base_url}")
-            return True, V1PostsAPI(base_url, session=session)
-    except Exception: # pylint: disable=broad-exception-caught
+            data = probe.json()
+            if isinstance(data, dict) and "Posts" in data:
+                print(f"[✓] Auto-Detected V1 API endpoint on {base_url}")
+                return True, V1PostsAPI(base_url, session=session)
+
+    except (requests.RequestException, ValueError):
+        # ValueError handles cases where the response isn't valid JSON
         pass
     return False, None
 
@@ -1173,7 +1191,7 @@ def run(args):
     print(f"=== Image Downloader ({sitename}) ===")
     print(f"🌍 Base URL: {ctx.base_url}")
     print(f"📂 Output:   {root_output_path}")
-    print(f"🏷️  Tags:     {ctx.tags}")
+    print(f"🏷️ Tags:     {ctx.tags}")
 
     if start_id:
         print(f"📄 Start:    ID {start_id}")
