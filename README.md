@@ -126,7 +126,7 @@ This project is licensed under the **GNU General Public License v3.0**. You are 
 
 ## 💖 Credits
 
-* **[suspicious link removed]** — for their rich metadata and API
+* **[Danbooru](https://danbooru.donmai.us/)** — for their rich metadata and API
 * **[Shimmie2](https://github.com/shish/shimmie2)** — for the core imageboard framework
 * **[ChatGPT](https://chatgpt.com) & Gemini** — for keeping the code clean and the refactoring heavily caffeinated
 * **[Babyforce](https://github.com/Babyforce)** — for the original `tag_rating_dominant.db`
