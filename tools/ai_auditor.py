@@ -228,28 +228,38 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=False):
         s_cur.execute("SELECT image_id, current_rating, new_rating FROM pending_upgrades")
         upgrades = s_cur.fetchall()
 
-        for img_id, old_rating, new_rating in upgrades:
-            r_cur.execute("INSERT INTO rating_reverts (batch_id, image_id, old_rating) VALUES (?, ?, ?)", (batch_id, img_id, old_rating))
-            pg_cur.execute("UPDATE images SET rating = %s WHERE id = %s", (new_rating, img_id))
+        if upgrades:
+            for img_id, old_rating, new_rating in tqdm.tqdm(upgrades, desc="Upgrading Ratings"):
+                r_cur.execute("INSERT INTO rating_reverts (batch_id, image_id, old_rating) VALUES (?, ?, ?)", (batch_id, img_id, old_rating))
+                pg_cur.execute("UPDATE images SET rating = %s WHERE id = %s", (new_rating, img_id))
 
-    # 2. Apply Tags & Log (Inside _run_apply)
+    # 2. Apply Tags & Log
     s_cur.execute("SELECT image_id, tag FROM pending_tags")
     tags = s_cur.fetchall()
 
-    for img_id, raw_tag in tags:
-        prefixed_tag = f"tagai:{raw_tag}"
-        tag_id = _ensure_tag_exists(pg_cur, prefixed_tag)
+    # Memory cache to eliminate millions of duplicate Postgres SELECT queries
+    tag_id_cache = {}
 
-        r_cur.execute("INSERT INTO tag_reverts (batch_id, image_id, tag_id) VALUES (?, ?, ?)", (batch_id, img_id, tag_id))
+    if tags:
+        for img_id, raw_tag in tqdm.tqdm(tags, desc="Pushing Tags"):
+            prefixed_tag = f"tagai:{raw_tag}"
 
-        # Insert tag link and return 1 if successful (meaning it wasn't a duplicate)
-        pg_cur.execute("""
-            INSERT INTO image_tags (image_id, tag_id) VALUES (%s, %s)
-            ON CONFLICT DO NOTHING RETURNING 1
-        """, (img_id, tag_id))
+            # Use cache if we've seen this tag already, otherwise hit the database
+            if prefixed_tag in tag_id_cache:
+                tag_id = tag_id_cache[prefixed_tag]
+            else:
+                tag_id = _ensure_tag_exists(pg_cur, prefixed_tag)
+                tag_id_cache[prefixed_tag] = tag_id
 
-        if pg_cur.fetchone(): # If successfully inserted, update the tag count
-            pg_cur.execute("UPDATE tags SET count = count + 1 WHERE id = %s", (tag_id,))
+            r_cur.execute("INSERT INTO tag_reverts (batch_id, image_id, tag_id) VALUES (?, ?, ?)", (batch_id, img_id, tag_id))
+
+            pg_cur.execute("""
+                INSERT INTO image_tags (image_id, tag_id) VALUES (%s, %s)
+                ON CONFLICT DO NOTHING RETURNING 1
+            """, (img_id, tag_id))
+
+            if pg_cur.fetchone():
+                pg_cur.execute("UPDATE tags SET count = count + 1 WHERE id = %s", (tag_id,))
 
     pg_conn.commit()
     r_conn.commit()
@@ -260,12 +270,6 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=False):
     s_conn.commit()
 
     print(f"\n[✓] Apply Complete (Batch ID: {batch_id}).")
-    if not tags_only:
-        print(f"    - Pushed {len(upgrades)} rating upgrades to Shimmie.")
-    else:
-        print("    - Rating upgrades skipped (--tags-only passed).")
-    print(f"    - Pushed {len(tags)} shadow tags to Shimmie.")
-    print("    - Changes safely logged to Revert Ledger.")
 
 
 def _run_revert(pg_conn, pg_cur, r_conn, r_cur):
