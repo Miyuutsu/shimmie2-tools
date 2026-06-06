@@ -290,10 +290,17 @@ def purge_images(args):
         if args.dry_run:
             report_path = Path("purge_dry_run.txt")
             with open(report_path, "w", encoding="utf-8") as f:
-                f.write("=== IMAGES FLAGGED FOR DELETION ===\n")
+                # Write the complete breakdown of all affected tags
+                f.write("=== CASUALTY BREAKDOWN BY TAG ===\n")
+                for tag_name, count in breakdown:
+                    f.write(f"  - {tag_name}: {count} images\n")
+
+                # Write the specific image targets
+                f.write("\n=== IMAGES FLAGGED FOR DELETION ===\n")
                 for img_id, hsh, offending_tags in trash_images:
                     f.write(f"ID: {img_id} | Hash: {hsh} | Tags: {offending_tags}\n")
-            print(f"[ℹ️ DRY RUN] Safe abort. Wrote full list of {len(trash_images)} images to {report_path.resolve()}")
+
+            print(f"[ℹ️ DRY RUN] Safe abort. Wrote full breakdown and list of {len(trash_images)} images to {report_path.resolve()}")
             return
 
         confirm = input("Type 'YES' to delete files and database records: ")
@@ -305,7 +312,8 @@ def purge_images(args):
         img_ids_to_drop = []
 
         # 1. Delete physical files off the hard drive
-        for img_id, hsh, _ in trash_images:
+        print("\n[Step 1/3] Deleting physical files from disk...")
+        for img_id, hsh, _ in tqdm.tqdm(trash_images, desc="Files Purged", unit="file"):
             img_ids_to_drop.append(img_id)
 
             # Shimmie2 path logic: data/images/ab/cd/hash (NO EXTENSIONS)
@@ -320,16 +328,20 @@ def purge_images(args):
                 thumb_file.unlink()
 
         # 2. Delete from Postgres
-        print("Scrubbing Postgres database...")
+        print("\n[Step 2/3] Scrubbing Postgres database...")
+        print("  -> Dropping metadata links (image_tags)...")
         cur.execute("DELETE FROM image_tags WHERE image_id = ANY(%s)", (img_ids_to_drop,))
+        print("  -> Dropping core image records (images)...")
         cur.execute("DELETE FROM images WHERE id = ANY(%s)", (img_ids_to_drop,))
 
         # 3. Recalculate tag counts and drop orphaned tags (count = 0)
-        print("Fixing Shimmie tag UI counts...")
+        print("\n[Step 3/3] Fixing Shimmie tag UI counts...")
+        print("  -> Recalculating tag usage counts (this may take a moment)...")
         cur.execute("""
             UPDATE tags
             SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
         """)
+        print("  -> Pruning orphaned tags with 0 count...")
         cur.execute("DELETE FROM tags WHERE count = 0")
 
         conn.commit()
