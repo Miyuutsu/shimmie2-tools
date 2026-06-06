@@ -56,6 +56,7 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
     parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map")
     parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
+    parser.add_argument("--blacklist", help="Text file containing tags to drop (one per line)")
     return parser
 
 def _add_wiki_index_parser(subparsers):
@@ -120,6 +121,12 @@ def _add_update_ratings_parser(subparsers):
     parser.add_argument("--spath", required=True, help="Path to shimmie root")
     parser.add_argument("-q", "--qmax", type=int, default=250, help="Max questionable rating")
     parser.add_argument("-s", "--smax", type=int, default=50, help="Max safe rating")
+
+def _add_purge_parser(subparsers):
+    parser = subparsers.add_parser("purge", help="Permanently delete images based on blacklisted tags")
+    parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
+    parser.add_argument("--blacklist", required=True, help="Path to your blacklist text file")
+    parser.add_argument("--dry-run", action="store_true", help="Generate a report without deleting anything")
 
 def _add_download_parser(subparsers):
     """Adds the download command."""
@@ -222,6 +229,7 @@ def setup_parser():
     _add_csv2sqlite_parser(subparsers)
     _add_precache_parser(subparsers)
     _add_update_ratings_parser(subparsers)
+    _add_purge_parser(subparsers)
     _add_download_parser(subparsers)
     _add_audit_ratings_parser(subparsers)
 
@@ -268,6 +276,7 @@ def main():
         "update-ratings": db.update_ratings,
         "download": images.run,
         "audit-ratings": ai_auditor.run_auditor,
+        "purge": db.purge_images
     }
 
     if args.command == "make-csv":

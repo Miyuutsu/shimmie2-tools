@@ -255,6 +255,22 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
         image, res_data.post, mappings, args, dynamic_mappings
     )
 
+    if getattr(args, 'blacklist_tags', None):
+        drop_image = False
+        for t in tag_list:
+            if t in args.blacklist_tags:
+                drop_image = True
+                break
+            # Ignore prefixes (split on first colon) BUT shield 'tagai:' and 'booru:' tags
+            if not t.startswith(("tagai:", "booru:")) and ":" in t:
+                base_tag = t.split(":", 1)[1]
+                if base_tag in args.blacklist_tags:
+                    drop_image = True
+                    break
+
+        if drop_image:
+            return None, None  # Silently skip this image
+
     if args.update_cache:
         save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
 
@@ -375,6 +391,14 @@ def run(args):
         raise FileNotFoundError(f"Video path not found: {args.video_path}")
 
     print_summary(args)
+    args.blacklist_tags = set()
+    if getattr(args, 'blacklist', None) and Path(args.blacklist).is_file():
+        args.blacklist_tags = {
+            line.strip().lower()
+            for line in Path(args.blacklist).read_text(encoding='utf-8').splitlines()
+            if line.strip()
+        }
+        print(f"[INFO] Loaded {len(args.blacklist_tags)} blacklisted tags.")
     mappings = load_mappings()
     files, batches = collect_files(args.image_path, args.video_path, args.batch)
 

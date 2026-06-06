@@ -217,3 +217,120 @@ def update_ratings(args):
         print(" " * 60, end="\r")
         print(f"[✓] Updated {updated} image rating{'s' if updated != 1 else ''}.\n")
         pg_conn.commit()
+
+# ==========================================
+# Tool 4: Purge Blacklisted Images
+# ==========================================
+def purge_images(args):
+    """Purges images containing blacklisted tags from DB and disk."""
+    blacklist_path = Path(args.blacklist)
+    if not blacklist_path.is_file():
+        print(f"[ERROR] Blacklist not found: {args.blacklist}")
+        return
+
+    # Load tags to delete
+    bad_tags = [
+        line.strip().lower()
+        for line in blacklist_path.read_text().splitlines()
+        if line.strip()
+    ]
+    print(f"[INFO] Hunting for {len(bad_tags)} blacklisted tags...")
+
+    db_config = get_shimmie_db_credentials(args.spath)
+    shimmie_root = Path(args.spath)
+
+    with psycopg2.connect(**db_config) as conn:
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT t.tag, COUNT(DISTINCT i.id)
+            FROM images i
+            JOIN image_tags it ON i.id = it.image_id
+            JOIN tags t ON it.tag_id = t.id
+            WHERE t.tag = ANY(%s)
+               OR (
+                   t.tag NOT LIKE 'tagai:%%'
+                   AND t.tag NOT LIKE 'booru:%%'
+                   AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
+               )
+            GROUP BY t.tag
+            ORDER BY count DESC
+        """, (bad_tags, bad_tags))
+        breakdown = cur.fetchall()
+
+        # Find all images that have ANY of the bad tags
+        cur.execute("""
+            SELECT i.id, i.hash, string_agg(t.tag, ', ') as offending_tags
+            FROM images i
+            JOIN image_tags it ON i.id = it.image_id
+            JOIN tags t ON it.tag_id = t.id
+            WHERE t.tag = ANY(%s)
+               OR (
+                   t.tag NOT LIKE 'tagai:%%'
+                   AND t.tag NOT LIKE 'booru:%%'
+                   AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
+               )
+            GROUP BY i.id, i.hash
+        """, (bad_tags, bad_tags))
+
+        trash_images = cur.fetchall()
+        if not trash_images:
+            print("[✓] Database is clean. No images found matching the blacklist.")
+            return
+
+        print(f"\n[⚠️ WARNING] Found {len(trash_images)} unique images to permanently delete.")
+        print("\n=== CASUALTY BREAKDOWN BY TAG ===")
+        for tag_name, count in breakdown[:20]:
+            print(f"  - {tag_name}: {count} images")
+        if len(breakdown) > 20:
+            print(f"  ... and {len(breakdown) - 20} more tags.")
+        print("=================================\n")
+
+        # --- Dry Run Handler ---
+        if args.dry_run:
+            report_path = Path("purge_dry_run.txt")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write("=== IMAGES FLAGGED FOR DELETION ===\n")
+                for img_id, hsh, offending_tags in trash_images:
+                    f.write(f"ID: {img_id} | Hash: {hsh} | Tags: {offending_tags}\n")
+            print(f"[ℹ️ DRY RUN] Safe abort. Wrote full list of {len(trash_images)} images to {report_path.resolve()}")
+            return
+
+        confirm = input("Type 'YES' to delete files and database records: ")
+        if confirm != "YES":
+            print("Aborting.")
+            return
+
+        deleted_files = 0
+        img_ids_to_drop = []
+
+        # 1. Delete physical files off the hard drive
+        for img_id, hsh, _ in trash_images:
+            img_ids_to_drop.append(img_id)
+
+            # Shimmie2 path logic: data/images/ab/cd/hash (NO EXTENSIONS)
+            prefix1, prefix2 = hsh[0:2], hsh[2:4]
+            img_file = shimmie_root / "data" / "images" / prefix1 / prefix2 / hsh
+            thumb_file = shimmie_root / "data" / "thumbs" / prefix1 / prefix2 / hsh
+
+            if img_file.exists():
+                img_file.unlink()
+                deleted_files += 1
+            if thumb_file.exists():
+                thumb_file.unlink()
+
+        # 2. Delete from Postgres
+        print("Scrubbing Postgres database...")
+        cur.execute("DELETE FROM image_tags WHERE image_id = ANY(%s)", (img_ids_to_drop,))
+        cur.execute("DELETE FROM images WHERE id = ANY(%s)", (img_ids_to_drop,))
+
+        # 3. Recalculate tag counts and drop orphaned tags (count = 0)
+        print("Fixing Shimmie tag UI counts...")
+        cur.execute("""
+            UPDATE tags
+            SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
+        """)
+        cur.execute("DELETE FROM tags WHERE count = 0")
+
+        conn.commit()
+        print(f"\n[✓] Purge Complete: Destroyed {deleted_files} files and {len(img_ids_to_drop)} database entries.")
