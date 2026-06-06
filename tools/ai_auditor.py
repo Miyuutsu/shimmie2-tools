@@ -1,3 +1,4 @@
+# pylint: disable=line-too-long disable=too-many-locals disable=too-many-branches disable=too-many-statements disable=too-many-arguments disable=too-many-positional-arguments
 """Bridge script for integrating the SD-Tag-Editor submodule safely via JSON."""
 import os
 import json
@@ -8,9 +9,11 @@ from datetime import datetime
 from pathlib import Path
 
 import psycopg2
+import psycopg2.extras
 import tqdm
 
 from functions.db_cache import get_shimmie_db_credentials
+from functions.tags_curation import rating_from_score
 
 SUBMODULE_PATH = Path(__file__).parent.parent / "SD-Tag-Editor"
 STAGING_DB = Path(__file__).parent.parent / "database" / "ai_audit_staging.db"
@@ -138,6 +141,21 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
             return
 
         print("[INFO] Processing JSON sidecars into Staging DB...")
+
+        # --- 1. LOAD YOUR DOMINANT RATING DB ---
+        tag_rating_map = {}
+        tag_db_path = STAGING_DB.parent / "tag_rating_dominant.db"
+        if tag_db_path.exists():
+            with sqlite3.connect(tag_db_path) as conn:
+                tag_rating_map.update({
+                    t.strip(): int(r) for t, r in conn.execute(
+                        "SELECT tag_name, dominant_rating FROM dominant_tag_ratings"
+                    )
+                })
+            print(f"[INFO] Loaded {len(tag_rating_map)} dominant rating rules from SQLite.")
+        else:
+            print("[WARNING] tag_rating_dominant.db not found. Falling back to AI ratings.")
+
         queued_upgrades = 0
         queued_tags = 0
 
@@ -157,13 +175,43 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
             gen_tags = output.get("general", {})
             all_tags = {**char_tags, **gen_tags}
 
-            # --- RATING LOGIC ---
-            # Ratings are computed and staged, but will be ignored if --tags-only is passed to apply
+            # --- 2. DETERMINISTIC RATING LOGIC (Mirroring db.py) ---
             new_rating = current_rating
-            if ratings.get("explicit", 0) > args.gen_threshold:
-                new_rating = 'e'
-            elif ratings.get("questionable", 0) > args.gen_threshold or ratings.get("sensitive", 0) > args.gen_threshold:
-                new_rating = 'q'
+
+            if tag_rating_map:
+                # Combine existing Postgres tags and the new AI tags for a total mathematical score
+                combined_tags = set(data.get('tags', [])) | set(all_tags.keys())
+                total_score = 0
+
+                for tag in combined_tags:
+                    clean_tag = tag.replace(" ", "_").lower()
+                    # Strip tagai: prefix if it exists so it matches your DB rules
+                    clean_tag = clean_tag[6:] if clean_tag.startswith("tagai:") else clean_tag
+
+                    weight = tag_rating_map.get(clean_tag)
+                    if weight is None:
+                        continue
+                    if weight == 1 and total_score == 0:
+                        total_score = 1
+                    elif weight > 1:
+                        total_score += weight
+
+                if total_score > 0:
+                    # ai_auditor doesn't take smax/qmax args, so fallback to your CLI defaults
+                    smax = getattr(args, 'smax', 50)
+                    qmax = getattr(args, 'qmax', 250)
+                    calc_rating = rating_from_score(total_score, smax, qmax)
+
+                    # Ensure we only upgrade hierarchically (Never downgrade)
+                    hierarchy = {'s': 0, 'q': 1, 'e': 2}
+                    if hierarchy.get(calc_rating, 0) > hierarchy.get(current_rating, 0):
+                        new_rating = calc_rating
+            else:
+                # Fallback to AI Logic if the DB is missing
+                if ratings.get("explicit", 0) > args.gen_threshold:
+                    new_rating = 'e'
+                elif ratings.get("questionable", 0) > args.gen_threshold or ratings.get("sensitive", 0) > args.gen_threshold:
+                    new_rating = 'q'
 
             if new_rating != current_rating:
                 s_cur.execute(
@@ -180,7 +228,7 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
                 q_cur.execute("INSERT OR IGNORE INTO ai_tags (image_hash, tag, confidence) VALUES (?, ?, ?)",
                               (img_hash, tag, confidence))
 
-                # 2. Stage new tags for Shimmie application (Postgres handles duplicates later)
+                # 2. Stage new tags for Shimmie application
                 s_cur.execute("INSERT OR IGNORE INTO pending_tags (image_id, tag) VALUES (?, ?)",
                               (data['id'], tag))
                 queued_tags += 1
@@ -229,6 +277,7 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=False):
         upgrades = s_cur.fetchall()
 
         if upgrades:
+            # We can leave ratings as a loop since there are usually very few of them (86k takes seconds)
             for img_id, old_rating, new_rating in tqdm.tqdm(upgrades, desc="Upgrading Ratings"):
                 r_cur.execute("INSERT INTO rating_reverts (batch_id, image_id, old_rating) VALUES (?, ?, ?)", (batch_id, img_id, old_rating))
                 pg_cur.execute("UPDATE images SET rating = %s WHERE id = %s", (new_rating, img_id))
@@ -237,29 +286,52 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=False):
     s_cur.execute("SELECT image_id, tag FROM pending_tags")
     tags = s_cur.fetchall()
 
-    # Memory cache to eliminate millions of duplicate Postgres SELECT queries
-    tag_id_cache = {}
-
     if tags:
-        for img_id, raw_tag in tqdm.tqdm(tags, desc="Pushing Tags"):
+        tag_id_cache = {}
+        pg_insert_records = set() # A Set automatically destroys exact duplicates!
+        sqlite_revert_records = []
+
+        # Phase A: Resolve the IDs entirely in Python
+        for img_id, raw_tag in tqdm.tqdm(tags, desc="Resolving Tag IDs"):
             prefixed_tag = f"tagai:{raw_tag}"
 
-            # Use cache if we've seen this tag already, otherwise hit the database
+            # The cache prevents us from querying the DB 3 million times for the same tags
             if prefixed_tag in tag_id_cache:
                 tag_id = tag_id_cache[prefixed_tag]
             else:
                 tag_id = _ensure_tag_exists(pg_cur, prefixed_tag)
                 tag_id_cache[prefixed_tag] = tag_id
 
-            r_cur.execute("INSERT INTO tag_reverts (batch_id, image_id, tag_id) VALUES (?, ?, ?)", (batch_id, img_id, tag_id))
+            pg_insert_records.add((img_id, tag_id))
+            sqlite_revert_records.append((batch_id, img_id, tag_id))
 
-            pg_cur.execute("""
-                INSERT INTO image_tags (image_id, tag_id) VALUES (%s, %s)
-                ON CONFLICT DO NOTHING RETURNING 1
-            """, (img_id, tag_id))
+        print("\nPushing tags to SQLite Ledger...")
+        # Phase B: Bulk Insert into SQLite Ledger
+        r_cur.executemany(
+            "INSERT INTO tag_reverts (batch_id, image_id, tag_id) VALUES (?, ?, ?)",
+            sqlite_revert_records
+        )
 
-            if pg_cur.fetchone():
-                pg_cur.execute("UPDATE tags SET count = count + 1 WHERE id = %s", (tag_id,))
+        print(f"Pushing {len(pg_insert_records)} tags to Postgres...")
+        # Phase C: Bulk Insert into Shimmie (This executes thousands of rows at a time)
+        psycopg2.extras.execute_values(
+            pg_cur,
+            "INSERT INTO image_tags (image_id, tag_id) VALUES %s ON CONFLICT DO NOTHING",
+            list(pg_insert_records),
+            page_size=10000
+        )
+
+        print("Recalculating global tag counts...")
+        # Phase D: Fix the Shimmie counts in one massive, perfectly accurate query
+        pg_cur.execute("""
+            UPDATE tags
+            SET count = (
+                SELECT COUNT(image_id)
+                FROM image_tags
+                WHERE tag_id = tags.id
+            )
+            WHERE tag LIKE 'tagai:%'
+        """)
 
     pg_conn.commit()
     r_conn.commit()
@@ -273,7 +345,7 @@ def _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=False):
 
 
 def _run_revert(pg_conn, pg_cur, r_conn, r_cur):
-    """Finds the most recently applied batch and rolls it back."""
+    """Finds the most recently applied batch and rolls it back using bulk operations."""
     r_cur.execute("SELECT batch_id, ts FROM runs ORDER BY ts DESC LIMIT 1")
     row = r_cur.fetchone()
     if not row:
@@ -283,21 +355,47 @@ def _run_revert(pg_conn, pg_cur, r_conn, r_cur):
     batch_id, ts = row
     print(f"\n[⚠️ REVERTING] Rolling back Batch {batch_id} (Applied at {ts})...")
 
-    # 1. Revert Ratings
+    # 1. Revert Ratings (Bulk)
     r_cur.execute("SELECT image_id, old_rating FROM rating_reverts WHERE batch_id = ?", (batch_id,))
     rating_rows = r_cur.fetchall()
-    for img_id, old_rating in rating_rows:
-        pg_cur.execute("UPDATE images SET rating = %s WHERE id = %s", (old_rating, img_id))
+    if rating_rows:
+        print(f"Reverting {len(rating_rows)} ratings...")
+        pg_cur.execute("CREATE TEMP TABLE tmp_ratings (img_id INT, old_rating VARCHAR) ON COMMIT DROP")
+        psycopg2.extras.execute_values(pg_cur, "INSERT INTO tmp_ratings VALUES %s", rating_rows, page_size=10000)
+        pg_cur.execute("""
+            UPDATE images
+            SET rating = tmp_ratings.old_rating
+            FROM tmp_ratings
+            WHERE images.id = tmp_ratings.img_id
+        """)
 
-    # 2. Revert Tags
+    # 2. Revert Tags (Bulk)
     r_cur.execute("SELECT image_id, tag_id FROM tag_reverts WHERE batch_id = ?", (batch_id,))
     tag_rows = r_cur.fetchall()
-    for img_id, tag_id in tag_rows:
-        pg_cur.execute("DELETE FROM image_tags WHERE image_id = %s AND tag_id = %s RETURNING 1", (img_id, tag_id))
-        if pg_cur.fetchone():
-            pg_cur.execute("UPDATE tags SET count = GREATEST(count - 1, 0) WHERE id = %s", (tag_id,))
+    if tag_rows:
+        print(f"Removing {len(tag_rows)} tag links...")
+        pg_cur.execute("CREATE TEMP TABLE tmp_revert (img_id INT, tag_id INT) ON COMMIT DROP")
+        psycopg2.extras.execute_values(pg_cur, "INSERT INTO tmp_revert VALUES %s", tag_rows, page_size=10000)
+
+        pg_cur.execute("""
+            DELETE FROM image_tags
+            USING tmp_revert
+            WHERE image_tags.image_id = tmp_revert.img_id AND image_tags.tag_id = tmp_revert.tag_id
+        """)
+
+        print("Recalculating global tag counts...")
+        pg_cur.execute("""
+            UPDATE tags
+            SET count = (
+                SELECT COUNT(image_id)
+                FROM image_tags
+                WHERE tag_id = tags.id
+            )
+            WHERE tag LIKE 'tagai:%'
+        """)
 
     # 3. Clean up Orphaned AI Tags
+    print("Sweeping orphaned AI tags...")
     pg_cur.execute("""
         DELETE FROM tags
         WHERE tag LIKE 'tagai:%'

@@ -3,3 +3,6 @@ database/posts_cache.db
 cookies.txt
 __pycache__
 venv
+database/ai_audit_staging.db
+database/ai_quarantine_cache.db
+database/ai_revert_log.db

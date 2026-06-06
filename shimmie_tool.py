@@ -1,3 +1,4 @@
+# pylint: disable=line-too-long
 """Master CLI Tool for Shimmie2 Batch Importing and Database Management."""
 import argparse
 import sys
