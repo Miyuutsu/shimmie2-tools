@@ -1,0 +1,378 @@
+#// ==========================================
+#// MASTER PURGE CONFIGURATION
+#// ==========================================
+#// You can comment things like this.
+#//
+#// You can use whitelist tags to ensure things aren't touched
+#// Apologies to any artists in this default list. Nothing personal!
+#// ==========================================
+#// ARTIST WHITELIST
+#// 6 per line for readability, no functional impact
+#// You should edit this to fit your needs.
+#// ==========================================
+#// whitelist: 2drr,agwing86,akaashigame,akazawa_red,aki99,alkemanubis
+#// whitelist: amashiro_natsuki,ami_(ammy33),anyannko,arai_togami,arashiya,arata_(xin)
+#// whitelist: arisu_kazumi,asa_no_ha_(awayuki),asakuraf,atg_(wttoo0202),atte_nanakusa,ayanepuna
+#// whitelist: babu,blue_borscht,boppin,boppin_drawing,born-to-die,captain_lamb
+#// whitelist: cedar_(cedar_japonica),chabo_(fuketsudan),chatsune_(white_lolita),chen_bin,chinomaron,cloneko_(zelmeledf2)
+#// whitelist: comodomodo,cromachina,crumbles,cura,dagasi,denfunsan
+#// whitelist: done_(donezumi),doneru,doribae,dove_pixie,emily_(pure_dream),enamiru
+#// whitelist: ether_core,fugetsu_taku,fujieda_uzuki,fujima_takuya,fuyuno_mikan,gachigachi
+#// whitelist: gemba_(dlfms75),gmkj,go-sai_tamanegi,haku89,ham_(points),hanasakichu
+#// whitelist: hatafuta,healthyman,henreader,higeepon,hinainf,hino_hino
+#// whitelist: hiro_hiroki,huei_nazuki,inuarashi,kanabun,kanbaki,kani_biimu
+#// whitelist: kannagi_rei,karaage,kazakura,ke-ta,kedama_milk,kiira
+#// whitelist: kimagure_blue,kinomiki_nobori,kirisame_mia,kobuichi,kokone_(coconeeeco),konpeto
+#// whitelist: kouda_suzu,kujou_danbo,kupuru_(hirumamiyuu),kuroshiro00,kurumai,lambda_(kusowarota)
+#// whitelist: langbazi,lasto,liclac,lolicom,luxuriou_s,m-da_s-tarou
+#// whitelist: maccha,makigai,makuran,mannack,marup,matanukinuki
+#// whitelist: merlt,milkshakework,mimiga,miyako_(naotsugu),mochiyuki,moekibara_fumitake
+#// whitelist: momozu_komamochi,mousou_(mousou_temporary),mumu_(mumunyan),munyuu,muririn,musouzuki
+#// whitelist: nakkar,nanaka_mai,naz_(garyuuya),nedia_(nedia_region),neko_miyabi_(artist),nikku_(ra)
+#// whitelist: nonohara_miki,nyxerebos,ogyadya,om_(nk2007),owasaki,painter-lhb
+#// whitelist: pelican_(s030),pepatiku,pila-pela,pirason,piyodera_mucha,ponsuke_(pon00000)
+#// whitelist: ponta_(velmar),pruzhka_(wardi113),psyche3313,pu-en,pumpkinspicelatte,qkracho_(thesdroz)
+#// whitelist: qm,r245,reku,renew_vivi,ri-net,rinringyo
+#// whitelist: rkrk,sakuraba_hikaru_(loveindog),sakurabe_notos,sakutaishi,samneco,sazaki_ichiri
+#// whitelist: sb_(coco1),sc_naru,seneto,setmen,shiba_hajime,shida_kazuhiro
+#// whitelist: shio_(shiofeifei),shiratama_(shiratamaco),shiratama_mochi,shitou,shokuyou_mogura,shouji_ayumu
+#// whitelist: shouu-kun,siera_(sieracitrus),sirokohi,sorairo_len,sukage,tachimi_(basue)
+#// whitelist: tai_ichi,takahashi_tetsuya,takamichi,takepoison,tamakorogashi,tankcay
+#// whitelist: tinker_bell_(pixiv_10956015),toketou,toshishikisai,tsubasa_tsubasa,tsukiman,tsukimi_(xiaohuasan)
+#// whitelist: tyomimas,umi_suzume,usashiro_mani,utatanecocoa,win_opz,yakihebi
+#// whitelist: yan_(nicknikg),yanagi_yuu,yinpa_(wanone500511),youta,yuizaki_kazuya,yukino_minato
+#// whitelist: yurarin,yuyumatsu,zankuro,zen33n,bonanza_(artist),monchichiwa,yupa
+#// ==========================================
+#// GENERIC WHITELIST
+#// ==========================================
+#// whitelist: cosplay #// Safety measure for inter-series, inter-character references, maybe too broad
+#// whitelist: banned_artist #// This IS for preservation to some degree, afterall...
+#// whitelist: animated #// This isn't properly handled at this time so retain all
+#// Need to find a way to filter down precure and doremi some.
+#// ==========================================
+#// NOISE FILTER FOR COMMON TAGS
+#// You should edit this to fit your needs. The goal is to reduce noise in common tag printing.
+#// ==========================================
+#// ignore: 1boy, 1futa, 1girl, 2024, 2025, 2boys
+#// ignore: 2girls, 3boys, 3girls, :d, :o, absurdres
+#// ignore: after_sex, age_difference, aged_down, ahegao, ahoge, all_fours
+#// ignore: anal, angry, animal_ears, animal_genitalia, animal_nose, anus
+#// ignore: armpits, arms_behind_back, arms_up, artist:tagme, artist_logo, artist_name
+#// ignore: artist_request, ass, ass_focus, ass_grab, back, bag
+#// ignore: bangs, bar_censor, bare_shoulders, barefoot, bdsm, beach
+#// ignore: bed, belly, belt, bent_over, bikini, black_eyes
+#// ignore: black_hair, blonde_hair, blood, blue_eyes, blue_hair, blunt_bangs
+#// ignore: blush, blush_stickers, bodily_fluids, bondage, boots, bottomless
+#// ignore: bound, bow, braid, breast_sucking, breasts, brown_eyes
+#// ignore: brown_fur, brown_hair, bulge, bunny_ears, bunny_girl, cameltoe
+#// ignore: cape, cat, cat_ears, cat_tail, censored, character:tagme
+#// ignore: child, child_on_child, cleavage, cleft_of_venus, clenched_teeth, clitoris
+#// ignore: closed_eyes, closed_mouth, clothed, clothed_female_nude_male, clothed_sex, clothes_lift
+#// ignore: clothing, cloud, collar, collarbone, comic, commentary
+#// ignore: commentary_request, commission, completely_nude, completely_nude_female, completely_nude_male, cowboy_shot
+#// ignore: cowgirl_position, crying, cum, cum_in_ass, cum_in_mouth, cum_in_pussy
+#// ignore: cum_inside, cum_on_body, cumdrip, dark-skinned_female, dark-skinned_male, dark_skin
+#// ignore: day, dialogue, dog, doggystyle, dress, dress_lift
+#// ignore: drooling, duo, earrings, edit, ejaculation, embarrassed
+#// ignore: english_commentary, english_dialogue, english_text, erection, eyebrows, eyelashes
+#// ignore: facial, facial_hair, fang, feet, feet_out_of_frame, fellatio
+#// ignore: female, female_focus, female_only, female_solo, femdom, fingernails
+#// ignore: flat_chest, flower, food, fox, freckles, from_behind
+#// ignore: from_below, from_side, frown, full_body, fully_clothed, fur
+#// ignore: furry, furry_female, furry_male, furry_only, futanari, genital_fluids
+#// ignore: genitals, girl_on_top, glasses, gloves, gradient_background, green_eyes
+#// ignore: green_hair, grey_background, grey_hair, greyscale, grin, groping
+#// ignore: group_sex, hair, hair_between_eyes, hair_bow, hair_bun, hair_ornament
+#// ignore: hair_over_one_eye, hair_ribbon, hairband, hairclip, half-closed_eyes, handjob
+#// ignore: happy, hard-translated, hat, heart, heart-shaped_pupils, hetero
+#// ignore: highres, holding, hood, horns, hug, huge_ass
+#// ignore: huge_penis, indoors, interracial, interspecies, jacket, japanese_clothes
+#// ignore: japanese_text, jewelry, kiss, kneeling, large_penis, legs
+#// ignore: legs_up, legwear, licking, light-skinned, light-skinned_female, logo
+#// ignore: loli, long_hair, long_sleeves, looking_at_another, looking_at_viewer, looking_back
+#// ignore: looking_down, looking_to_the_side, low_twintails, lowres, lying, makeup
+#// ignore: male, male_focus, male_only, male_penetrated, male_solo, mammal
+#// ignore: masturbation, mature_female, medium_breasts, medium_hair, micro_bikini, milf
+#// ignore: missionary, moaning, monochrome, mosaic_censoring, motion_lines, multicolored_hair
+#// ignore: multiple_boys, multiple_girls, multiple_tails, multiple_views, naughty_face, navel
+#// ignore: nintendo, nipples, no_panties, nude, nude_female, nude_male
+#// ignore: older_female, older_male, older_on_young, on_back, on_bed, on_stomach
+#// ignore: one_eye_closed, onee-shota, onii-loli, open_clothes, open_mouth, open_smile
+#// ignore: oral, orange_eyes, orange_fur, orange_hair, orgasm, original
+#// ignore: original_character, outdoors, panties, pants, pantyhose, parent
+#// ignore: parted_bangs, partially_clothed, penetration, penis, pillow, pink_eyes
+#// ignore: pink_hair, pointy_ears, ponytail, pov, precum, presenting
+#// ignore: pubic_hair, public, purple_eyes, purple_hair, pussy, pussy_juice
+#// ignore: rabbit, rabbit_ears, rabbit_tail, rape, red_dress, red_eyes
+#// ignore: red_hair, ribbon, rolling_eyes, saliva, sandals, school_uniform
+#// ignore: series:nintendo, series:original, series:pokemon, series:tagme, sex, sex_from_behind
+#// ignore: sex_toy, shiny_skin, shirt, shoes, short_hair, short_sleeves
+#// ignore: short_twintails, shorts, shota, siblings, sidelocks, simple_background
+#// ignore: sitting, sitting_on_person, size_difference, sketch, skinny, skirt
+#// ignore: sky, sleeping, sleeveless, small_breasts, small_penis, smile
+#// ignore: smug, socks, soles, speech_bubble, spread_legs, squatting
+#// ignore: standing, star_(symbol), steam, stomach, stomach_bulge, straddling
+#// ignore: straight_shota, striped, striped_clothes, surprised, sweat, sweatdrop
+#// ignore: sweater, swimsuit, symbol-shaped_pupils, t-shirt, tagme, tail
+#// ignore: tan, tank_top, tattoo, tears, teenage, teeth
+#// ignore: testicles, text, thick_thighs, thighhighs, thighs, thong
+#// ignore: threesome, tiara, toei_animation, toes, tomboy, tongue
+#// ignore: tongue_out, topless, torn_clothes, translated, translation_request, trap
+#// ignore: trembling, twintails, two-tone_fur, two-tone_hair, uncensored, underwear
+#// ignore: upper_body, upper_teeth_only, v, vaginal, veins, veiny_penis
+#// ignore: very_long_hair, water, weapon, wet, white_background, white_fur
+#// ignore: white_gloves, white_hair, white_panties, white_shirt, wide_hips, wings
+#// ignore: yaoi, yellow_eyes, yellow_fur, young_female, young_furry, young_human
+#// ignore: younger_female, yuri
+#// ==========================================
+#// BLACKLIST STARTS HERE
+#// ==========================================
+
+adventure_time
+ambrosia_(bear)
+amy_rose
+an_american_tail
+anartistwithamouse
+angelica_pickles
+animal_crossing
+arnkleblarn
+arthur_(series)
+artist:microsd #// Usually would strip the prefix here but safety first since common term
+ashley_(warioware)
+bad_parenting
+bart_simpson
+bbmbbf
+becky_botsford
+ben_(song_of_the_sea)
+betty_boop
+bigdead
+bill_murphy
+bisonvega
+blastfurnace
+bluey
+bluey_(series)
+bratz
+brendan_(the_secret_of_kells)
+bufandanocturna
+caillou_(character)
+caillou_(series)
+calamity33
+carmen_(the_minimight_kids)
+carmine_ink
+cartoon_network
+cartoon_saloon
+chim_(master_cinders)
+cirima
+crash_bandicoot_(series)
+cultofpersonality
+darwin_watterson
+dc_comics
+dil_pickles
+dinosaur_king
+dipper_pines
+disney
+dixie_kong
+donkey_kong_(series)
+doompypomp
+doraemon
+doukutsu_monogatari
+dr._proletariat
+dr._stone
+dr_elvira_lux
+dreaming_(artist)
+dreamscreep
+driftingtiger
+duncanville
+e-hentai_sample
+e254e
+edogawa_conan
+efto
+el_chavo_animado
+el_chavo_del_ocho
+el_tigre
+elinor_wonders_why
+erma_(series)
+fbi_twins
+fellatrix
+finn_the_human
+fisting
+five_nights_at_freddy's
+five_nights_at_freddy's:_security_breach
+foogyakumo
+forastero
+fortythree
+foster's_home_for_imaginary_friends
+foxtrot
+fran_(litterbox)
+frankie_foster
+graphite_(artist)
+gravity_falls
+gray_mitchell
+greasymeta
+gumball_watterson
+gyoubu_ippei
+haibara_ai
+harriet_the_spy
+heckie
+high_ware
+hilda_(hilda)
+hilda_(series)
+homer_simpson
+hoshime
+huge_breasts pregnant -loli
+huge_breasts solo #// A good example of requiring two tags be met
+huge_breasts solo_focus
+instructions
+invincible_(series)
+jaredsteeletype
+jerseydevil
+johnny_test
+junajuice
+kaijuu_(uchuukaijuu1917)
+kaze_no_klonoa
+kevin_beecham
+khelio77
+kimberly_harris
+kouzuki_momonosuke
+kyojiri_loli
+kyojiri_shota
+large_breasts pregnant -loli #// A good example of requiring two tags be met and also to exclude a tag
+large_breasts solo
+large_breasts solo_focus
+lewdtime
+lewis_robinson
+lightningstrike
+lilo_&_stitch
+lincoln_loud
+lisa_loud
+lisa_simpson
+little_nightmares
+littlerager
+looney_tunes
+lovin_sis
+mabel_pines
+mac_(foster's)
+madoc
+maggie_simpson
+mangamaster
+maniacbox
+manny_rivera
+marge_simpson
+mario_(series)
+marshall_lee
+marvel
+mato_spectoru
+maureen_murphy
+maximumpingas
+mechspazer
+meet_the_robinsons
+meitantei_conan
+microsd_(pibo)
+miguelnydraws03
+minamoto_shizuka
+miraculous_ladybug
+misaeldm
+mitzi_(ajmarekart)
+monkey_d._luffy
+moral_orel
+mr_snowkell
+murati2882
+murder_drones
+murphy_and_mitzi
+my_big_big_friend_(series)
+my_little_pony
+n1_1ck
+n3f
+nagiichi
+nami_(one_piece)
+naruto
+naruto_(classic)
+naruto_(series)
+neo_sariphy
+nickelodeon
+nico_robin
+odinboy666
+one_piece
+p1c0_p1c0
+paige_fox
+palcomix
+pantheon
+pantheon_(show)
+parsnip_(game)
+pbs_kids
+pencil_bolt
+penny_(jurassiczalar)
+pennywise
+peppers_(hollyloli)
+peropero_sparkles
+phil_deville
+poivre_moulu
+ponpu
+primos_(disney)
+provo
+puyopuyo
+puyopuyo_fever
+ranma_1/2
+rick_and_morty
+rocner
+rodent -seiken_densetsu
+rokku-d
+ronnie_anne_santiago
+rugrats
+saglinger
+sciurid
+sdcharm
+seikkeizu
+senninha
+serial_experiments_lain
+sesame_street
+shadman
+shuunaswiss
+sienna_contiello
+sjsj_10
+skullgirls
+snartob
+snk
+snuff
+sonic_(series)
+sonic_the_hedgehog
+south_park
+spakka5
+stephanie_meanswell
+steven_quartz_universe
+steven_universe
+sweethex
+tails_(sonic)
+takaneru
+tater_ramirez_humphrey
+teenx
+the_amazing_world_of_gumball
+the_boondocks
+the_loud_house
+the_mitchells_vs._the_machines
+the_secret_of_kells
+the_simpsons
+thepsychodog
+tkgsize
+tommy_pickles
+toon_(style)
+torakichi_(ebitendon)
+trafalgar_law
+treatartstudios
+ushiking
+uzumaki_boruto
+uzumaki_naruto
+vigil_nightwarden
+vivian_(ajmarekart)
+volvox
+vulapa
+walkure
+warioware
+warrior_cats
+wilbur_robinson
+willy_duwitt
+xierra099
+y0dare
+yoshimi
+zeklullaby
+zucanki

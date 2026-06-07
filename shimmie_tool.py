@@ -125,7 +125,7 @@ def _add_update_ratings_parser(subparsers):
 def _add_purge_parser(subparsers):
     parser = subparsers.add_parser("purge", help="Permanently delete images based on blacklisted tags")
     parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
-    parser.add_argument("--blacklist", required=True, help="Path to your blacklist text file")
+    parser.add_argument("--blacklist", default="blacklist.txt", help="Path to your blacklist text file")
     parser.add_argument("--dry-run", action="store_true", help="Generate a report without deleting anything")
 
 def _add_download_parser(subparsers):
