@@ -237,7 +237,7 @@ def purge_images(args):
         raw_line = line.strip().lower()
 
         # 1. Catch the whitelist directive BEFORE stripping comments
-        if raw_line.startswith("#// whitelist:"):
+        if raw_line.replace(" ", "").startswith("#//whitelist:"):
             # Extract everything after "whitelist:" and split by comma
             whitelist_content = raw_line.split("whitelist:", 1)[1]
 
