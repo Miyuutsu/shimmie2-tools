@@ -7,51 +7,52 @@
 #// Apologies to any artists in this default list. Nothing personal!
 #// ==========================================
 #// ARTIST WHITELIST
-#// 6 per line for readability, no functional impact
+#// 6 per line for readability not functional impact
 #// You should edit this to fit your needs.
 #// ==========================================
-#// whitelist: 2drr,agwing86,akaashigame,akazawa_red,aki99,alkemanubis
-#// whitelist: amashiro_natsuki,ami_(ammy33),anyannko,arai_togami,arashiya,arata_(xin)
-#// whitelist: arisu_kazumi,asa_no_ha_(awayuki),asakuraf,atg_(wttoo0202),atte_nanakusa,ayanepuna
-#// whitelist: babu,blue_borscht,boppin,boppin_drawing,born-to-die,captain_lamb
-#// whitelist: cedar_(cedar_japonica),chabo_(fuketsudan),chatsune_(white_lolita),chen_bin,chinomaron,cloneko_(zelmeledf2)
-#// whitelist: comodomodo,cromachina,crumbles,cura,dagasi,denfunsan
-#// whitelist: done_(donezumi),doneru,doribae,dove_pixie,emily_(pure_dream),enamiru
-#// whitelist: ether_core,fugetsu_taku,fujieda_uzuki,fujima_takuya,fuyuno_mikan,gachigachi
-#// whitelist: gemba_(dlfms75),gmkj,go-sai_tamanegi,haku89,ham_(points),hanasakichu
-#// whitelist: hatafuta,healthyman,henreader,higeepon,hinainf,hino_hino
-#// whitelist: hiro_hiroki,huei_nazuki,inuarashi,kanabun,kanbaki,kani_biimu
-#// whitelist: kannagi_rei,karaage,kazakura,ke-ta,kedama_milk,kiira
-#// whitelist: kimagure_blue,kinomiki_nobori,kirisame_mia,kobuichi,kokone_(coconeeeco),konpeto
-#// whitelist: kouda_suzu,kujou_danbo,kupuru_(hirumamiyuu),kuroshiro00,kurumai,lambda_(kusowarota)
-#// whitelist: langbazi,lasto,liclac,lolicom,luxuriou_s,m-da_s-tarou
-#// whitelist: maccha,makigai,makuran,mannack,marup,matanukinuki
-#// whitelist: merlt,milkshakework,mimiga,miyako_(naotsugu),mochiyuki,moekibara_fumitake
-#// whitelist: momozu_komamochi,mousou_(mousou_temporary),mumu_(mumunyan),munyuu,muririn,musouzuki
-#// whitelist: nakkar,nanaka_mai,naz_(garyuuya),nedia_(nedia_region),neko_miyabi_(artist),nikku_(ra)
-#// whitelist: nonohara_miki,nyxerebos,ogyadya,om_(nk2007),owasaki,painter-lhb
-#// whitelist: pelican_(s030),pepatiku,pila-pela,pirason,piyodera_mucha,ponsuke_(pon00000)
-#// whitelist: ponta_(velmar),pruzhka_(wardi113),psyche3313,pu-en,pumpkinspicelatte,qkracho_(thesdroz)
-#// whitelist: qm,r245,reku,renew_vivi,ri-net,rinringyo
-#// whitelist: rkrk,sakuraba_hikaru_(loveindog),sakurabe_notos,sakutaishi,samneco,sazaki_ichiri
-#// whitelist: sb_(coco1),sc_naru,seneto,setmen,shiba_hajime,shida_kazuhiro
-#// whitelist: shio_(shiofeifei),shiratama_(shiratamaco),shiratama_mochi,shitou,shokuyou_mogura,shouji_ayumu
-#// whitelist: shouu-kun,siera_(sieracitrus),sirokohi,sorairo_len,sukage,tachimi_(basue)
-#// whitelist: tai_ichi,takahashi_tetsuya,takamichi,takepoison,tamakorogashi,tankcay
-#// whitelist: tinker_bell_(pixiv_10956015),toketou,toshishikisai,tsubasa_tsubasa,tsukiman,tsukimi_(xiaohuasan)
-#// whitelist: tyomimas,umi_suzume,usashiro_mani,utatanecocoa,win_opz,yakihebi
-#// whitelist: yan_(nicknikg),yanagi_yuu,yinpa_(wanone500511),youta,yuizaki_kazuya,yukino_minato
-#// whitelist: yurarin,yuyumatsu,zankuro,zen33n,bonanza_(artist),monchichiwa,yupa
+#// whitelist: 2drr, agwing86, akaashigame, akazawa_red, aki99, alkemanubis
+#// whitelist: amashiro_natsuki, ami_(ammy33), anyannko, arai_togami, arashiya, arata_(xin)
+#// whitelist: arisu_kazumi, asa_no_ha_(awayuki), asakuraf, atg_(wttoo0202), atte_nanakusa, ayanepuna
+#// whitelist: babu, blue_borscht, bonanza_(artist), boppin, boppin_drawing, born-to-die
+#// whitelist: captain_lamb, cedar_(cedar_japonica), chabo_(fuketsudan), chatsune_(white_lolita), chen_bin, chinomaron
+#// whitelist: cloneko_(zelmeledf2), comodomodo, cromachina, crumbles, cura, dagasi
+#// whitelist: denfunsan, done_(donezumi), doneru, doribae, dove_pixie, emily_(pure_dream)
+#// whitelist: enamiru, ether_core, fugetsu_taku, fujieda_uzuki, fujima_takuya, fuyuno_mikan
+#// whitelist: gachigachi, gemba_(dlfms75), gmkj, go-sai_tamanegi, haku89, ham_(points)
+#// whitelist: hanasakichu, hatafuta, healthyman, henreader, higeepon, hinainf
+#// whitelist: hino_hino, hiro_hiroki, huei_nazuki, inuarashi, kanabun, kanbaki
+#// whitelist: kani_biimu, kannagi_rei, karaage, kazakura, ke-ta, kedama_milk
+#// whitelist: kiira, kimagure_blue, kinomiki_nobori, kirisame_mia, kobuichi, kokone_(coconeeeco)
+#// whitelist: konpeto, kouda_suzu, kujou_danbo, kupuru_(hirumamiyuu), kuroshiro00, kurumai
+#// whitelist: lambda_(kusowarota), langbazi, lasto, liclac, lolicom, luxuriou_s
+#// whitelist: m-da_s-tarou, maccha, makigai, makuran, mannack, marup
+#// whitelist: matanukinuki, merlt, milkshakework, mimiga, miyako_(naotsugu), mochiyuki
+#// whitelist: moekibara_fumitake, momozu_komamochi, monchichiwa, mousou_(mousou_temporary), mumu_(mumunyan), munyuu
+#// whitelist: muririn, musouzuki, nakkar, nanaka_mai, naz_(garyuuya), nedia_(nedia_region)
+#// whitelist: neko_miyabi_(artist), nikku_(ra), nonohara_miki, nyxerebos, ogyadya, om_(nk2007)
+#// whitelist: owasaki, painter-lhb, pelican_(s030), pepatiku, pila-pela, pirason
+#// whitelist: piyodera_mucha, ponsuke_(pon00000), ponta_(velmar), pruzhka_(wardi113), psyche3313, pu-en
+#// whitelist: pumpkinspicelatte, qkracho_(thesdroz), qm, r245, reku, renew_vivi
+#// whitelist: ri-net, rinringyo, rkrk, sakuraba_hikaru_(loveindog), sakurabe_notos, sakutaishi
+#// whitelist: samneco, sazaki_ichiri, sb_(coco1), sc_naru, seneto, setmen
+#// whitelist: shiba_hajime, shida_kazuhiro, shio_(shiofeifei), shiratama_(shiratamaco), shiratama_mochi, shitou
+#// whitelist: shokuyou_mogura, shouji_ayumu, shouu-kun, siera_(sieracitrus), sirokohi, sorairo_len
+#// whitelist: sukage, tachimi_(basue), tai_ichi, takahashi_tetsuya, takamichi, takepoison
+#// whitelist: tamakorogashi, tankcay, tinker_bell_(pixiv_10956015), toketou, toshishikisai, tsubasa_tsubasa
+#// whitelist: tsukiman, tsukimi_(xiaohuasan), tyomimas, umi_suzume, usashiro_mani, utatanecocoa
+#// whitelist: win_opz, yakihebi, yan_(nicknikg), yanagi_yuu, yinpa_(wanone500511), youta
+#// whitelist: yuizaki_kazuya, yukino_minato, yupa, yurarin, yuyumatsu, zankuro
+#// whitelist: zen33n
 #// ==========================================
 #// GENERIC WHITELIST
 #// ==========================================
 #// whitelist: cosplay #// Safety measure for inter-series, inter-character references, maybe too broad
 #// whitelist: banned_artist #// This IS for preservation to some degree, afterall...
-#// whitelist: animated #// This isn't properly handled at this time so retain all
-#// Need to find a way to filter down precure and doremi some.
+#// whitelist: animated,animated_gif,video #// This isn't properly handled at this time so retain all
+#// Need to find a way to filter down precure and doremi some...
 #// ==========================================
 #// NOISE FILTER FOR COMMON TAGS
-#// You should edit this to fit your needs. The goal is to reduce noise in common tag printing.
+#// You should edit this to fit your needs. The goal is to reduce noise in common tag printing. If you're not tag hunting this doesn't matter.
 #// ==========================================
 #// ignore: 1boy, 1futa, 1girl, 2024, 2025, 2boys
 #// ignore: 2girls, 3boys, 3girls, :d, :o, absurdres
@@ -310,8 +311,6 @@ poivre_moulu
 ponpu
 primos_(disney)
 provo
-puyopuyo
-puyopuyo_fever
 ranma_1/2
 rick_and_morty
 rocner
