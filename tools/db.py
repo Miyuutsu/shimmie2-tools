@@ -231,15 +231,33 @@ def purge_images(args):
     # Load tags to delete
     rules = []
     prefilter_tags = set()
+    preserve_tags = set()
 
     for line in blacklist_path.read_text(encoding="utf-8").splitlines():
-        line = line.split("#//")[0].strip().lower()
-        if not line:
+        raw_line = line.strip().lower()
+
+        # 1. Catch the whitelist directive BEFORE stripping comments
+        if raw_line.startswith("#// whitelist:"):
+            # Extract everything after "whitelist:" and split by comma
+            whitelist_content = raw_line.split("whitelist:", 1)[1]
+
+            clean_whitelist = whitelist_content.split("#//")[0]
+            for pt in clean_whitelist.split(","):
+                clean_pt = pt.strip()
+                if clean_pt:
+                    preserve_tags.add(clean_pt)
+            continue
+
+        # 2. Safely strip normal comments and grab what's left
+        clean_line = raw_line.split("#//")[0].strip()
+
+        # 3. Skip if the line is now empty
+        if not clean_line:
             continue
 
         pos_tags = []
         neg_tags = []
-        for token in line.split():
+        for token in clean_line.split():
             if token.startswith("-"):
                 neg_tags.append(token[1:])
             else:
@@ -247,12 +265,12 @@ def purge_images(args):
                 prefilter_tags.add(token)
 
         if not pos_tags:
-            print(f"[ERROR] Invalid rule '{line}'. You must include at least one positive tag.")
+            print(f"[ERROR] Invalid rule '{clean_line}'. You must include at least one positive tag.")
             return
 
-        rules.append({'pos': pos_tags, 'neg': neg_tags, 'raw': line})
+        rules.append({'pos': pos_tags, 'neg': neg_tags, 'raw': clean_line})
 
-    print(f"[INFO] Loaded {len(rules)} Boolean rules. Hunting suspects...")
+    print(f"[INFO] Loaded {len(rules)} rules and {len(preserve_tags)} global preservation tags. Hunting...")
     prefilter_list = list(prefilter_tags)
 
     db_config = get_shimmie_db_credentials(args.spath)
@@ -297,7 +315,11 @@ def purge_images(args):
                 if not t.startswith(("tagai:", "booru:")) and ":" in t:
                     clean_tags.add(t.split(":", 1)[1])
 
-            # Evaluate against all rules
+            # --- The Immunity Shield ---
+            if preserve_tags and any(pt in clean_tags for pt in preserve_tags):
+                continue  # Image is instantly spared!
+
+            # Evaluate against all blacklist rules
             triggered_rules = []
             for rule in rules:
                 has_all_pos = all(p in clean_tags for p in rule['pos'])
