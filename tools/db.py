@@ -1,4 +1,4 @@
-# pylint: disable=duplicate-code
+# pylint: disable=duplicate-code,line-too-long,too-many-locals,too-many-branches,too-many-statements
 """Database management tools (SQLite Conversions, Precaching, Rating Updates)."""
 import csv
 import json
@@ -232,6 +232,7 @@ def purge_images(args):
     rules = []
     prefilter_tags = set()
     preserve_tags = set()
+    ignore_tags = set()
 
     for line in blacklist_path.read_text(encoding="utf-8").splitlines():
         raw_line = line.strip().lower()
@@ -246,6 +247,16 @@ def purge_images(args):
                 clean_pt = pt.strip()
                 if clean_pt:
                     preserve_tags.add(clean_pt)
+            continue
+
+        # 2. Catch the ignore directive
+        if raw_line.replace(" ", "").startswith("#//ignore:"):
+            ignore_content = raw_line.split("ignore:", 1)[1]
+            clean_ignore = ignore_content.split("#//")[0]
+            for pt in clean_ignore.split(","):
+                clean_pt = pt.strip()
+                if clean_pt:
+                    ignore_tags.add(clean_pt)
             continue
 
         # 2. Safely strip normal comments and grab what's left
@@ -353,19 +364,60 @@ def purge_images(args):
         if args.dry_run:
             report_path = Path("purge_dry_run.txt")
 
-            # Tally up associated tags, IGNORING the ones we specifically targeted
+            # --- TOP 100 NOISE FILTERS ---
+            ignore_prefixes = ("booru:", "tagai:")
+
+            # Tally up associated tags and track the rules that condemned them
             associated_tags = {}
-            for _, _, tag_string, _ in trash_images:
+            for _, _, tag_string, triggered_rules in trash_images:
                 for t in tag_string.split():
-                    # Strip prefix to check against your broad-sweep blacklist rules
+                    if t.startswith(ignore_prefixes) or t in ignore_tags:
+                        continue
+
                     base_t = t.split(":", 1)[1] if not t.startswith(("tagai:", "booru:")) and ":" in t else t
 
-                    # If it's not in the blacklist, count it!
                     if t not in prefilter_tags and base_t not in prefilter_tags:
-                        associated_tags[t] = associated_tags.get(t, 0) + 1
+                        # Initialize the nested dictionary if this is a new tag
+                        if t not in associated_tags:
+                            associated_tags[t] = {'total': 0, 'rules': {}}
 
-            # Sort by frequency descending
-            top_associated = sorted(associated_tags.items(), key=lambda x: x[1], reverse=True)
+                        associated_tags[t]['total'] += 1
+
+                        # Tally up which specific rules brought this tag down
+                        for rule in triggered_rules:
+                            associated_tags[t]['rules'][rule] = associated_tags[t]['rules'].get(rule, 0) + 1
+
+            # 1. Sort by total frequency descending to find the 100 heaviest casualties
+            top_by_purge = sorted(associated_tags.items(), key=lambda x: x[1]['total'], reverse=True)[:100]
+
+            # 2. Fetch total database counts for those Top 100
+            top_tag_names = [t[0] for t in top_by_purge]
+            if top_tag_names:
+                cur.execute("SELECT tag, count FROM tags WHERE tag = ANY(%s)", (top_tag_names,))
+                db_totals = dict(cur.fetchall())
+            else:
+                db_totals = {}
+
+            # 3. Calculate remaining counts and build a final sortable list
+            final_top_100 = []
+            for tag_name, tag_data in top_by_purge:
+                purge_count = tag_data['total']
+                total = db_totals.get(tag_name, 0)
+                remaining = max(0, total - purge_count)
+
+                # Find the single rule that caused the most damage to this tag
+                top_rule, top_rule_count = max(tag_data['rules'].items(), key=lambda item: item[1])
+
+                final_top_100.append({
+                    'tag_name': tag_name,
+                    'purge_count': purge_count,
+                    'remaining': remaining,
+                    'top_rule': top_rule,
+                    'top_rule_count': top_rule_count
+                })
+
+            # 4. Re-sort the Top 100 strictly by what is remaining (Ascending, so 0 is at the top)
+            final_top_100.sort(key=lambda x: x['remaining'], reverse=True)
 
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("=== CASUALTY BREAKDOWN BY RULE ===\n")
@@ -373,9 +425,9 @@ def purge_images(args):
                     f.write(f"  - '{rule_text}': {count} images\n")
 
                 f.write("\n=== TOP 100 MOST COMMON ASSOCIATED TAGS ===\n")
-                f.write("(Use this to discover other tags you might want to purge or whitelist!)\n")
-                for tag_name, count in top_associated[:100]:
-                    f.write(f"  - {tag_name}: {count} occurrences\n")
+                f.write("(Sorted by highest remaining count. Shows tags heavily impacted by the crossfire.)\n")
+                for item in final_top_100:
+                    f.write(f"  - {item['tag_name']}: {item['remaining']} remaining images ({item['purge_count']} purging) (Primary Offender: '{item['top_rule']}' with {item['top_rule_count']} hits)\n")
 
                 f.write("\n=== IMAGES FLAGGED FOR DELETION ===\n")
                 for img_id, hsh, tag_string, triggered_rules in trash_images:
