@@ -29,7 +29,7 @@
 #// whitelist: matanukinuki, merlt, milkshakework, mimiga, miyako_(naotsugu), mochiyuki
 #// whitelist: moekibara_fumitake, momozu_komamochi, monchichiwa, mousou_(mousou_temporary), mumu_(mumunyan), munyuu
 #// whitelist: muririn, musouzuki, nakkar, nanaka_mai, naz_(garyuuya), nedia_(nedia_region)
-#// whitelist: neko_miyabi_(artist), nikku_(ra), nonohara_miki, nyxerebos, ogyadya, om_(nk2007)
+#// whitelist: neko_miyabi_(artist), nemui_(nemuriyagi), nikku_(ra), nonohara_miki, nyxerebos, ogyadya, om_(nk2007)
 #// whitelist: owasaki, painter-lhb, pelican_(s030), pepatiku, pila-pela, pirason
 #// whitelist: piyodera_mucha, ponsuke_(pon00000), ponta_(velmar), pruzhka_(wardi113), psyche3313, pu-en
 #// whitelist: pumpkinspicelatte, qkracho_(thesdroz), qm, r245, reku, renew_vivi
@@ -130,12 +130,15 @@
 #// ==========================================
 
 adventure_time
+aika_(idwtbamg)
 ambrosia_(bear)
+american_dad!
 amy_rose
 an_american_tail
 anartistwithamouse
 angelica_pickles
 animal_crossing
+archie
 arnkleblarn
 arthur_(series)
 artist:microsd #// Usually would strip the prefix here but safety first since common term
@@ -146,10 +149,13 @@ bbmbbf
 becky_botsford
 ben_(song_of_the_sea)
 betty_boop
+betty_cooper
 bigdead
 bill_murphy
+bishoujo_senshi_sailor_moon
 bisonvega
 blastfurnace
+bleedman
 bluey
 bluey_(series)
 bratz
@@ -160,14 +166,19 @@ caillou_(series)
 calamity33
 carmen_(the_minimight_kids)
 carmine_ink
+carrie-ann_(lena)
+cartoon
 cartoon_network
 cartoon_saloon
+chilaquiles
 chim_(master_cinders)
 cirima
+cookie_run_witch's_castle
 crash_bandicoot_(series)
 cultofpersonality
 darwin_watterson
 dc_comics
+deadinside97
 dil_pickles
 dinosaur_king
 dipper_pines
@@ -186,6 +197,7 @@ driftingtiger
 duncanville
 e-hentai_sample
 e254e
+editsow
 edogawa_conan
 efto
 el_chavo_animado
@@ -193,8 +205,11 @@ el_chavo_del_ocho
 el_tigre
 elinor_wonders_why
 erma_(series)
+family_guy
 fbi_twins
+feetlovers8841
 fellatrix
+filler_shmazman
 finn_the_human
 fisting
 five_nights_at_freddy's
@@ -205,24 +220,32 @@ fortythree
 foster's_home_for_imaginary_friends
 foxtrot
 fran_(litterbox)
+fran_bow
 frankie_foster
+gonelson_(artist)
+gonelson_characters
 graphite_(artist)
 gravity_falls
 gray_mitchell
 greasymeta
+grim_tales_from_down_below
 gumball_watterson
 gyoubu_ippei
 haibara_ai
+hal_(artist)
 harriet_the_spy
 heckie
 high_ware
 hilda_(hilda)
 hilda_(series)
 homer_simpson
+homestuck
 hoshime
 huge_breasts pregnant -loli
 huge_breasts solo #// A good example of requiring two tags be met
 huge_breasts solo_focus
+i_don't_want_to_be_a_magical_girl
+illegalrx
 instructions
 invincible_(series)
 jaredsteeletype
@@ -234,12 +257,15 @@ kaze_no_klonoa
 kevin_beecham
 khelio77
 kimberly_harris
+king_ghost-oh
 kouzuki_momonosuke
 kyojiri_loli
 kyojiri_shota
 large_breasts pregnant -loli #// A good example of requiring two tags be met and also to exclude a tag
 large_breasts solo
 large_breasts solo_focus
+lena_(lena)
+lena_(webcomic)
 lewdtime
 lewis_robinson
 lightningstrike
@@ -267,10 +293,13 @@ maureen_murphy
 maximumpingas
 mechspazer
 meet_the_robinsons
+megasweet
 meitantei_conan
 microsd_(pibo)
 miguelnydraws03
 minamoto_shizuka
+mindgasmyt
+minnie_(the_rookwood_sister)
 miraculous_ladybug
 misaeldm
 mitzi_(ajmarekart)
@@ -290,9 +319,11 @@ naruto
 naruto_(classic)
 naruto_(series)
 neo_sariphy
+nfr
 nickelodeon
 nico_robin
 odinboy666
+ohno
 one_piece
 p1c0_p1c0
 paige_fox
@@ -307,11 +338,18 @@ pennywise
 peppers_(hollyloli)
 peropero_sparkles
 phil_deville
+pico-kun
+pippi_longstocking
+pippi_longstocking_(series)
 poivre_moulu
 ponpu
 primos_(disney)
+protagonist_(gonelson)
 provo
+punch-out!!
 ranma_1/2
+rekizik
+rekizik_(theapeboy)
 rick_and_morty
 rocner
 rodent -seiken_densetsu
@@ -326,6 +364,7 @@ senninha
 serial_experiments_lain
 sesame_street
 shadman
+shgurr
 shuunaswiss
 sienna_contiello
 sjsj_10
@@ -337,9 +376,11 @@ sonic_(series)
 sonic_the_hedgehog
 south_park
 spakka5
+spermageddon
 stephanie_meanswell
 steven_quartz_universe
 steven_universe
+stewie_griffin
 sweethex
 tails_(sonic)
 takaneru
@@ -349,8 +390,10 @@ the_amazing_world_of_gumball
 the_boondocks
 the_loud_house
 the_mitchells_vs._the_machines
+the_rookwood_sister_(king_ghost-oh)
 the_secret_of_kells
 the_simpsons
+theapeboy_(artist)
 thepsychodog
 tkgsize
 tommy_pickles
@@ -361,6 +404,9 @@ treatartstudios
 ushiking
 uzumaki_boruto
 uzumaki_naruto
+valenok
+velou
+veronica_lodge
 vigil_nightwarden
 vivian_(ajmarekart)
 volvox
@@ -368,10 +414,12 @@ vulapa
 walkure
 warioware
 warrior_cats
+weebecca_(lena)
 wilbur_robinson
 willy_duwitt
 xierra099
 y0dare
+yanmaa_(6664)
 yoshimi
 zeklullaby
 zucanki
