@@ -233,7 +233,7 @@ def purge_images(args):
     prefilter_tags = set()
 
     for line in blacklist_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip().lower()
+        line = line.split("#//")[0].strip().lower()
         if not line:
             continue
 
