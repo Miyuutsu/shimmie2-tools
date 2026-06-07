@@ -352,17 +352,36 @@ def purge_images(args):
         # --- Dry Run Handler ---
         if args.dry_run:
             report_path = Path("purge_dry_run.txt")
+
+            # Tally up associated tags, IGNORING the ones we specifically targeted
+            associated_tags = {}
+            for _, _, tag_string, _ in trash_images:
+                for t in tag_string.split():
+                    # Strip prefix to check against your broad-sweep blacklist rules
+                    base_t = t.split(":", 1)[1] if not t.startswith(("tagai:", "booru:")) and ":" in t else t
+
+                    # If it's not in the blacklist, count it!
+                    if t not in prefilter_tags and base_t not in prefilter_tags:
+                        associated_tags[t] = associated_tags.get(t, 0) + 1
+
+            # Sort by frequency descending
+            top_associated = sorted(associated_tags.items(), key=lambda x: x[1], reverse=True)
+
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("=== CASUALTY BREAKDOWN BY RULE ===\n")
                 for rule_text, count in sorted_breakdown:
                     f.write(f"  - '{rule_text}': {count} images\n")
 
+                f.write("\n=== TOP 100 MOST COMMON ASSOCIATED TAGS ===\n")
+                f.write("(Use this to discover other tags you might want to purge or whitelist!)\n")
+                for tag_name, count in top_associated[:100]:
+                    f.write(f"  - {tag_name}: {count} occurrences\n")
+
                 f.write("\n=== IMAGES FLAGGED FOR DELETION ===\n")
-                # Notice we are now unpacking triggered_rules as well
                 for img_id, hsh, tag_string, triggered_rules in trash_images:
                     f.write(f"ID: {img_id} | Hash: {hsh} | Triggered By: [{', '.join(triggered_rules)}] | Tags: {tag_string}\n")
 
-            print(f"[ℹ️ DRY RUN] Safe abort. Wrote full breakdown and list of {len(trash_images)} images to {report_path.resolve()}")
+            print(f"[ℹ️ DRY RUN] Safe abort. Wrote full breakdown, collateral tags, and {len(trash_images)} targets to {report_path.resolve()}")
             return
 
         confirm = input("Type 'YES' to delete files and database records: ")
