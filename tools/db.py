@@ -229,12 +229,31 @@ def purge_images(args):
         return
 
     # Load tags to delete
-    bad_tags = [
-        line.strip().lower()
-        for line in blacklist_path.read_text().splitlines()
-        if line.strip()
-    ]
-    print(f"[INFO] Hunting for {len(bad_tags)} blacklisted tags...")
+    rules = []
+    prefilter_tags = set()
+
+    for line in blacklist_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip().lower()
+        if not line:
+            continue
+
+        pos_tags = []
+        neg_tags = []
+        for token in line.split():
+            if token.startswith("-"):
+                neg_tags.append(token[1:])
+            else:
+                pos_tags.append(token)
+                prefilter_tags.add(token)
+
+        if not pos_tags:
+            print(f"[ERROR] Invalid rule '{line}'. You must include at least one positive tag.")
+            return
+
+        rules.append({'pos': pos_tags, 'neg': neg_tags, 'raw': line})
+
+    print(f"[INFO] Loaded {len(rules)} Boolean rules. Hunting suspects...")
+    prefilter_list = list(prefilter_tags)
 
     db_config = get_shimmie_db_credentials(args.spath)
     shimmie_root = Path(args.spath)
@@ -242,63 +261,84 @@ def purge_images(args):
     with psycopg2.connect(**db_config) as conn:
         cur = conn.cursor()
 
+        # Step 1: Fetch suspects and ALL their tags using a CTE
         cur.execute("""
-            SELECT t.tag, COUNT(DISTINCT i.id)
-            FROM images i
-            JOIN image_tags it ON i.id = it.image_id
+            WITH suspect_images AS (
+                SELECT DISTINCT i.id, i.hash
+                FROM images i
+                JOIN image_tags it ON i.id = it.image_id
+                JOIN tags t ON it.tag_id = t.id
+                WHERE t.tag = ANY(%s)
+                   OR (
+                       t.tag NOT LIKE 'tagai:%%'
+                       AND t.tag NOT LIKE 'booru:%%'
+                       AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
+                   )
+            )
+            SELECT s.id, s.hash, string_agg(t.tag, ' ') as all_tags
+            FROM suspect_images s
+            JOIN image_tags it ON s.id = it.image_id
             JOIN tags t ON it.tag_id = t.id
-            WHERE t.tag = ANY(%s)
-               OR (
-                   t.tag NOT LIKE 'tagai:%%'
-                   AND t.tag NOT LIKE 'booru:%%'
-                   AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
-               )
-            GROUP BY t.tag
-            ORDER BY count DESC
-        """, (bad_tags, bad_tags))
-        breakdown = cur.fetchall()
+            GROUP BY s.id, s.hash
+        """, (prefilter_list, prefilter_list))
 
-        # Find all images that have ANY of the bad tags
-        cur.execute("""
-            SELECT i.id, i.hash, string_agg(t.tag, ', ') as offending_tags
-            FROM images i
-            JOIN image_tags it ON i.id = it.image_id
-            JOIN tags t ON it.tag_id = t.id
-            WHERE t.tag = ANY(%s)
-               OR (
-                   t.tag NOT LIKE 'tagai:%%'
-                   AND t.tag NOT LIKE 'booru:%%'
-                   AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
-               )
-            GROUP BY i.id, i.hash
-        """, (bad_tags, bad_tags))
+        suspects = cur.fetchall()
 
-        trash_images = cur.fetchall()
+        # Step 2: Evaluate the suspects locally against the complex rules
+        trash_images = []
+        breakdown_counts = {r['raw']: 0 for r in rules}
+
+        for img_id, hsh, tag_string in suspects:
+            raw_tags = tag_string.split(' ')
+
+            # Build an evaluation set that handles your broad sweep (stripping prefixes)
+            clean_tags = set(raw_tags)
+            for t in raw_tags:
+                if not t.startswith(("tagai:", "booru:")) and ":" in t:
+                    clean_tags.add(t.split(":", 1)[1])
+
+            # Evaluate against all rules
+            triggered_rules = []
+            for rule in rules:
+                has_all_pos = all(p in clean_tags for p in rule['pos'])
+                has_any_neg = any(n in clean_tags for n in rule['neg'])
+
+                if has_all_pos and not has_any_neg:
+                    triggered_rules.append(rule['raw'])
+
+            if triggered_rules:
+                for r in triggered_rules:
+                    breakdown_counts[r] += 1
+                trash_images.append((img_id, hsh, tag_string, triggered_rules))
+
+        # Sort breakdown by count descending
+        sorted_breakdown = sorted(breakdown_counts.items(), key=lambda item: item[1], reverse=True)
+        sorted_breakdown = [item for item in sorted_breakdown if item[1] > 0]
+
         if not trash_images:
             print("[✓] Database is clean. No images found matching the blacklist.")
             return
 
         print(f"\n[⚠️ WARNING] Found {len(trash_images)} unique images to permanently delete.")
-        print("\n=== CASUALTY BREAKDOWN BY TAG ===")
-        for tag_name, count in breakdown[:20]:
-            print(f"  - {tag_name}: {count} images")
-        if len(breakdown) > 20:
-            print(f"  ... and {len(breakdown) - 20} more tags.")
-        print("=================================\n")
+        print("\n=== CASUALTY BREAKDOWN BY RULE ===")
+        for rule_text, count in sorted_breakdown[:20]:
+            print(f"  - '{rule_text}': {count} images")
+        if len(sorted_breakdown) > 20:
+            print(f"  ... and {len(sorted_breakdown) - 20} more rules.")
+        print("==================================\n")
 
         # --- Dry Run Handler ---
         if args.dry_run:
             report_path = Path("purge_dry_run.txt")
             with open(report_path, "w", encoding="utf-8") as f:
-                # Write the complete breakdown of all affected tags
-                f.write("=== CASUALTY BREAKDOWN BY TAG ===\n")
-                for tag_name, count in breakdown:
-                    f.write(f"  - {tag_name}: {count} images\n")
+                f.write("=== CASUALTY BREAKDOWN BY RULE ===\n")
+                for rule_text, count in sorted_breakdown:
+                    f.write(f"  - '{rule_text}': {count} images\n")
 
-                # Write the specific image targets
                 f.write("\n=== IMAGES FLAGGED FOR DELETION ===\n")
-                for img_id, hsh, offending_tags in trash_images:
-                    f.write(f"ID: {img_id} | Hash: {hsh} | Tags: {offending_tags}\n")
+                # Notice we are now unpacking triggered_rules as well
+                for img_id, hsh, tag_string, triggered_rules in trash_images:
+                    f.write(f"ID: {img_id} | Hash: {hsh} | Triggered By: [{', '.join(triggered_rules)}] | Tags: {tag_string}\n")
 
             print(f"[ℹ️ DRY RUN] Safe abort. Wrote full breakdown and list of {len(trash_images)} images to {report_path.resolve()}")
             return
@@ -313,7 +353,7 @@ def purge_images(args):
 
         # 1. Delete physical files off the hard drive
         print("\n[Step 1/3] Deleting physical files from disk...")
-        for img_id, hsh, _ in tqdm.tqdm(trash_images, desc="Files Purged", unit="file"):
+        for img_id, hsh, *_ in tqdm.tqdm(trash_images, desc="Files Purged", unit="file"):
             img_ids_to_drop.append(img_id)
 
             # Shimmie2 path logic: data/images/ab/cd/hash (NO EXTENSIONS)
