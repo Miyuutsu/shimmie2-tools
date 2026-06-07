@@ -1,3 +1,4 @@
+# pylint: disable=too-many-locals
 """This is designed to help with batch importing into shimmie2"""
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
