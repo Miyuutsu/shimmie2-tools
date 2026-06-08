@@ -3,9 +3,22 @@
 import argparse
 import sys
 
-from tools import csv_builder, db, images, wiki, ai_auditor
+from tools import csv_builder, db, images, wiki, ai_auditor, auto_tagger
 
 from functions.common import get_cpu_threads
+
+def _add_auto_tag_parser(subparsers):
+    """Adds the auto-tag command."""
+    parser = subparsers.add_parser("auto-tag", help="Auto-generate missing sidecars using AI")
+    parser.add_argument("--images", required=True, help="Path to target images directory")
+    parser.add_argument("--spath", help="Path to Shimmie root (for Postgres DB checking)")
+    parser.add_argument("--dir-as-artist", action="store_true", help="Use parent directory name as an un-prefixed artist tag")
+
+    # Model and Thresholds
+    parser.add_argument("--model", choices=["vit", "vit-large", "swinv2", "convnext", "eva02"], default="eva02", help="SmilingWolf model to use")
+    parser.add_argument("--batch", type=int, default=10, help="Batch size for AI inference")
+    parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag threshold")
+    parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag threshold")
 
 def _add_audit_ratings_parser(subparsers):
     """Adds the audit-ratings command."""
@@ -224,14 +237,15 @@ def setup_parser():
     )
 
     parser_csv = _add_csv_parser(subparsers)
-    _add_wiki_index_parser(subparsers)
-    _add_import_wikis_parser(subparsers)
-    _add_csv2sqlite_parser(subparsers)
-    _add_precache_parser(subparsers)
-    _add_update_ratings_parser(subparsers)
-    _add_purge_parser(subparsers)
-    _add_download_parser(subparsers)
     _add_audit_ratings_parser(subparsers)
+    _add_auto_tag_parser(subparsers)
+    _add_csv2sqlite_parser(subparsers)
+    _add_download_parser(subparsers)
+    _add_import_wikis_parser(subparsers)
+    _add_precache_parser(subparsers)
+    _add_purge_parser(subparsers)
+    _add_update_ratings_parser(subparsers)
+    _add_wiki_index_parser(subparsers)
 
     return parser, parser_csv, subparsers
 
@@ -268,15 +282,16 @@ def main():
         sys.exit(1)
 
     dispatch = {
-        "wiki-index": wiki.create_index,
-        "import-wikis": wiki.import_danbooru,
-        "sync-wikis": wiki.sync_to_shimmie,
-        "csv2sqlite": db.csv_to_sqlite,
-        "precache": db.precache_posts,
-        "update-ratings": db.update_ratings,
-        "download": images.run,
         "audit-ratings": ai_auditor.run_auditor,
+        "auto-tag": auto_tagger.run_auto_tagger,
+        "csv2sqlite": db.csv_to_sqlite,
+        "download": images.run,
+        "import-wikis": wiki.import_danbooru,
+        "precache": db.precache_posts,
         "purge": db.purge_images
+        "sync-wikis": wiki.sync_to_shimmie,
+        "update-ratings": db.update_ratings,
+        "wiki-index": wiki.create_index,
     }
 
     if args.command == "make-csv":

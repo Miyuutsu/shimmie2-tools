@@ -104,7 +104,7 @@ def get_sidecar_tags(image_path):
                 line = html.unescape(line.strip())
                 if not line or line.startswith("#"):
                     continue
-                parts = [t.strip() for t in re.split(r"[,;]", line) if t.strip()]
+                parts = [t.strip().lower() for t in re.split(r"[,;]", line) if t.strip()]
                 extra_tags.extend(re.sub(r"\s+", "_", t) for t in parts if t)
     return extra_tags
 
