@@ -1,4 +1,4 @@
-# pylint: disable=too-many-locals
+# pylint: disable=too-many-locals,line-too-long,too-many-branches
 """This is designed to help with batch importing into shimmie2"""
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
@@ -117,22 +117,35 @@ def enrich_tags(initial_tags, mappings):
     temp_tags = []
     for tag in initial_tags:
         temp_tags.append(tag)
-        if tag in mappings.char:
-            inferred = mappings.char[tag]
-            temp_tags.append(f"character:{tag}")
+
+        # Extract the base word if Danbooru or a sidecar already prefixed it
+        base_tag = tag.split(":", 1)[1] if tag.startswith(("character:", "artist:")) else tag
+
+        if base_tag in mappings.char:
+            inferred = mappings.char[base_tag]
+
+            # Only append the character prefix if the user passed it in raw
+            if f"character:{base_tag}" not in temp_tags:
+                temp_tags.append(f"character:{base_tag}")
+
             if isinstance(inferred, (list, tuple, set)):
                 temp_tags.extend(f"series:{t}" for t in inferred)
             else:
                 temp_tags.append(f"series:{inferred}")
 
+    # Drop the raw, unprefixed character tags
     stage_1 = [t for t in temp_tags if t not in mappings.char]
 
     final_tags = []
     for tag in stage_1:
         final_tags.append(tag)
-        if tag in mappings.artist:
-            final_tags.append(f"artist:{tag}")
+        base_tag = tag.split(":", 1)[1] if tag.startswith(("character:", "artist:")) else tag
 
+        if base_tag in mappings.artist:
+            if f"artist:{base_tag}" not in final_tags:
+                final_tags.append(f"artist:{base_tag}")
+
+    # Drop the raw, unprefixed artist tags
     return [t for t in final_tags if t not in mappings.artist]
 
 def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
@@ -154,11 +167,12 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
         rating_letter = rating_from_score(total_score, smax, qmax)
 
     if rating_letter is None:
-        if "explicit" in post_rating_list:
+        r_str = str(post_rating_list).lower()
+        if  r_str in ["e", "explicit"]:
             rating_letter = "e"
-        elif any(r in post_rating_list for r in ["questionable", "sensitive"]):
+        elif r_str in ["q", "questionable", "sensitive"]:
             rating_letter = "q"
-        elif "general" in post_rating_list:
+        elif r_str in ["s", "g", "general", "safe"]:
             rating_letter = "s"
         else:
             rating_letter = "?"
@@ -256,21 +270,27 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
         image, res_data.post, mappings, args, dynamic_mappings
     )
 
-    if getattr(args, 'blacklist_tags', None):
-        drop_image = False
+    if getattr(args, 'blacklist_rules', None):
+        # Build an evaluation set that handles your broad sweep (stripping prefixes)
+        clean_tags = set(tag_list)
         for t in tag_list:
-            if t in args.blacklist_tags:
-                drop_image = True
-                break
-            # Ignore prefixes (split on first colon) BUT shield 'tagai:' and 'booru:' tags
             if not t.startswith(("tagai:", "booru:")) and ":" in t:
-                base_tag = t.split(":", 1)[1]
-                if base_tag in args.blacklist_tags:
+                clean_tags.add(t.split(":", 1)[1])
+
+        # --- The Immunity Shield ---
+        if not (args.preserve_tags and any(pt in clean_tags for pt in args.preserve_tags)):
+            # Evaluate against all blacklist rules
+            drop_image = False
+            for rule in args.blacklist_rules:
+                has_all_pos = all(p in clean_tags for p in rule['pos'])
+                has_any_neg = any(n in clean_tags for n in rule['neg'])
+
+                if has_all_pos and not has_any_neg:
                     drop_image = True
                     break
 
-        if drop_image:
-            return None, None  # Silently skip this image
+            if drop_image:
+                return None, None  # Silently skip this image
 
     if args.update_cache:
         save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
@@ -392,14 +412,37 @@ def run(args):
         raise FileNotFoundError(f"Video path not found: {args.video_path}")
 
     print_summary(args)
-    args.blacklist_tags = set()
+    args.blacklist_rules = []
+    args.preserve_tags = set()
     if getattr(args, 'blacklist', None) and Path(args.blacklist).is_file():
-        args.blacklist_tags = {
-            line.strip().lower()
-            for line in Path(args.blacklist).read_text(encoding='utf-8').splitlines()
-            if line.strip()
-        }
-        print(f"[INFO] Loaded {len(args.blacklist_tags)} blacklisted tags.")
+        for line in Path(args.blacklist).read_text(encoding='utf-8').splitlines():
+            raw_line = line.strip().lower()
+
+            if raw_line.replace(" ", "").startswith("#//whitelist:"):
+                clean_whitelist = raw_line.split("whitelist:", 1)[1].split("#//")[0]
+                for pt in clean_whitelist.split(","):
+                    if pt.strip():
+                        args.preserve_tags.add(pt.strip())
+                continue
+
+            if raw_line.replace(" ", "").startswith("#//ignore:"):
+                continue
+
+            clean_line = raw_line.split("#//")[0].strip()
+            if not clean_line:
+                continue
+
+            pos_tags, neg_tags = [], []
+            for token in clean_line.split():
+                if token.startswith("-"):
+                    neg_tags.append(token[1:])
+                else:
+                    pos_tags.append(token)
+
+            if pos_tags:
+                args.blacklist_rules.append({'pos': pos_tags, 'neg': neg_tags})
+
+        print(f"[INFO] Loaded {len(args.blacklist_rules)} blacklist rules and {len(args.preserve_tags)} whitelist tags.")
     mappings = load_mappings()
     files, batches = collect_files(args.image_path, args.video_path, args.batch)
 
