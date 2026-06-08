@@ -10,39 +10,40 @@
 #// 6 per line for readability not functional impact
 #// You should edit this to fit your needs.
 #// ==========================================
-#// whitelist: 2drr, agwing86, akaashigame, akazawa_red, aki99, alkemanubis
-#// whitelist: amashiro_natsuki, ami_(ammy33), anyannko, arai_togami, arashiya, arata_(xin)
-#// whitelist: arisu_kazumi, asa_no_ha_(awayuki), asakuraf, atg_(wttoo0202), atte_nanakusa, ayanepuna
-#// whitelist: babu, blue_borscht, bonanza_(artist), boppin, boppin_drawing, born-to-die
-#// whitelist: captain_lamb, cedar_(cedar_japonica), chabo_(fuketsudan), chatsune_(white_lolita), chen_bin, chinomaron
-#// whitelist: cloneko_(zelmeledf2), comodomodo, cromachina, crumbles, cura, dagasi
-#// whitelist: denfunsan, done_(donezumi), doneru, doribae, dove_pixie, emily_(pure_dream)
-#// whitelist: enamiru, ether_core, fugetsu_taku, fujieda_uzuki, fujima_takuya, fuyuno_mikan
-#// whitelist: gachigachi, gemba_(dlfms75), gmkj, go-sai_tamanegi, haku89, ham_(points)
-#// whitelist: hanasakichu, hatafuta, healthyman, henreader, higeepon, hinainf
-#// whitelist: hino_hino, hiro_hiroki, huei_nazuki, inuarashi, kanabun, kanbaki
-#// whitelist: kani_biimu, kannagi_rei, karaage, kazakura, ke-ta, kedama_milk
-#// whitelist: kiira, kimagure_blue, kinomiki_nobori, kirisame_mia, kobuichi, kokone_(coconeeeco)
-#// whitelist: konpeto, kouda_suzu, kujou_danbo, kupuru_(hirumamiyuu), kuroshiro00, kurumai
-#// whitelist: lambda_(kusowarota), langbazi, lasto, liclac, lolicom, luxuriou_s
-#// whitelist: m-da_s-tarou, maccha, makigai, makuran, mannack, marup
-#// whitelist: matanukinuki, merlt, milkshakework, mimiga, miyako_(naotsugu), mochiyuki
-#// whitelist: moekibara_fumitake, momozu_komamochi, monchichiwa, mousou_(mousou_temporary), mumu_(mumunyan), munyuu
-#// whitelist: muririn, musouzuki, nakkar, nanaka_mai, naz_(garyuuya), nedia_(nedia_region)
-#// whitelist: neko_miyabi_(artist), nemui_(nemuriyagi), nikku_(ra), nonohara_miki, nyxerebos, ogyadya, om_(nk2007)
-#// whitelist: owasaki, painter-lhb, pelican_(s030), pepatiku, pila-pela, pirason
-#// whitelist: piyodera_mucha, ponsuke_(pon00000), ponta_(velmar), pruzhka_(wardi113), psyche3313, pu-en
+#// whitelist: 2drr, abubu, agwing86, akaashigame, akazawa_red, aki99
+#// whitelist: alkemanubis, amashiro_natsuki, ami_(ammy33), anyannko, arai_togami, arashiya
+#// whitelist: arata_(xin), arisu_kazumi, asa_no_ha_(awayuki), asakuraf, atelier_rinoaex, atg_(wttoo0202)
+#// whitelist: atte_nanakusa, ayanepuna, babu, blue_borscht, bonanza_(artist), boppin
+#// whitelist: boppin_drawing, born-to-die, captain_lamb, cedar_(cedar_japonica), chabo_(fuketsudan), chatsune_(white_lolita)
+#// whitelist: chen_bin, chinomaron, cloneko_(zelmeledf2), comodomodo, cromachina, crumbles
+#// whitelist: cura, dagasi, denfunsan, done_(donezumi), doneru, doribae
+#// whitelist: dove_pixie, emily_(pure_dream), enamiru, ether_core, fugetsu_taku, fujieda_uzuki
+#// whitelist: fujima_takuya, fuyuno_mikan, gachigachi, gemba_(dlfms75), gmkj, go-sai_tamanegi
+#// whitelist: haku89, ham_(points), hanasakichu, hatafuta, healthyman, henreader
+#// whitelist: higeepon, hinainf, hino_hino, hiro_hiroki, huei_nazuki, inuarashi
+#// whitelist: kanabun, kanbaki, kani_biimu, kannagi_rei, karaage, kazakura
+#// whitelist: ke-ta, kedama_milk, kiira, kimagure_blue, kinomiki_nobori, kirisame_mia
+#// whitelist: kobuichi, kokone_(coconeeeco), konpeto, kouda_suzu, kujou_danbo, kupuru_(hirumamiyuu)
+#// whitelist: kuroshiro00, kurumai, lambda_(kusowarota), langbazi, lasto, liclac
+#// whitelist: lolicom, luxuriou_s, m-da_s-tarou, maccha, makigai, makuran
+#// whitelist: mannack, marup, matanukinuki, merlt, milkshakework, mimiga
+#// whitelist: miyako_(naotsugu), mochiyuki, moekibara_fumitake, mogi-dan, momozu_komamochi, monchichiwa
+#// whitelist: mousou_(mousou_temporary), mumu_(mumunyan), munyuu, muririn, musouzuki, nakkar
+#// whitelist: nanaka_mai, nanoningen_(anapoko), naz_(garyuuya), nedia_(nedia_region), neko_miyabi_(artist), nemui_(nemuriyagi)
+#// whitelist: nikku_(ra), nonohara_miki, nyxerebos, ogyadya, om_(nk2007), owasaki
+#// whitelist: painter-lhb, pelican_(s030), pepatiku, pila-pela, pirason, piyodera_mucha
+#// whitelist: ponpon_(tosico), ponsuke_(pon00000), ponta_(velmar), pruzhka_(wardi113), psyche3313, pu-en
 #// whitelist: pumpkinspicelatte, qkracho_(thesdroz), qm, r245, reku, renew_vivi
-#// whitelist: ri-net, rinringyo, rkrk, sakuraba_hikaru_(loveindog), sakurabe_notos, sakutaishi
-#// whitelist: samneco, sazaki_ichiri, sb_(coco1), sc_naru, seneto, setmen
-#// whitelist: shiba_hajime, shida_kazuhiro, shio_(shiofeifei), shiratama_(shiratamaco), shiratama_mochi, shitou
-#// whitelist: shokuyou_mogura, shouji_ayumu, shouu-kun, siera_(sieracitrus), sirokohi, sorairo_len
-#// whitelist: sukage, tachimi_(basue), tai_ichi, takahashi_tetsuya, takamichi, takepoison
-#// whitelist: tamakorogashi, tankcay, tinker_bell_(pixiv_10956015), toketou, toshishikisai, tsubasa_tsubasa
-#// whitelist: tsukiman, tsukimi_(xiaohuasan), tyomimas, umi_suzume, usashiro_mani, utatanecocoa
-#// whitelist: win_opz, yakihebi, yan_(nicknikg), yanagi_yuu, yinpa_(wanone500511), youta
-#// whitelist: yuizaki_kazuya, yukino_minato, yupa, yurarin, yuyumatsu, zankuro
-#// whitelist: zen33n
+#// whitelist: ri-net, rinringyo, rkrk, rodecchi, sakuraba_hikaru_(loveindog), sakurabe_notos
+#// whitelist: sakutaishi, samneco, sazaki_ichiri, sb_(coco1), sc_naru, seneto
+#// whitelist: setmen, shiba_hajime, shida_kazuhiro, shio_(shiofeifei), shiratama_(shiratamaco), shiratama_mochi
+#// whitelist: shitou, shokuyou_mogura, shouji_ayumu, shouu-kun, siera_(sieracitrus), sirokohi
+#// whitelist: sorairo_len, sukage, tachimi_(basue), tai_ichi, takahashi_tetsuya, takamichi
+#// whitelist: takepoison, tamakorogashi, tankcay, tinker_bell_(pixiv_10956015), toketou, toshishikisai
+#// whitelist: tsubasa_tsubasa, tsukiman, tsukimi_(xiaohuasan), tutinako, tyomimas, umi_suzume
+#// whitelist: usashiro_mani, utatanecocoa, win_opz, yakihebi, yan_(nicknikg), yanagi_yuu
+#// whitelist: yinpa_(wanone500511), youta, yuizaki_kazuya, yukino_minato, yupa, yurarin
+#// whitelist: yuyumatsu, zankuro, zen33n
 #// ==========================================
 #// GENERIC WHITELIST
 #// ==========================================
@@ -129,12 +130,16 @@
 #// BLACKLIST STARTS HERE
 #// ==========================================
 
+4chan
 adventure_time
+aereist
 aika_(idwtbamg)
+aino_minako
 ambrosia_(bear)
 american_dad!
 amy_rose
 an_american_tail
+anamadic
 anartistwithamouse
 angelica_pickles
 animal_crossing
@@ -143,7 +148,13 @@ arnkleblarn
 arthur_(series)
 artist:microsd #// Usually would strip the prefix here but safety first since common term
 ashley_(warioware)
+ashoyii
 bad_parenting
+barbie
+barbie_(copyright)
+barbie_brooklyn_roberts
+barbie_it_takes_two
+barbie_roberts
 bart_simpson
 bbmbbf
 becky_botsford
@@ -153,9 +164,14 @@ betty_cooper
 bigdead
 bill_murphy
 bishoujo_senshi_sailor_moon
+bishoujo_senshi_sailor_moon_r
+bishoujo_senshi_sailor_moon_s
+bishoujo_senshi_sailor_moon_stars
+bishoujo_senshi_sailor_moon_supers
 bisonvega
 blastfurnace
 bleedman
+blue_sapphire
 bluey
 bluey_(series)
 bratz
@@ -164,25 +180,35 @@ bufandanocturna
 caillou_(character)
 caillou_(series)
 calamity33
+captaincutie
 carmen_(the_minimight_kids)
 carmine_ink
 carrie-ann_(lena)
+carrie_(mop_goblin)
 cartoon
 cartoon_network
 cartoon_saloon
+cashew_and_belle
+charlie_morningstar
+chibi_usa
 chilaquiles
 chim_(master_cinders)
 cirima
+comic tagme -artist:tagme -character:tagme -series:tagme
 cookie_run_witch's_castle
 crash_bandicoot_(series)
 cultofpersonality
+dark_night_of_the_scarecrow
 darwin_watterson
+dave_strider
 dc_comics
 deadinside97
 dil_pickles
 dinosaur_king
 dipper_pines
 disney
+disventure_camp
+divoom
 dixie_kong
 donkey_kong_(series)
 doompypomp
@@ -191,6 +217,7 @@ doukutsu_monogatari
 dr._proletariat
 dr._stone
 dr_elvira_lux
+drawfag
 dreaming_(artist)
 dreamscreep
 driftingtiger
@@ -209,11 +236,14 @@ family_guy
 fbi_twins
 feetlovers8841
 fellatrix
+ferronniere
 filler_shmazman
 finn_the_human
 fisting
 five_nights_at_freddy's
 five_nights_at_freddy's:_security_breach
+fleckydabnuy
+fleckydabnuy(artist)
 foogyakumo
 forastero
 fortythree
@@ -222,8 +252,17 @@ foxtrot
 fran_(litterbox)
 fran_bow
 frankie_foster
+fullhero
+gegege_no_kitarou
+gegege_no_kitarou_2
+gegege_no_kitarou_3
+gegege_no_kitarou_4
+gegege_no_kitarou_5
+gegege_no_kitarou_6
+gipehtyboo
 gonelson_(artist)
 gonelson_characters
+goodtriangle
 graphite_(artist)
 gravity_falls
 gray_mitchell
@@ -233,11 +272,16 @@ gumball_watterson
 gyoubu_ippei
 haibara_ai
 hal_(artist)
+hantoumei_namako
 harriet_the_spy
+hazbin_hotel
 heckie
+hellaverse
+helluva_boss
 high_ware
 hilda_(hilda)
 hilda_(series)
+hino_rei
 homer_simpson
 homestuck
 hoshime
@@ -250,14 +294,23 @@ instructions
 invincible_(series)
 jaredsteeletype
 jerseydevil
+jjl_(artist)
 johnny_test
 junajuice
+jurassiczalar
 kaijuu_(uchuukaijuu1917)
+kaiou_michiru
 kaze_no_klonoa
+keramagath
 kevin_beecham
 khelio77
+kiana_mai
+kiki_(jurassiczalar)
 kimberly_harris
 king_ghost-oh
+kino_makoto
+knight_white
+koni_urameshi
 kouzuki_momonosuke
 kyojiri_loli
 kyojiri_shota
@@ -275,12 +328,18 @@ lisa_loud
 lisa_simpson
 little_nightmares
 littlerager
+loona_(helluva_boss)
 looney_tunes
 lovin_sis
+luna-p
+lunime
+luo_bao_bei
 mabel_pines
 mac_(foster's)
 madoc
 maggie_simpson
+manaa
+mandy_(fullhero)
 mangamaster
 maniacbox
 manny_rivera
@@ -288,21 +347,26 @@ marge_simpson
 mario_(series)
 marshall_lee
 marvel
+marylee_williams
 mato_spectoru
+mattel
 maureen_murphy
 maximumpingas
 mechspazer
 meet_the_robinsons
 megasweet
+meiou_setsuna
 meitantei_conan
 microsd_(pibo)
 miguelnydraws03
 minamoto_shizuka
 mindgasmyt
+mindy_sterngood
 minnie_(the_rookwood_sister)
 miraculous_ladybug
 misaeldm
 mitzi_(ajmarekart)
+mizuno_ami
 monkey_d._luffy
 moral_orel
 mr_snowkell
@@ -322,16 +386,21 @@ neo_sariphy
 nfr
 nickelodeon
 nico_robin
+odd_nation_cartoons
 odinboy666
 ohno
 one_piece
 p1c0_p1c0
 paige_fox
 palcomix
+palworld -chillet_(palworld)
 pantheon
 pantheon_(show)
 parsnip_(game)
 pbs_kids
+peanuts
+peanuts_(comic)
+peanuts_omr
 pencil_bolt
 penny_(jurassiczalar)
 pennywise
@@ -347,6 +416,7 @@ primos_(disney)
 protagonist_(gonelson)
 provo
 punch-out!!
+puniru_wa_kawaii_slime
 ranma_1/2
 rekizik
 rekizik_(theapeboy)
@@ -356,11 +426,23 @@ rodent -seiken_densetsu
 rokku-d
 ronnie_anne_santiago
 rugrats
+rynn_jacobs
 saglinger
+sailor_chibi_moon
+sailor_jupiter
+sailor_mars
+sailor_mercury
+sailor_moon
+sailor_pluto
+sailor_saturn
+sailor_senshi
+sailor_venus
+sarah_colton
 sciurid
 sdcharm
 seikkeizu
 senninha
+senpaibuns
 serial_experiments_lain
 sesame_street
 shadman
@@ -368,6 +450,7 @@ shgurr
 shuunaswiss
 sienna_contiello
 sjsj_10
+skorpion_vz._61
 skullgirls
 snartob
 snk
@@ -377,30 +460,41 @@ sonic_the_hedgehog
 south_park
 spakka5
 spermageddon
+squirrel_and_hedgehog
+star-shaped_hair
+star_guardian:_guardian_of_the_stars
+star_hair_bun
 stephanie_meanswell
 steven_quartz_universe
 steven_universe
 stewie_griffin
+suecovsky
+super_sailor_chibi_moon
 sweethex
 tails_(sonic)
 takaneru
 tater_ramirez_humphrey
 teenx
+ten'ou_haruka
 the_amazing_world_of_gumball
 the_boondocks
+the_little_girl_who_lives_down_the_lane
 the_loud_house
 the_mitchells_vs._the_machines
 the_rookwood_sister_(king_ghost-oh)
 the_secret_of_kells
 the_simpsons
 theapeboy_(artist)
+thefirstofus
 thepsychodog
 tkgsize
 tommy_pickles
+tomoe_hotaru
 toon_(style)
 torakichi_(ebitendon)
 trafalgar_law
 treatartstudios
+tsukino_usagi
 ushiking
 uzumaki_boruto
 uzumaki_naruto
@@ -418,8 +512,13 @@ weebecca_(lena)
 wilbur_robinson
 willy_duwitt
 xierra099
+xlqdi2mh2v1bhgd
 y0dare
 yanmaa_(6664)
+yokappa
 yoshimi
+youtube
 zeklullaby
+zinnyz_(artist)
+zira_(idwtbamg)
 zucanki
