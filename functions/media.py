@@ -50,7 +50,7 @@ def get_image_resolution(image_path: Path):
         if len(parts) >= 2:
             return int(parts[0]), int(parts[1])
     except Exception as e: # pylint: disable=broad-exception-caught
-        print(f"Error getting resolution for {image_path}: {e}")
+        print(f"\nError getting resolution for {image_path}: {e}")
 
     return None, None
 
@@ -62,7 +62,7 @@ def process_webp(task):
         try:
             extract_video_thumbnail(src_path, dst_path)
         except subprocess.CalledProcessError as e:
-            print(f"Error creating video thumbnail for {src_path}! ({e})")
+            print(f"\nError creating video thumbnail for {src_path}! ({e})")
     else:
         try:
             convert_to_webp(src_path, dst_path)
@@ -70,7 +70,7 @@ def process_webp(task):
             try:
                 fallback_to_webp(src_path, dst_path)
             except Exception as e: # pylint: disable=broad-exception-caught
-                print(f"Error creating thumbnail of {src_path}! ({type(e).__name__}: {e})")
+                print(f"\nError creating thumbnail of {src_path}! ({type(e).__name__}: {e})")
 
 def convert_to_webp(src_path: Path, dst_path: Path):
     """Convert images using ImageMagick."""
@@ -105,7 +105,7 @@ def get_video_resolution(file_path: Path):
             parts = output.split('\n', maxsplit=1)[0].split('x')
             return int(parts[0]), int(parts[1])
     except Exception as e: #pylint: disable=broad-exception-caught
-        print(f"Error getting resolution for {file_path}: {e}")
+        print(f"\nError getting resolution for {file_path}: {e}")
     return None, None
 
 def extract_video_thumbnail(src_path: Path, dst_path: Path):
