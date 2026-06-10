@@ -252,8 +252,8 @@ def compile_metadata(image, post, mappings, args, dynamic_mappings=None):
 def process_image_result(image, res_data, args, mappings, dynamic_mappings):
     """Processes a single resolved file."""
     if res_data.exists == "error":
-        print(f"{image} skipped due to error!")
-        return None, None
+        print(f"\n{image} skipped due to error!")
+        return None, None, ("corrupt or unreadable", image.name)
 
     if args.image_path and image.is_relative_to(args.image_path):
         base_path = Path(args.image_path)
@@ -264,7 +264,7 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
 
     if res_data.exists:
         thumb_file = get_thumbnail_path(image, args)
-        return None, str(thumb_file) if args.thumbnail else None
+        return None, str(thumb_file) if args.thumbnail else None, None
 
     tag_str, rating, tag_list, best_source = compile_metadata(
         image, res_data.post, mappings, args, dynamic_mappings
@@ -290,7 +290,7 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
                     break
 
             if drop_image:
-                return None, None  # Silently skip this image
+                return None, None, ("blacklist", image.name)  # Silently skip this image
 
     if args.update_cache:
         save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
@@ -302,7 +302,7 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
         rating,
         str(thumb_path) if args.thumbnail else '""'
     ]
-    return row, None
+    return row, None, None
 
 def print_summary(args):
     """Prints run configuration."""
@@ -325,6 +325,27 @@ def write_output(base_path, rows):
         writer = csv.writer(f, quoting=csv.QUOTE_ALL)
         writer.writerows(rows)
     print(f"\n[✓] Shimmie CSV written to {csv_path}")
+
+def write_skips_log(base_path, skips):
+    """Writes a log of skipped files grouped by reason."""
+    if not skips:
+        return
+
+    log_path = Path(base_path) / "skipped_files.txt"
+    from collections import defaultdict
+    grouped = defaultdict(list)
+
+    for reason, filename in skips:
+        grouped[reason].append(filename)
+
+    with log_path.open("w", encoding="utf-8") as f:
+        for reason, filenames in grouped.items():
+            f.write(f"=== Skipped due to {reason} ===\n")
+            for name in sorted(filenames):
+                f.write(f"{name}\n")
+            f.write("\n")
+
+    print(f"[INFO] Skipped files log written to {log_path}")
 
 def resolve_batch_metadata(batch, args, dbuser):
     """Handles the IO-bound task of resolving posts for a batch."""
@@ -358,11 +379,15 @@ def _process_single_batch(batch, maps, args, dbuser, existing_thumbs):
     results = resolve_batch_metadata(batch, args, dbuser)
     batch_rows = []
     thumb_tasks = []
+    batch_skips = []
 
     for img, res_tuple in zip(batch, results):
-        row, thumb_key = process_image_result(
+        row, thumb_key, skip_info = process_image_result(
             img, ResolutionData(*res_tuple), args, mappings, dynamic_mappings
         )
+
+        if skip_info:
+            batch_skips.append(skip_info)
 
         if thumb_key:
             existing_thumbs.add(thumb_key)
@@ -374,22 +399,24 @@ def _process_single_batch(batch, maps, args, dbuser, existing_thumbs):
                 if str(t_src) not in existing_thumbs and not t_src.is_file():
                     thumb_tasks.append((img, t_src))
 
-    return batch_rows, thumb_tasks
+    return batch_rows, thumb_tasks, batch_skips
 
 def process_batches(batches, mappings, args, dynamic_mappings, dbuser):
     """Handles the batch processing logic."""
     csv_rows = []
     existing_thumbs = set()
+    all_skips = []
     maps = (mappings, dynamic_mappings)
 
     for batch in tqdm.tqdm(batches, desc="Image batches", position=1, leave=False):
-        batch_rows, thumb_tasks = _process_single_batch(
+        batch_rows, thumb_tasks, batch_skips = _process_single_batch(
             batch, maps, args, dbuser, existing_thumbs
         )
         csv_rows.extend(batch_rows)
+        all_skips.extend(batch_skips)
         generate_thumbnails(thumb_tasks, args.threads)
 
-    return csv_rows
+    return csv_rows, all_skips
 
 def run_mining_mode(args, files, mappings):
     """Isolates the mining phase to reduce local variables in run()."""
@@ -461,9 +488,13 @@ def run(args):
         dynamic_mappings = load_dynamic_mappings(args.use_map_csv)
         print(f"[INFO] Loaded {len(dynamic_mappings)} dynamic tag mappings.")
 
-    csv_rows = process_batches(batches, mappings, args, dynamic_mappings, dbuser)
+    csv_rows, all_skips = process_batches(batches, mappings, args, dynamic_mappings, dbuser)
     csv_rows.sort()
 
     out_dir = args.image_path if args.image_path else args.video_path
     write_output(out_dir, csv_rows)
+
+    if all_skips:
+        write_skips_log(out_dir, all_skips)
+
     print(f"\n[✓] Processed {len(files)} file(s) across {len(batches)} batch(es).")
