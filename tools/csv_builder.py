@@ -49,12 +49,12 @@ def collect_files(image_path, video_path, batch_size):
     if image_path:
         img_dir = Path(image_path)
         if img_dir.is_dir():
-            files.extend([f for f in img_dir.rglob("*") if f.suffix.lower() in ALLOWED_EXTS])
+            files.extend([f for f in img_dir.rglob("*") if f.is_file() and f.suffix.lower() in ALLOWED_EXTS and f.stat().st_size > 0])
 
     if video_path:
         vid_dir = Path(video_path)
         if vid_dir.is_dir():
-            files.extend([f for f in vid_dir.rglob("*") if f.suffix.lower() in VIDEO_EXTS])
+            files.extend([f for f in vid_dir.rglob("*") if f.is_file() and f.suffix.lower() in VIDEO_EXTS and f.stat().st_size > 0])
 
     grouped_files = {}
     for f in files:
