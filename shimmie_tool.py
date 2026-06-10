@@ -288,10 +288,10 @@ def main():
         "download": images.run,
         "import-wikis": wiki.import_danbooru,
         "precache": db.precache_posts,
-        "purge": db.purge_images
+        "purge": db.purge_images,
         "sync-wikis": wiki.sync_to_shimmie,
         "update-ratings": db.update_ratings,
-        "wiki-index": wiki.create_index,
+        "wiki-index": wiki.create_index
     }
 
     if args.command == "make-csv":

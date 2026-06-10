@@ -1,3 +1,4 @@
+# pylint: disable=line-too-long,missing-function-docstring,too-many-locals,too-many-branches,too-many-statements
 """Tool to automatically generate missing sidecars using AI and DB state."""
 import os
 import shutil
@@ -49,7 +50,7 @@ def run_auto_tagger(args):
         else:
             unknown_images.append(img)
 
-    print(f"\n[INFO] Segregation complete:")
+    print("\n[INFO] Segregation complete:")
     print(f"  - Known (Receives 'tagai:' shield): {len(known_images)}")
     print(f"  - Unknown (Fully trusted AI tags):  {len(unknown_images)}\n")
 
