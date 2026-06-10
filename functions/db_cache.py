@@ -1,3 +1,4 @@
+# pylint: disable=too-many-locals,broad-exception-caught
 """Database and caching functions."""
 import os
 import re
@@ -69,17 +70,22 @@ def resolve_post(image: Path, shimmie_path, skip_existing, dbuser, cache) -> tup
                 px_res = cur.fetchone()
                 px_hash = px_res[0] if px_res else None
 
-        if not px_hash:
-            px_hash = md5 if is_video else compute_danbooru_pixel_hash(image)
+        try:
+            if not px_hash:
+                px_hash = md5 if is_video else compute_danbooru_pixel_hash(image)
 
-        if not post:
-            cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
-            if row := cur.fetchone():
-                post = row_to_post_dict(row)
-            else:
-                add_post_to_cache(md5, px_hash, cache)
+            if not post:
                 cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
-                post = row_to_post_dict(cur.fetchone())
+                if row := cur.fetchone():
+                    post = row_to_post_dict(row)
+                else:
+                    add_post_to_cache(md5, px_hash, cache)
+                    cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
+                    post = row_to_post_dict(cur.fetchone())
+        except Exception as e:
+            print(f"\n[ERROR] Skipping corrupt or unreadable image: {image}")
+            print(f"        Reason: {type(e).__name__} - {e}")
+            return image, {}, md5, None, "error"
 
         exists = False
         if skip_existing and shimmie_path:
