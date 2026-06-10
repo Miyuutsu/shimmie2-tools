@@ -1,8 +1,9 @@
-# pylint: disable=too-many-lines
+# pylint: disable=too-many-lines,line-too-long,too-many-locals,too-many-branches
 """
 The 'too big to manage again' edition.
 Image Downloader with Threaded API, Subfolders, Checkpoints, WAL Support, and Error Logging.
 """
+import hashlib
 import time
 import sqlite3
 import re
@@ -487,18 +488,39 @@ def _perform_single_download(task, post, file_url, out_path):
             )
             return f"[Error] ID {post_id} returned HTML (blocked)."
 
+        expected_size = int(resp.headers.get('Content-Length', 0))
+
         with open(out_path, 'wb') as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 if SHUTDOWN_EVENT.is_set():
                     return "[Aborted] Shutdown triggered."
                 f.write(chunk)
 
-        if out_path.stat().st_size < 1024 and 'text/html' not in content_type:
+        actual_size = out_path.stat().st_size
+
+        if actual_size < 1024 and 'text/html' not in content_type:
             _log_error(
                 task.output_path, task.source_context, post_id,
                 "File too small (<1KB). Suspicious."
             )
             return f"[Suspicious] ID {post_id} file is suspiciously small."
+
+        # --- NEW: INTEGRITY CHECK LOGIC ---
+        if expected_size > 0 and actual_size != expected_size:
+            # Size mismatch detected! Fallback to MD5 verification to ensure it's not just gzip compression.
+            expected_md5 = post.get('md5')
+            if expected_md5:
+                hasher = hashlib.md5()
+                with open(out_path, 'rb') as f:
+                    for chunk in iter(lambda: f.read(8192), b""):
+                        hasher.update(chunk)
+
+                if hasher.hexdigest() != expected_md5:
+                    # Throwing an OSError cleanly triggers your existing retry loop
+                    raise OSError("Truncated download: Size mismatch AND MD5 failed.")
+            else:
+                # If the post data doesn't have an MD5 to fallback on, trust the Content-Length failure
+                raise OSError(f"Truncated download: Expected {expected_size} bytes, got {actual_size}.")
 
         return out_path
 
