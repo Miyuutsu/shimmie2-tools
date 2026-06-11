@@ -69,7 +69,7 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--update-cache", action="store_true", help="Flag to update the cache")
     parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map")
     parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
-    parser.add_argument("--blacklist", help="Text file containing tags to drop (one per line)")
+    parser.add_argument("--blacklist", default="blacklist.txt", help="Text file containing tags to drop (one per line)")
     return parser
 
 def _add_wiki_index_parser(subparsers):
@@ -257,7 +257,7 @@ def _handle_make_csv(args, parser_csv):
         parser_csv.error("--spath is required when --skip-existing is set.")
 
     if args.pretags:
-        args.pretags = [t.strip() for t in args.pretags.split(",") if t.strip()]
+        args.pretags = [t.strip().lower() for t in args.pretags.split(",") if t.strip()]
     else:
         args.pretags = []
 

@@ -1,6 +1,6 @@
-# pylint: disable=too-many-locals,line-too-long,too-many-branches
+# pylint: disable=too-many-locals,line-too-long,too-many-branches,too-many-statements
 """This is designed to help with batch importing into shimmie2"""
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from pathlib import Path
 import csv
@@ -8,7 +8,6 @@ import re
 import sqlite3
 import warnings
 import tqdm
-
 from PIL import Image
 
 from functions.common import VIDEO_EXTS
@@ -271,11 +270,19 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
     )
 
     if getattr(args, 'blacklist_rules', None):
-        # Build an evaluation set that handles your broad sweep (stripping prefixes)
         clean_tags = set(tag_list)
         for t in tag_list:
-            if not t.startswith(("tagai:", "booru:")) and ":" in t:
-                clean_tags.add(t.split(":", 1)[1])
+            if not t.startswith(("tagai:", "booru:")):
+                clean_tags.add(t)
+
+                base_tag = t
+
+                if ":" in t:
+                    base_tag = t.split(":", 1)[1]
+                    clean_tags.add(base_tag)
+
+                if "_(" in base_tag and base_tag.endswith(")"):
+                    clean_tags.add(base_tag.split("_(", 1)[0])
 
         # --- The Immunity Shield ---
         if not (args.preserve_tags and any(pt in clean_tags for pt in args.preserve_tags)):
@@ -332,7 +339,6 @@ def write_skips_log(base_path, skips):
         return
 
     log_path = Path(base_path) / "skipped_files.txt"
-    from collections import defaultdict
     grouped = defaultdict(list)
 
     for reason, filename in skips:
@@ -441,8 +447,11 @@ def run(args):
     print_summary(args)
     args.blacklist_rules = []
     args.preserve_tags = set()
-    if getattr(args, 'blacklist', None) and Path(args.blacklist).is_file():
-        for line in Path(args.blacklist).read_text(encoding='utf-8').splitlines():
+    if getattr(args, 'blacklist', None):
+        blacklist_path = Path(args.blacklist)
+        if not blacklist_path.is_file():
+            raise FileNotFoundError(f"\n[CRITICAL ERROR] BLACKLIST NOT FOUND AT: {blacklist_path.resolve()}")
+        for line in blacklist_path.read_text(encoding='utf-8').splitlines():
             raw_line = line.strip().lower()
 
             if raw_line.replace(" ", "").startswith("#//whitelist:"):
