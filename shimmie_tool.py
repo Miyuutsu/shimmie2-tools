@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from tools import csv_builder, db, images, wiki, ai_auditor, auto_tagger
+from tools import csv_builder, db, images, wiki, ai_auditor, auto_tagger, extractor
 
 from functions.common import get_cpu_threads
 
@@ -71,6 +71,16 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
     parser.add_argument("--blacklist", default="blacklist.txt", help="Text file containing tags to drop (one per line)")
     return parser
+
+def _add_extractor_parser(subparsers):
+    """Adds the extract-chars command."""
+    parser = subparsers.add_parser("extract-chars", help="Extract 1 image per solo character to a local dir")
+    parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
+    parser.add_argument("--output", required=True, help="Output directory for copied images")
+    parser.add_argument("--require-tags", nargs="+", default=["solo"], help="Tags that MUST be present (Default: solo)")
+    parser.add_argument("--min-pixels", type=int, default=1638400, help="Minimum total pixels (Default: 1638400 for 1280x1280)")
+    parser.add_argument("--uchar", action="store_true", help="Enable extracting only 1 image per character (Default: false)")
+    parser.add_argument("--uartist", action="store_true", help="Enable extracting only 1 image per artist (Default: false)")
 
 def _add_wiki_index_parser(subparsers):
     """Adds the wiki-index command."""
@@ -240,6 +250,7 @@ def setup_parser():
     _add_audit_ratings_parser(subparsers)
     _add_auto_tag_parser(subparsers)
     _add_csv2sqlite_parser(subparsers)
+    _add_extractor_parser(subparsers)
     _add_download_parser(subparsers)
     _add_import_wikis_parser(subparsers)
     _add_precache_parser(subparsers)
@@ -286,6 +297,7 @@ def main():
         "auto-tag": auto_tagger.run_auto_tagger,
         "csv2sqlite": db.csv_to_sqlite,
         "download": images.run,
+        "extract-chars": extractor.run_extractor,
         "import-wikis": wiki.import_danbooru,
         "precache": db.precache_posts,
         "purge": db.purge_images,
