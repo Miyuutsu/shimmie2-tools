@@ -134,7 +134,6 @@ def run_extractor(args):
             if not char_tags:
                 continue
 
-            is_solo = len(char_tags) == 1
             artist_tags = [t for t in tags if t.startswith("artist:")]
             has_valid_artist = len(artist_tags) == 1 and "artist:tagme" not in tags
 
@@ -162,9 +161,6 @@ def run_extractor(args):
                     break
 
             for c_tag in char_tags:
-                if not is_solo:
-                    character_tracking[c_tag]['reasons']['Multiple characters in image'] += 1
-                    continue
                 if not has_req_tags:
                     character_tracking[c_tag]['reasons']['Missing required positive tags'] += 1
                     continue
