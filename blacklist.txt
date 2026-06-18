@@ -47,7 +47,6 @@
 #// ==========================================
 #// GENERIC WHITELIST
 #// ==========================================
-#// whitelist: cosplay #// Safety measure for inter-series, inter-character references, maybe too broad
 #// whitelist: banned_artist #// This IS for preservation to some degree, afterall...
 #// whitelist: animated,animated_gif,video #// This isn't properly handled at this time so retain all
 #// Need to find a way to filter down precure and doremi some...
@@ -191,6 +190,7 @@ blue_sapphire
 bluey
 bluey_(series)
 bob's_burgers
+boruto:_naruto_next_generations
 borvar
 bratz
 brawl_stars
@@ -351,6 +351,7 @@ ilikestuffdoyou
 illegalrx
 instructions
 invincible_(series)
+jaggy_lines
 jaredsteeletype
 jeffybunny
 jeffybunny_(artist)
@@ -619,11 +620,13 @@ the_amazing_world_of_gumball
 the_boondocks
 the_coffin_of_andy_and_leyley
 the_flintstones
+the_grim_adventures_of_billy_&_mandy
 the_little_girl_who_lives_down_the_lane
 the_little_mermaid
 the_loud_house
 the_mitchells_vs._the_machines
 the_mystery
+the_oblongs
 the_rookwood_sister_(king_ghost-oh)
 the_secret_of_kells
 the_simpsons
