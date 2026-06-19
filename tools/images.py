@@ -76,6 +76,7 @@ class DownloadTask(NamedTuple):
     source_context: str
     cookies: Dict
     headers: Dict
+    blacklist: set
 
 class V1PostsAPI:
     """Client for the v1 Posts API."""
@@ -412,6 +413,38 @@ def _construct_tag_string(post):
 
     return "\n".join(final_tags)
 
+def _load_blacklist(filepath: Optional[str]) -> set:
+    """Reads the blacklist file into a memory set."""
+    if not filepath:
+        return set()
+    path = Path(filepath)
+    if not path.exists():
+        return set()
+    with open(path, 'r', encoding='utf-8') as f:
+        # Ignore empty lines and comments
+        return {line.strip().lower() for line in f if line.strip() and not line.startswith('#')}
+
+def _is_blacklisted(post: dict, blacklist: set) -> bool:
+    """Checks if any of the post's tags exist in the blacklist."""
+    if not blacklist:
+        return False
+
+    tag_string = post.get('tag_string', '')
+    if not tag_string:
+        tag_string = _construct_tag_string(post)
+
+    post_tags = set()
+    # Replace newlines (from _construct_tag_string) with spaces to separate tags
+    for t in tag_string.replace('\n', ' ').split():
+        clean_tag = t.strip().lower()
+        post_tags.add(clean_tag)
+        # If it's a namespaced tag (e.g., artist:bkub), add the bare tag ('bkub') too
+        # so the user's blacklist catches it either way.
+        if ':' in clean_tag:
+            post_tags.add(clean_tag.split(':', 1)[-1])
+
+    return bool(post_tags.intersection(blacklist))
+
 def _setup_file_path(task, post):
     """Handles path determination and initial setup."""
     post_id = post['id']
@@ -579,6 +612,11 @@ def _download_file(task, db_ctx):
     existing_msg = _check_existing(task, post, out_path, db_ctx)
     if existing_msg:
         return existing_msg
+
+    if _is_blacklisted(post, task.blacklist):
+        # Fake a success in the database so it gets skipped on future runs
+        _record_success(task, post.get('md5', ''), out_path, db_ctx)
+        return f"[Skip] ID {post['id']} ignored (Blacklisted)."
 
     return _attempt_download(task, post, file_url, out_path)
 
@@ -1143,7 +1181,7 @@ def _configure_download(args):
         sitename=sitename
     ), start_page, start_id, sitename, root_output_path
 
-def _prepare_tasks(all_posts, args, root_output_path, sitename, ctx):
+def _prepare_tasks(all_posts, args, root_output_path, sitename, ctx, blacklist_tags):
     """Generates and queues all DownloadTask objects."""
     cookies = requests.utils.dict_from_cookiejar(ctx.session.cookies)
     headers = dict(ctx.session.headers)
@@ -1156,7 +1194,8 @@ def _prepare_tasks(all_posts, args, root_output_path, sitename, ctx):
             search_query=ctx.tags,
             source_context=p.get('_source_page', 'Unknown'),
             cookies=cookies,
-            headers=headers
+            headers=headers,
+            blacklist=blacklist_tags
         ))
     return tasks
 
@@ -1241,7 +1280,11 @@ def run(args):
     if g_conn:
         g_conn.close()
 
-    tasks = _prepare_tasks(all_posts, args, root_output_path, sitename, ctx)
+    blacklist_tags = _load_blacklist(getattr(args, 'blacklist', None))
+    if blacklist_tags:
+        print(f"🚫 Loaded {len(blacklist_tags)} tags from blacklist.")
+
+    tasks = _prepare_tasks(all_posts, args, root_output_path, sitename, ctx, blacklist_tags)
 
     print("\n--- Starting Downloads (Ctrl+C to stop safely) ---")
 

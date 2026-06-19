@@ -166,6 +166,8 @@ def _add_download_parser(subparsers):
         "--unless-tags", help="If matched, ignores the filter tags"
     )
 
+    parser.add_argument("--blacklist", default="blacklist.txt", help="Text file containing tags to permanently skip (one per line)")
+
     parser.add_argument(
         "--base-url", default="https://danbooru.donmai.us", help="Booru base URL"
     )
