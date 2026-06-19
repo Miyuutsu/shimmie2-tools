@@ -13,39 +13,39 @@ VALID_NAMESPACES = {
     "copyright", "studio", "pool", "lore", "species"
 }
 
-def _write_extraction_report(out_dir, character_tracking, selected_images):
-    """Generates a detailed text report of successes and skipped characters."""
-    report_path = out_dir / "extraction_report.txt"
-    with open(report_path, "w", encoding="utf-8") as rf:
-        rf.write("=== EXTRACTION REPORT ===\n\n")
-        rf.write(f"Total Successfully Extracted: {len(selected_images)}\n")
-        rf.write("--- SUCCESSFULLY EXTRACTED ---\n")
+#def _write_extraction_report(out_dir, character_tracking, selected_images):
+#    """Generates a detailed text report of successes and skipped characters."""
+#    report_path = out_dir / "extraction_report.txt"
+#    with open(report_path, "w", encoding="utf-8") as rf:
+#        rf.write("=== EXTRACTION REPORT ===\n\n")
+#        rf.write(f"Total Successfully Extracted: {len(selected_images)}\n")
+#        rf.write("--- SUCCESSFULLY EXTRACTED ---\n")
 
-        selected_images.sort(key=lambda x: x['char_name'])
-        for cand in selected_images:
-            char_clean = cand['char_name'].replace("character:", "")
-            artist_clean = cand['artist'].replace("artist:", "@")
-            rf.write(f"[{char_clean}] -> Artist: {artist_clean} | File: {cand['dest_filename']}\n")
+#        selected_images.sort(key=lambda x: x['char_name'])
+#        for cand in selected_images:
+#            char_clean = cand['char_name'].replace("character:", "")
+#            artist_clean = cand['artist'].replace("artist:", "@")
+#            rf.write(f"[{char_clean}] -> Artist: {artist_clean} | File: {cand['dest_filename']}\n")
 
-        rf.write("\n\n--- SKIPPED CHARACTERS ---\n")
-        skipped_chars = [c for c, d in character_tracking.items() if not d['extracted']]
-        skipped_chars.sort()
+#        rf.write("\n\n--- SKIPPED CHARACTERS ---\n")
+#        skipped_chars = [c for c, d in character_tracking.items() if not d['extracted']]
+#        skipped_chars.sort()
 
-        rf.write(f"Total Skipped Characters: {len(skipped_chars)}\n")
+#        rf.write(f"Total Skipped Characters: {len(skipped_chars)}\n")
 
-        for sc in skipped_chars:
-            data = character_tracking[sc]
-            char_clean = sc.replace("character:", "")
-            rf.write(f"\n{char_clean}:\n")
+#        for sc in skipped_chars:
+#            data = character_tracking[sc]
+#            char_clean = sc.replace("character:", "")
+#            rf.write(f"\n{char_clean}:\n")
 
-            for reason, count in sorted(data['reasons'].items(), key=lambda x: x[1], reverse=True):
-                rf.write(f"  - {count} images skipped: {reason}\n")
+#            for reason, count in sorted(data['reasons'].items(), key=lambda x: x[1], reverse=True):
+#                rf.write(f"  - {count} images skipped: {reason}\n")
 
-            if data['available_artists']:
-                artists = [a.replace("artist:", "@") for a in sorted(data['available_artists'])]
-                rf.write(f"  -> Artist Conflict: Competed for and lost {', '.join(artists)}\n")
+#            if data['available_artists']:
+#                artists = [a.replace("artist:", "@") for a in sorted(data['available_artists'])]
+#                rf.write(f"  -> Artist Conflict: Competed for and lost {', '.join(artists)}\n")
 
-    print(f"\n[✓] Detailed extraction report written to {report_path.resolve()}")
+#    print(f"\n[✓] Detailed extraction report written to {report_path.resolve()}")
 
 def run_extractor(args):
     """Main execution flow for extracting character images."""
@@ -188,7 +188,7 @@ def run_extractor(args):
 
     if not valid_chars:
         print("\n[!] No characters passed the tag filters.")
-        _write_extraction_report(out_dir, character_tracking, [])
+        #_write_extraction_report(out_dir, character_tracking, [])
         return
 
     # Keep sorting by available artists just in case constraints are toggled on,
@@ -297,4 +297,4 @@ def run_extractor(args):
 
         copied_count += 1
 
-    _write_extraction_report(out_dir, character_tracking, selected_images)
+    #_write_extraction_report(out_dir, character_tracking, selected_images)
