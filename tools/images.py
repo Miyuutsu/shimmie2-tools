@@ -523,11 +523,18 @@ def _perform_single_download(task, post, file_url, out_path):
 
         expected_size = int(resp.headers.get('Content-Length', 0))
 
+        abort_triggered = False
         with open(out_path, 'wb') as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 if SHUTDOWN_EVENT.is_set():
-                    return "[Aborted] Shutdown triggered."
+                    abort_triggered = True
+                    break
                 f.write(chunk)
+
+        if abort_triggered:
+            if out_path.exists():
+                out_path.unlink()
+            return f"[Aborted] ID {post_id} cancelled mid-download and cleaned up."
 
         actual_size = out_path.stat().st_size
 
