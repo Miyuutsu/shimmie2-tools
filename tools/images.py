@@ -1212,7 +1212,9 @@ def _monitor_and_execute_tasks(tasks, args, db_path):
             print(f"[{completed + 1}/{len(tasks)}] {res}")
             completed += 1
 
-            if res.startswith("[Skip]") or res.startswith("[Found]"):
+            if "(Blacklisted)" in res:
+                pass
+            elif res.startswith("[Skip]") or res.startswith("[Found]"):
                 consecutive_skips += 1
             else:
                 consecutive_skips = 0
