@@ -7,19 +7,6 @@ from tools import csv_builder, db, images, wiki, ai_auditor, auto_tagger, extrac
 
 from functions.common import get_cpu_threads
 
-def _add_auto_tag_parser(subparsers):
-    """Adds the auto-tag command."""
-    parser = subparsers.add_parser("auto-tag", help="Auto-generate missing sidecars using AI")
-    parser.add_argument("--images", required=True, help="Path to target images directory")
-    parser.add_argument("--spath", help="Path to Shimmie root (for Postgres DB checking)")
-    parser.add_argument("--dir-as-artist", action="store_true", help="Use parent directory name as an un-prefixed artist tag")
-
-    # Model and Thresholds
-    parser.add_argument("--model", choices=["vit", "vit-large", "swinv2", "convnext", "eva02"], default="eva02", help="SmilingWolf model to use")
-    parser.add_argument("--batch", type=int, default=10, help="Batch size for AI inference")
-    parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag threshold")
-    parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag threshold")
-
 def _add_audit_ratings_parser(subparsers):
     """Adds the audit-ratings command."""
     parser = subparsers.add_parser("audit-ratings", help="Audit safe images using AI Tagger submodule")
@@ -40,6 +27,19 @@ def _add_audit_ratings_parser(subparsers):
     parser.add_argument("--batch", type=int, default=20, help="Batch size for the AI inference")
     parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag confidence threshold")
     parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag confidence threshold")
+
+def _add_auto_tag_parser(subparsers):
+    """Adds the auto-tag command."""
+    parser = subparsers.add_parser("auto-tag", help="Auto-generate missing sidecars using AI")
+    parser.add_argument("--images", required=True, help="Path to target images directory")
+    parser.add_argument("--spath", help="Path to Shimmie root (for Postgres DB checking)")
+    parser.add_argument("--dir-as-artist", action="store_true", help="Use parent directory name as an un-prefixed artist tag")
+
+    # Model and Thresholds
+    parser.add_argument("--model", choices=["vit", "vit-large", "swinv2", "convnext", "eva02"], default="eva02", help="SmilingWolf model to use")
+    parser.add_argument("--batch", type=int, default=10, help="Batch size for AI inference")
+    parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag threshold")
+    parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag threshold")
 
 def _add_csv_parser(subparsers):
     """Adds the make-csv command."""
@@ -72,57 +72,6 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--blacklist", default="blacklist.txt", help="Text file containing tags to drop (one per line)")
     return parser
 
-def _add_extractor_parser(subparsers):
-    """Adds the extract-chars command."""
-    parser = subparsers.add_parser("extract-chars", help="Extract 1 image per solo character to a local dir")
-    parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
-    parser.add_argument("--output", required=True, help="Output directory for copied images")
-    parser.add_argument("--require-tags", nargs="+", default=["solo"], help="Tags that MUST be present (Default: solo)")
-    parser.add_argument("--min-pixels", type=int, default=1638400, help="Minimum total pixels (Default: 1638400 for 1280x1280)")
-    parser.add_argument("--uchar", action="store_true", help="Enable extracting only 1 image per character (Default: false)")
-    parser.add_argument("--uartist", action="store_true", help="Enable extracting only 1 image per artist (Default: false)")
-
-def _add_wiki_index_parser(subparsers):
-    """Adds the wiki-index command."""
-    parser = subparsers.add_parser(
-        "wiki-index", help="Create static HTML wiki site"
-    )
-    parser.add_argument("--spath", help="Path to shimmie root (Optional for offline mode)")
-    parser.add_argument("--output", type=str, default="wiki_html", help="Output directory path")
-    parser.add_argument("--sort", action="store_true", help="Enable sorting of tags in index")
-    parser.add_argument(
-        "--order", type=str, default="c,s,a,g", help="Sort order (Default: c,s,a,g)"
-    )
-
-def _add_import_wikis_parser(subparsers):
-    """Adds the import-wikis command."""
-    parser = subparsers.add_parser("import-wikis", help="Import Danbooru wikis")
-    parser.add_argument("--spath", help="Path to shimmie root (Optional for cache-only mode)")
-    parser.add_argument("--start-page", type=int, default=1)
-    parser.add_argument("--pages", type=int, default=200)
-    parser.add_argument("--update-existing", action="store_true")
-    parser.add_argument(
-        "--convert",
-        choices=["raw", "markdown", "html", "shimmie"],
-        default="shimmie"
-    )
-    parser.add_argument("--update-cache", action="store_true")
-    parser.add_argument("--clear-cache", action="store_true")
-    parser.add_argument(
-        "--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
-    parser.add_argument(
-        "--endpoint",
-        default="wiki_pages.json",
-        help="Comma-separated endpoints (e.g. wiki_pages.json,pools.json)"
-    )
-
-def _add_sync_wikis_parser(subparsers):
-    """Adds the sync-wikis command."""
-    parser = subparsers.add_parser("sync-wikis", help="Sync offline SQLite wiki cache to Shimmie2")
-    parser.add_argument("--spath", required=True, help="Path to shimmie root")
-    parser.add_argument("--update-existing", action="store_true",
-                        help="Overwrite existing pages in Shimmie")
-
 def _add_csv2sqlite_parser(subparsers):
     """Adds the csv2sqlite command."""
     parser = subparsers.add_parser("csv2sqlite", help="Convert CSV to SQLite")
@@ -131,25 +80,11 @@ def _add_csv2sqlite_parser(subparsers):
     parser.add_argument("--drop_table", action="store_true", help="Drop table if exists")
     parser.add_argument("--table", default="data", help="Table name")
 
-def _add_precache_parser(subparsers):
-    """Adds the precache command."""
-    parser = subparsers.add_parser("precache", help="Pre-cache Danbooru posts.json to SQLite")
-    parser.add_argument("posts_json", nargs="?", default="input/posts.json", help="Path to JSON")
-    parser.add_argument("-o", "--output", default="database/posts_cache.db", help="Output DB")
-    parser.add_argument("--threads", type=int, default=8, help="Number of threads")
-
-def _add_update_ratings_parser(subparsers):
-    """Adds the update-ratings command."""
-    parser = subparsers.add_parser("update-ratings", help="Update image ratings in Shimmie")
-    parser.add_argument("--spath", required=True, help="Path to shimmie root")
-    parser.add_argument("-q", "--qmax", type=int, default=250, help="Max questionable rating")
-    parser.add_argument("-s", "--smax", type=int, default=50, help="Max safe rating")
-
-def _add_purge_parser(subparsers):
-    parser = subparsers.add_parser("purge", help="Permanently delete images based on blacklisted tags")
+def _add_curate_db_parser(subparsers):
+    """Adds the curate-db command."""
+    parser = subparsers.add_parser("curate-db", help="Retroactively apply curation rules to existing images in Shimmie2")
     parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
-    parser.add_argument("--blacklist", default="blacklist.txt", help="Path to your blacklist text file")
-    parser.add_argument("--dry-run", action="store_true", help="Generate a report without deleting anything")
+    parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map for dynamic curation")
 
 def _add_download_parser(subparsers):
     """Adds the download command."""
@@ -231,6 +166,77 @@ def _add_download_parser(subparsers):
     parser.add_argument("--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
     parser.add_argument("--cookies", type=str, help="Path to Netscape formatted cookies.txt")
 
+def _add_extractor_parser(subparsers):
+    """Adds the extract-chars command."""
+    parser = subparsers.add_parser("extract-chars", help="Extract 1 image per solo character to a local dir")
+    parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
+    parser.add_argument("--output", required=True, help="Output directory for copied images")
+    parser.add_argument("--require-tags", nargs="+", default=["solo"], help="Tags that MUST be present (Default: solo)")
+    parser.add_argument("--min-pixels", type=int, default=1638400, help="Minimum total pixels (Default: 1638400 for 1280x1280)")
+    parser.add_argument("--uchar", action="store_true", help="Enable extracting only 1 image per character (Default: false)")
+    parser.add_argument("--uartist", action="store_true", help="Enable extracting only 1 image per artist (Default: false)")
+
+def _add_import_wikis_parser(subparsers):
+    """Adds the import-wikis command."""
+    parser = subparsers.add_parser("import-wikis", help="Import Danbooru wikis")
+    parser.add_argument("--spath", help="Path to shimmie root (Optional for cache-only mode)")
+    parser.add_argument("--start-page", type=int, default=1)
+    parser.add_argument("--pages", type=int, default=200)
+    parser.add_argument("--update-existing", action="store_true")
+    parser.add_argument(
+        "--convert",
+        choices=["raw", "markdown", "html", "shimmie"],
+        default="shimmie"
+    )
+    parser.add_argument("--update-cache", action="store_true")
+    parser.add_argument("--clear-cache", action="store_true")
+    parser.add_argument(
+        "--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
+    parser.add_argument(
+        "--endpoint",
+        default="wiki_pages.json",
+        help="Comma-separated endpoints (e.g. wiki_pages.json,pools.json)"
+    )
+
+def _add_precache_parser(subparsers):
+    """Adds the precache command."""
+    parser = subparsers.add_parser("precache", help="Pre-cache Danbooru posts.json to SQLite")
+    parser.add_argument("posts_json", nargs="?", default="input/posts.json", help="Path to JSON")
+    parser.add_argument("-o", "--output", default="database/posts_cache.db", help="Output DB")
+    parser.add_argument("--threads", type=int, default=8, help="Number of threads")
+
+def _add_purge_parser(subparsers):
+    parser = subparsers.add_parser("purge", help="Permanently delete images based on blacklisted tags")
+    parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
+    parser.add_argument("--blacklist", default="blacklist.txt", help="Path to your blacklist text file")
+    parser.add_argument("--dry-run", action="store_true", help="Generate a report without deleting anything")
+
+def _add_sync_wikis_parser(subparsers):
+    """Adds the sync-wikis command."""
+    parser = subparsers.add_parser("sync-wikis", help="Sync offline SQLite wiki cache to Shimmie2")
+    parser.add_argument("--spath", required=True, help="Path to shimmie root")
+    parser.add_argument("--update-existing", action="store_true",
+                        help="Overwrite existing pages in Shimmie")
+
+def _add_update_ratings_parser(subparsers):
+    """Adds the update-ratings command."""
+    parser = subparsers.add_parser("update-ratings", help="Update image ratings in Shimmie")
+    parser.add_argument("--spath", required=True, help="Path to shimmie root")
+    parser.add_argument("-q", "--qmax", type=int, default=250, help="Max questionable rating")
+    parser.add_argument("-s", "--smax", type=int, default=50, help="Max safe rating")
+
+def _add_wiki_index_parser(subparsers):
+    """Adds the wiki-index command."""
+    parser = subparsers.add_parser(
+        "wiki-index", help="Create static HTML wiki site"
+    )
+    parser.add_argument("--spath", help="Path to shimmie root (Optional for offline mode)")
+    parser.add_argument("--output", type=str, default="wiki_html", help="Output directory path")
+    parser.add_argument("--sort", action="store_true", help="Enable sorting of tags in index")
+    parser.add_argument(
+        "--order", type=str, default="c,s,a,g", help="Sort order (Default: c,s,a,g)"
+    )
+
 def setup_parser():
     """Constructs the argument parser."""
     parser = argparse.ArgumentParser(
@@ -252,6 +258,7 @@ def setup_parser():
     _add_audit_ratings_parser(subparsers)
     _add_auto_tag_parser(subparsers)
     _add_csv2sqlite_parser(subparsers)
+    _add_curate_db_parser(subparsers)
     _add_extractor_parser(subparsers)
     _add_download_parser(subparsers)
     _add_import_wikis_parser(subparsers)
@@ -298,6 +305,7 @@ def main():
         "audit-ratings": ai_auditor.run_auditor,
         "auto-tag": auto_tagger.run_auto_tagger,
         "csv2sqlite": db.csv_to_sqlite,
+        "curate-db": db.curate_existing_tags,
         "download": images.run,
         "extract-chars": extractor.run_extractor,
         "import-wikis": wiki.import_danbooru,
