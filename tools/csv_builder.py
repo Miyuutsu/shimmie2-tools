@@ -325,13 +325,33 @@ def print_summary(args):
     print(f"📂  Prefix:          {args.prefix}")
     print()
 
-def write_output(base_path, rows):
-    """Writes the CSV file."""
-    csv_path = Path(base_path) / "import.csv"
-    with csv_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_ALL)
-        writer.writerows(rows)
-    print(f"\n[✓] Shimmie CSV written to {csv_path}")
+def write_output(base_path, rows, chunk_size):
+    """Writes the CSV file(s), automatically chunking them if requested."""
+    if not rows:
+        return
+
+    out_dir = Path(base_path)
+
+    # If the total rows are less than or equal to the chunk size, just make one file
+    if len(rows) <= chunk_size:
+        csv_path = out_dir / "import.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+            writer.writerows(rows)
+        print(f"\n[✓] Shimmie CSV written to {csv_path}")
+        return
+
+    # Otherwise, split them cleanly
+    chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
+    print(f"\n[INFO] Splitting {len(rows)} rows into {len(chunks)} chunked CSVs...")
+
+    for idx, chunk in enumerate(chunks, 1):
+        csv_path = out_dir / f"import_part_{idx:03d}.csv"
+        with csv_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+            writer.writerows(chunk)
+
+    print(f"[✓] Successfully wrote {len(chunks)} chunked files to {out_dir}")
 
 def write_skips_log(base_path, skips):
     """Writes a log of skipped files grouped by reason."""
@@ -501,7 +521,7 @@ def run(args):
     csv_rows.sort()
 
     out_dir = args.image_path if args.image_path else args.video_path
-    write_output(out_dir, csv_rows)
+    write_output(out_dir, csv_rows, args.chunk_size)
 
     if all_skips:
         write_skips_log(out_dir, all_skips)
