@@ -840,7 +840,7 @@ def _process_batch_results(ctx, batch_results, last_batch_min_id):
 
         hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
 
-        if filtered_data and _are_all_posts_downloaded(ctx, filtered_data):
+        if ctx.args.abort > 0 and filtered_data and _are_all_posts_downloaded(ctx, filtered_data):
             print(
                 f"\n[!] Page {p_num} contains all previously downloaded posts. Aborting API fetch.")
             batch_posts.extend(filtered_data)
@@ -945,7 +945,7 @@ def _fetch_sequential_loop(ctx: FetchContext, start_id: str) -> List[dict]:
 
         hit_limit, filtered_data = _reached_id_limit(data, ctx.end_id)
 
-        if filtered_data and _are_all_posts_downloaded(ctx, filtered_data):
+        if ctx.args.abort > 0 and filtered_data and _are_all_posts_downloaded(ctx, filtered_data):
             print("\n[!] Batch contains all previously downloaded posts. Aborting API fetch early.")
             break
 
