@@ -7,10 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psycopg2
+import psycopg2.extras
 import tqdm
 
 from functions.db_cache import get_shimmie_db_credentials
-from functions.tags_curation import rating_from_score
+from functions.tags_curation import rating_from_score, apply_tag_curation, load_dynamic_mappings
 
 # Try to use orjson for speed, fallback to standard json
 try:
@@ -479,3 +480,114 @@ def purge_images(args):
 
         conn.commit()
         print(f"\n[✓] Purge Complete: Destroyed {deleted_files} files and {len(img_ids_to_drop)} database entries.")
+
+# ==========================================
+# Tool 5: Retroactive Database Tag Curator
+# ==========================================
+def curate_existing_tags(args):
+    """Applies hardcoded and dynamic curation rules to images already in Postgres."""
+    dynamic_mappings = None
+    if getattr(args, 'use_map_csv', None):
+        dynamic_mappings = load_dynamic_mappings(args.use_map_csv)
+        print(f"[INFO] Loaded {len(dynamic_mappings)} dynamic tag mappings.")
+
+    db_config = get_shimmie_db_credentials(args.spath)
+    if not db_config:
+        print(f"[ERROR] Could not load DB credentials from {args.spath}")
+        return
+
+    with psycopg2.connect(**db_config) as conn:
+        cur = conn.cursor()
+
+        print("Fetching global tag map...")
+        cur.execute("SELECT tag, id FROM tags")
+        tag_id_map = dict(cur.fetchall())
+
+        print("Fetching all image tags from Postgres...")
+        # Grouping by image_id here is exponentially faster than querying per image
+        cur.execute("""
+            SELECT it.image_id, array_agg(t.tag)
+            FROM image_tags it
+            JOIN tags t ON it.tag_id = t.id
+            GROUP BY it.image_id
+        """)
+        images_data = cur.fetchall()
+
+        tags_to_add = []
+        tags_to_remove = []
+        new_unique_tags = set()
+
+        # Process the curation locally in Python
+        for img_id, raw_tags in tqdm.tqdm(images_data, desc="Curating Tags"):
+            current_tags = list(raw_tags)
+            curated_tags = list(current_tags)
+
+            apply_tag_curation(curated_tags, dynamic_mappings)
+
+            curr_set = set(current_tags)
+            cur_set = set(curated_tags)
+
+            added = cur_set - curr_set
+            removed = curr_set - cur_set
+
+            for t in added:
+                tags_to_add.append((img_id, t))
+                if t not in tag_id_map:
+                    new_unique_tags.add(t)
+
+            for t in removed:
+                tags_to_remove.append((img_id, tag_id_map[t]))
+
+        if not tags_to_add and not tags_to_remove:
+            print("\n[✓] All tags are already clean. No changes needed.")
+            return
+
+        print(f"\n[INFO] Found {len(tags_to_add)} missing links to add and {len(tags_to_remove)} junk links to drop.")
+
+        # 1. Create missing tags in the master tags table
+        if new_unique_tags:
+            print(f"Injecting {len(new_unique_tags)} entirely new tags into the database...")
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO tags (tag, count) VALUES %s ON CONFLICT (tag) DO NOTHING",
+                [(t, 0) for t in new_unique_tags]
+            )
+            # Refresh the ID map with the newly generated IDs
+            cur.execute("SELECT tag, id FROM tags WHERE tag = ANY(%s)", (list(new_unique_tags),))
+            tag_id_map.update(dict(cur.fetchall()))
+
+        # 2. Bulk Remove Junk Tags
+        if tags_to_remove:
+            print("Purging old tag links...")
+            # Deleting by composite key using a temporary table for speed
+            cur.execute("CREATE TEMP TABLE tmp_del (img_id INT, tag_id INT) ON COMMIT DROP")
+            psycopg2.extras.execute_values(cur, "INSERT INTO tmp_del VALUES %s", tags_to_remove, page_size=10000)
+            cur.execute("""
+                DELETE FROM image_tags
+                USING tmp_del
+                WHERE image_tags.image_id = tmp_del.img_id AND image_tags.tag_id = tmp_del.tag_id
+            """)
+
+        # 3. Bulk Insert Clean Tags
+        if tags_to_add:
+            print("Applying new tag links...")
+            insert_records = [(img_id, tag_id_map[t]) for img_id, t in tags_to_add]
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO image_tags (image_id, tag_id) VALUES %s ON CONFLICT DO NOTHING",
+                insert_records,
+                page_size=10000
+            )
+
+        # 4. Sweep and Sync
+        print("Recalculating global UI tag counts...")
+        cur.execute("""
+            UPDATE tags
+            SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
+        """)
+
+        print("Dropping orphaned tags...")
+        cur.execute("DELETE FROM tags WHERE count = 0")
+
+        conn.commit()
+        print("\n[✓] Retroactive curation complete.")
