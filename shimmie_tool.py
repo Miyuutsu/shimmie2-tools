@@ -55,9 +55,9 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--images", dest="image_path", help="Path to images directory")
     parser.add_argument("--prefix", default="import", help="Dir name inside Shimmie")
     parser.add_argument("--pretags", type=str, default="", help="Tags to prepend to all posts")
-    parser.add_argument("--qmax", default=250, help="Max questionable rating.")
+    parser.add_argument("--qmax", type=int, default=250, help="Max questionable rating.")
     parser.add_argument("--skip-existing", action="store_true", help="Check Shimmie for image")
-    parser.add_argument("--smax", default=50, help="Max safe rating.")
+    parser.add_argument("--smax", type=int, default=50, help="Max safe rating.")
     parser.add_argument("--spath", help="Path to shimmie root")
     parser.add_argument(
         "--threads",
@@ -70,6 +70,7 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map")
     parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
     parser.add_argument("--blacklist", default="blacklist.txt", help="Text file containing tags to drop (one per line)")
+    parser.add_argument("--chunk-size", type=int, default=500, help="Split csv into chunks (Default: 500 lines)")
     return parser
 
 def _add_csv2sqlite_parser(subparsers):
