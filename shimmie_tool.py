@@ -86,6 +86,7 @@ def _add_curate_db_parser(subparsers):
     parser = subparsers.add_parser("curate-db", help="Retroactively apply curation rules to existing images in Shimmie2")
     parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
     parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map for dynamic curation")
+    parser.add_argument("--target-tag", help="Only curate images containing this specific tag")
 
 def _add_download_parser(subparsers):
     """Adds the download command."""
@@ -177,6 +178,13 @@ def _add_extractor_parser(subparsers):
     parser.add_argument("--uchar", action="store_true", help="Enable extracting only 1 image per character (Default: false)")
     parser.add_argument("--uartist", action="store_true", help="Enable extracting only 1 image per artist (Default: false)")
 
+def _add_generate_map_parser(subparsers):
+    """Adds the generate-db-map command."""
+    parser = subparsers.add_parser("generate-db-map", help="Generate a curation CSV map by diffing a botched batch against pure DB vocabulary")
+    parser.add_argument("--spath", required=True, help="Path to Shimmie root")
+    parser.add_argument("--target-tag", required=True, help="The tag identifying the botched batch (e.g., booru:bad_import)")
+    parser.add_argument("--reference-tag", required=True, help="The pure historical tag (e.g., booru:gelbooru)")
+
 def _add_import_wikis_parser(subparsers):
     """Adds the import-wikis command."""
     parser = subparsers.add_parser("import-wikis", help="Import Danbooru wikis")
@@ -260,8 +268,9 @@ def setup_parser():
     _add_auto_tag_parser(subparsers)
     _add_csv2sqlite_parser(subparsers)
     _add_curate_db_parser(subparsers)
-    _add_extractor_parser(subparsers)
     _add_download_parser(subparsers)
+    _add_extractor_parser(subparsers)
+    _add_generate_map_parser(subparsers)
     _add_import_wikis_parser(subparsers)
     _add_precache_parser(subparsers)
     _add_purge_parser(subparsers)
@@ -309,6 +318,7 @@ def main():
         "curate-db": db.curate_existing_tags,
         "download": images.run,
         "extract-chars": extractor.run_extractor,
+        "generate-db-map": db.generate_db_curation_map,
         "import-wikis": wiki.import_danbooru,
         "precache": db.precache_posts,
         "purge": db.purge_images,

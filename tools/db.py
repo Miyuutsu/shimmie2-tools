@@ -6,10 +6,13 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from collections import Counter, defaultdict
 import psycopg2
 import psycopg2.extras
 import tqdm
 
+from tools.csv_builder import load_mappings
+from functions.tags_mining import _fetch_global_context, TagCategoryGuard, calculate_equivalencies
 from functions.db_cache import get_shimmie_db_credentials
 from functions.tags_curation import rating_from_score, apply_tag_curation, load_dynamic_mappings
 
@@ -503,14 +506,28 @@ def curate_existing_tags(args):
         cur.execute("SELECT tag, id FROM tags")
         tag_id_map = dict(cur.fetchall())
 
-        print("Fetching all image tags from Postgres...")
-        # Grouping by image_id here is exponentially faster than querying per image
-        cur.execute("""
-            SELECT it.image_id, array_agg(t.tag)
-            FROM image_tags it
-            JOIN tags t ON it.tag_id = t.id
-            GROUP BY it.image_id
-        """)
+        if getattr(args, 'target_tag', None):
+            print(f"Fetching image tags from Postgres strictly for batch '{args.target_tag}'...")
+            cur.execute("""
+                SELECT it.image_id, array_agg(t.tag)
+                FROM image_tags it
+                JOIN tags t ON it.tag_id = t.id
+                WHERE it.image_id IN (
+                    SELECT it2.image_id FROM image_tags it2
+                    JOIN tags t2 ON it2.tag_id = t2.id
+                    WHERE t2.tag = %s
+                )
+                GROUP BY it.image_id
+            """, (args.target_tag,))
+        else:
+            print("Fetching ALL image tags from Postgres...")
+            cur.execute("""
+                SELECT it.image_id, array_agg(t.tag)
+                FROM image_tags it
+                JOIN tags t ON it.tag_id = t.id
+                GROUP BY it.image_id
+            """)
+
         images_data = cur.fetchall()
 
         tags_to_add = []
@@ -591,3 +608,111 @@ def curate_existing_tags(args):
 
         conn.commit()
         print("\n[✓] Retroactive curation complete.")
+
+# ==========================================
+# Tool 6: Retroactive Database Mapper
+# ==========================================
+def generate_db_curation_map(args):
+    """Generates a curation CSV by piping DB overlap natively into tags_mining.py."""
+    db_config = get_shimmie_db_credentials(args.spath)
+    if not db_config:
+        print(f"[ERROR] Could not load DB credentials from {args.spath}")
+        return
+
+    target_tag = args.target_tag
+    ref_tag = args.reference_tag
+    out_csv = Path("botched_map.csv")
+
+    with psycopg2.connect(**db_config) as conn:
+        cur = conn.cursor()
+
+        print(f"[*] Locating Rosetta Stones (Images with both '{target_tag}' and '{ref_tag}')...")
+
+        pure_history_like = f"%{ref_tag}%"
+        bad_history_like = f"%{target_tag}%"
+
+        cur.execute("""
+            WITH rosetta_images AS (
+                SELECT it1.image_id
+                FROM image_tags it1
+                JOIN tags t1 ON it1.tag_id = t1.id
+                JOIN image_tags it2 ON it1.image_id = it2.image_id
+                JOIN tags t2 ON it2.tag_id = t2.id
+                WHERE t1.tag = %s AND t2.tag = %s
+            )
+            SELECT
+                r.image_id,
+                (
+                    SELECT th.tags
+                    FROM tag_histories th
+                    WHERE th.image_id = r.image_id
+                      AND th.tags LIKE %s
+                      AND th.tags NOT LIKE %s
+                    ORDER BY th.id DESC LIMIT 1
+                ) as pure_history_tags,
+                (
+                    SELECT string_agg(t.tag, ' ')
+                    FROM image_tags it
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE it.image_id = r.image_id
+                ) as current_tags
+            FROM rosetta_images r;
+        """, (target_tag, ref_tag, pure_history_like, bad_history_like))
+
+        rows = cur.fetchall()
+        print(f"    -> Found {len(rows):,} overlapping images to analyze.")
+
+    print("[*] Translating DB overlap into tags_mining.py frequency format...")
+    valid_pairs = 0
+    sidecar_counts = Counter()
+    canonical_counts = Counter()
+    co_occurrences = defaultdict(Counter)
+    sidecar_overlap = defaultdict(Counter)
+
+    for pure_history, current_tags in tqdm.tqdm(rows, desc="Mapping Frequencies"):
+        if not pure_history or not current_tags:
+            continue
+
+        canonical = {t for t in pure_history.split() if not t.startswith(('booru:', 'tagai:'))}
+        current_set = {t for t in current_tags.split() if not t.startswith(('booru:', 'tagai:'))}
+
+        # CRITICAL JUMP: Isolate strictly the tags injected by the botched import.
+        # Pure tags like 'black_hair' are completely removed from the evaluation matrix.
+        botched_tags = current_set - canonical
+
+        if not canonical or not botched_tags:
+            continue
+
+        valid_pairs += 1
+
+        for s_tag in botched_tags:
+            sidecar_counts[s_tag] += 1
+            for c_tag in canonical:
+                co_occurrences[s_tag][c_tag] += 1
+                # sidecar_overlap remains safely empty to prevent the retroactive _DROP_ paradox
+
+        for c_tag in canonical:
+            canonical_counts[c_tag] += 1
+
+    freqs = (valid_pairs, sidecar_counts, canonical_counts, co_occurrences, sidecar_overlap)
+
+    print("[*] Fetching mappings and global context to satisfy tags_mining.py...")
+    mappings = load_mappings()
+    global_ctx = _fetch_global_context(sidecar_counts.keys(), db_config)
+
+    # Blinder restored to bypass the 500-count limit specifically for inflated typos
+    guard = TagCategoryGuard(mappings)
+
+    print("[*] Passing generated frequencies into tags_mining native equivalency calculator...")
+    calculated = calculate_equivalencies(freqs, global_ctx, guard, thresholds=(10, 0.50), mode="retro")
+    calculated.sort(key=lambda x: x["Sample_Size"], reverse=True)
+
+    print(f"[*] Writing {out_csv.name}...")
+    with out_csv.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["Sidecar_Tag", "Canonical_Tag", "Confidence", "Sample_Size"]
+        )
+        writer.writeheader()
+        writer.writerows(calculated)
+
+    print(f"\n[✓] Smart mapping complete! Extracted {len(calculated):,} highly confident mappings.")

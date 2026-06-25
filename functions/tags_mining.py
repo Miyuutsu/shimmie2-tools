@@ -1,3 +1,4 @@
+# pylint: disable=line-too-long,too-many-locals,too-many-branches,too-many-statements,too-many-nested-blocks
 """Tools and classes for Mining tags to find equivalent mappings."""
 import os
 import re
@@ -199,76 +200,134 @@ def _fetch_global_context(tags_set, db_conn, chunk_size=1000):
     return g_counts, deprecated, has_wiki
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
-def _evaluate_match_guards(
-    s_tag, best_match, s_count, hi_score, freqs, global_ctx, db_cnt, guard, thresholds
-):
-    """Helper evaluating strict rules before tag matches are confirmed."""
+def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, global_ctx, db_cnt, guard, mode, freqs, thresholds):
+    """Helper evaluating strict rules, segregated into Mining and Retro modes."""
+    is_deprecated = s_tag in global_ctx[1]
+
+    # Ignore subset formatting
     if re.sub(r'_\([^)]+\)', '', s_tag) == re.sub(r'_\([^)]+\)', '', best_match):
         return None
-
     if f"({best_match})" in s_tag:
         return None
 
-    if hi_score < 0.75 and not guard.shares_lexical_root(s_tag, best_match):
-        return None
+    # Namespace Firewall
+    cat_s = guard.get_category(s_tag)
+    cat_c = guard.get_category(best_match)
+    if s_tag.startswith(('character:', 'artist:', 'series:', 'studio:', 'meta:')):
+        cat_s = s_tag.split(':', 1)[0]
+    if best_match.startswith(('character:', 'artist:', 'series:', 'studio:', 'meta:')):
+        cat_c = best_match.split(':', 1)[0]
 
-    if (freqs[4][s_tag][best_match] / s_count) >= thresholds[1]:
-        if not guard.can_drop(s_tag, best_match):
-            return None
-        if db_cnt > (s_count * 0.5) or db_cnt > 500:
-            return None
-        if s_tag in global_ctx[2]:
-            return None
-        return "_DROP_"
+    shares_root = guard.shares_lexical_root(s_tag, best_match)
 
+    # 1. Strict Namespace Protection
+    if cat_s != cat_c:
+        if not shares_root:
+            # Deprecated tags can only cross namespaces if the math is undeniably strong
+            if not (is_deprecated and jaccard > 0.50):
+                return None
+
+    # 2. Mode-Specific Lexical & Redundancy Guards
+    if mode == "mining":
+        # Redundancy Drop Logic
+        if (freqs[4][s_tag][best_match] / s_count) >= thresholds[1]:
+            if not guard.can_drop(s_tag, best_match):
+                return None
+            if not is_deprecated and (db_cnt > (s_count * 0.5) or db_cnt > 500):
+                return None
+            if s_tag in global_ctx[2] and not is_deprecated:
+                return None
+            return "_DROP_"
+
+        # Lexical Guard
+        if jaccard < 0.75 and not shares_root:
+            # Minimum Standard: Deprecated tags MUST have strong inclusion to map without root
+            if not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
+                return None
+    else:
+        # Lexical Guard (Retro Curation)
+        if jaccard < 0.75 and not shares_root:
+            # Minimum Standard: Deprecated tags MUST have strong inclusion to map without root
+            if not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
+                return None
+
+    # 3. Structural Guard
     if not guard.check(s_tag, best_match, s_count):
         return None
 
-    if (db_cnt > 500 or db_cnt > (s_count * 0.5)) and hi_score < 0.95:
-        return None
+    # 4. The Absolute Panic Limit (No safe harbor bypasses for non-deprecated tags)
+    if not is_deprecated and (db_cnt > 500 or db_cnt > (s_count * 0.5)):
+        if jaccard < 0.95:
+            return None
 
     return best_match
 
-def calculate_equivalencies(freqs, global_ctx, guard, thresholds):
-    """Calculates Jaccard similarity scores to map tags safely under local limits."""
+def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining"):
+    """Calculates pure Jaccard similarity scores to map tags accurately."""
     results = []
     for s_tag, s_count in freqs[1].items():
         if s_count < thresholds[0]:
             continue
 
-        if s_tag in global_ctx[1]:
-            results.append({
-                "Sidecar_Tag": s_tag,
-                "Canonical_Tag": "_DROP_",
-                "Confidence": 1.0,
-                "Sample_Size": s_count
-            })
-            continue
-
         best_match = None
-        hi_score = 0
+        best_jaccard = 0.0
+        best_inclusion = 0.0
 
         for c_tag, shared in freqs[3][s_tag].items():
-            union = s_count + freqs[2][c_tag] - shared
-            if union > 0 and (shared / union) > hi_score:
-                hi_score = shared / union
-                best_match = c_tag
+            if c_tag == s_tag:
+                continue
 
-        if hi_score >= thresholds[1] and best_match != s_tag:
-            db_cnt = global_ctx[0].get(s_tag, freqs[2].get(s_tag, 0))
+            union = s_count + freqs[2].get(c_tag, 0) - shared
+            jaccard = shared / union if union > 0 else 0
+
+            if jaccard > best_jaccard:
+                best_jaccard = jaccard
+                best_match = c_tag
+                best_inclusion = shared / s_count
+
+        is_deprecated = s_tag in global_ctx[1]
+
+        if best_match:
+            raw_db_cnt = global_ctx[0].get(s_tag, freqs[2].get(s_tag, 0))
+
+            # Database counts must only be artificially adjusted during retro-curation
+            if mode == "retro":
+                adjusted_db_cnt = max(0, raw_db_cnt - s_count)
+            else:
+                adjusted_db_cnt = raw_db_cnt
 
             final_match = _evaluate_match_guards(
-                s_tag, best_match, s_count, hi_score, freqs,
-                global_ctx, db_cnt, guard, thresholds
+                s_tag, best_match, s_count, best_inclusion, best_jaccard, global_ctx, adjusted_db_cnt, guard, mode, freqs, thresholds
             )
 
             if final_match:
+                out_s = s_tag
+                out_c = final_match
+                # Use max() to ensure subsets like 'japanese_language' output high confidence (~0.95)
+                confidence = max(best_jaccard, best_inclusion)
+
+                if mode == "retro":
+                    # Namespace inversion to upgrade DB tags
+                    s_parts = s_tag.split(':', 1)
+                    c_parts = final_match.split(':', 1)
+                    if len(s_parts) == 2 and len(c_parts) == 1:
+                        if s_parts[1] == final_match:
+                            out_s = final_match
+                            out_c = s_tag
+                else:
+                    if final_match == "_DROP_":
+                        confidence = 1.0
+
                 results.append({
-                    "Sidecar_Tag": s_tag,
-                    "Canonical_Tag": final_match,
-                    "Confidence": round(hi_score, 4),
+                    "Sidecar_Tag": out_s,
+                    "Canonical_Tag": out_c,
+                    "Confidence": round(confidence, 4),
                     "Sample_Size": s_count
                 })
+            elif is_deprecated:
+                results.append({"Sidecar_Tag": s_tag, "Canonical_Tag": "_DROP_", "Confidence": 1.0, "Sample_Size": s_count})
+        elif is_deprecated:
+            results.append({"Sidecar_Tag": s_tag, "Canonical_Tag": "_DROP_", "Confidence": 1.0, "Sample_Size": s_count})
 
     return results
 
@@ -287,7 +346,9 @@ def mine_tag_equivalencies(image_list, conns, output_path, mappings, thresholds=
 
     global_ctx = _fetch_global_context(freqs[1].keys(), db_conn)
     guard = TagCategoryGuard(mappings)
-    calculated = calculate_equivalencies(freqs, global_ctx, guard, thresholds)
+
+    # FIX: Explicitly pass mode="mining" to trigger the standard import defenses
+    calculated = calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
     calculated.sort(key=lambda x: x["Sample_Size"], reverse=True)
 
     with open(output_path, "w", encoding="utf-8", newline="") as f:

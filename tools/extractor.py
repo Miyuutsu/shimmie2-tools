@@ -1,3 +1,4 @@
+# pylint: disable=line-too-long,too-many-locals,too-many-branches,too-many-statements
 """Tool for extracting specific images from Shimmie based on tags and resolution."""
 import shutil
 from pathlib import Path
@@ -13,40 +14,6 @@ VALID_NAMESPACES = {
     "copyright", "studio", "pool", "lore", "species"
 }
 
-#def _write_extraction_report(out_dir, character_tracking, selected_images):
-#    """Generates a detailed text report of successes and skipped characters."""
-#    report_path = out_dir / "extraction_report.txt"
-#    with open(report_path, "w", encoding="utf-8") as rf:
-#        rf.write("=== EXTRACTION REPORT ===\n\n")
-#        rf.write(f"Total Successfully Extracted: {len(selected_images)}\n")
-#        rf.write("--- SUCCESSFULLY EXTRACTED ---\n")
-
-#        selected_images.sort(key=lambda x: x['char_name'])
-#        for cand in selected_images:
-#            char_clean = cand['char_name'].replace("character:", "")
-#            artist_clean = cand['artist'].replace("artist:", "@")
-#            rf.write(f"[{char_clean}] -> Artist: {artist_clean} | File: {cand['dest_filename']}\n")
-
-#        rf.write("\n\n--- SKIPPED CHARACTERS ---\n")
-#        skipped_chars = [c for c, d in character_tracking.items() if not d['extracted']]
-#        skipped_chars.sort()
-
-#        rf.write(f"Total Skipped Characters: {len(skipped_chars)}\n")
-
-#        for sc in skipped_chars:
-#            data = character_tracking[sc]
-#            char_clean = sc.replace("character:", "")
-#            rf.write(f"\n{char_clean}:\n")
-
-#            for reason, count in sorted(data['reasons'].items(), key=lambda x: x[1], reverse=True):
-#                rf.write(f"  - {count} images skipped: {reason}\n")
-
-#            if data['available_artists']:
-#                artists = [a.replace("artist:", "@") for a in sorted(data['available_artists'])]
-#                rf.write(f"  -> Artist Conflict: Competed for and lost {', '.join(artists)}\n")
-
-#    print(f"\n[✓] Detailed extraction report written to {report_path.resolve()}")
-
 def run_extractor(args):
     """Main execution flow for extracting character images."""
     out_dir = Path(args.output)
@@ -58,7 +25,18 @@ def run_extractor(args):
     enforce_uartist = getattr(args, 'uartist', False)
 
     positive_tags = set()
-    negative_tags = set()
+    negative_tags = {
+        "3d", "3d_(artwork)", "artist_name", "bad_id", "bad_twitter_id", "bar_censor",
+        "black_background", "blender_(medium)", "calendar", "censored", "comic", "copyright_name",
+        "cover", "cover_page", "disembodied_limb", "doujin", "english_text", "fake_phone_screenshot",
+        "fake_screenshot", "futa_solo", "futanari", "grey_background", "greyscale", "head_out_of_frame",
+        "huge_filesize", "incredibly_absurdres", "japanese_text", "koikatsu!", "large_breasts", "letterboxed",
+        "logo", "medium_breasts", "mixed_media", "monochrome", "mosaic_censoring", "nintendo",
+        "non-web_source", "out-of-frame_censoring", "pixiv_username", "pregnant", "resolution_mismatch", "selfie",
+        "shadows_house", "signature", "simple_background", "sketch", "speech_bubble", "tentacle_pit",
+        "text", "thick_outlines", "third-party_edit", "translation_request", "transparent_background", "twitter_username",
+        "watermark", "white_background", "x-ray"
+        }
     or_groups = []
 
     if args.require_tags:

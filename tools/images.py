@@ -1,4 +1,4 @@
-# pylint: disable=too-many-lines,line-too-long,too-many-locals,too-many-branches
+# pylint: disable=too-many-lines,line-too-long,too-many-locals,too-many-branches,too-many-arguments,too-many-positional-arguments
 """
 The 'too big to manage again' edition.
 Image Downloader with Threaded API, Subfolders, Checkpoints, WAL Support, and Error Logging.
