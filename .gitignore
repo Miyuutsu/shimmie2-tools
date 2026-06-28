@@ -7,6 +7,7 @@
 .DS_Store
 .env
 .idea/
+.ruff_cache/
 .vscode/
 Thumbs.db
 __pycache__/
