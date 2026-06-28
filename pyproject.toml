@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "tab"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "RET",
+    "B",
+    "SIM",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = "venv"
+extraPaths = ["functions", "tools"]
+typeCheckingMode = "standard"
