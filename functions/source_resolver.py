@@ -24,10 +24,12 @@ def convert_filename_to_source(filename):
         return None
 
     patterns = [
+        (r"fanbox/(\d+)/(\d+)_", "https://kemono.cr/fanbox/user/{0}/post/{1}"),
         (r"gelbooru_(\d+)_", "https://gelbooru.com/index.php?page=post&s=view&id={}"),
         (r"konachan_(\d+)_", "https://konachan.com/post/show/{}"),
-        (r"fanbox/(\d+)/(\d+)_", "https://kemono.cr/fanbox/user/{0}/post/{1}"),
-        (r"yandere_(\d+)_", "https://yande.re/post/show/{}")
+        (r"yandere_(\d+)_", "https://yande.re/post/show/{}"),
+        (r"(?:^|/)(\d{5,12})_(?:p?\d{1,3})(?:[_.\s-]|$)", "https://www.pixiv.net/en/artworks/{}"),
+        (r"pixiv_?(?:id_?)?(\d+)", "https://www.pixiv.net/en/artworks/{}"),
     ]
 
     for pattern, url_fmt in patterns:
