@@ -1,11 +1,10 @@
 # pylint: disable=line-too-long
 """Master CLI Tool for Shimmie2 Batch Importing and Database Management."""
 import argparse
+import os
 import sys
 
 from tools import csv_builder, db, images, wiki, ai_auditor, auto_tagger, extractor
-
-from functions.common import get_cpu_threads
 
 def _add_audit_ratings_parser(subparsers):
     """Adds the audit-ratings command."""
@@ -62,7 +61,7 @@ def _add_csv_parser(subparsers):
     parser.add_argument(
         "--threads",
         type=int,
-        default=get_cpu_threads() // 2,
+        default=max(1, (os.cpu_count() or 1) // 2),
         help="Thread count"
     )
     parser.add_argument("--thumbnail", action="store_true", help="Generate thumbnails")
@@ -274,6 +273,7 @@ def setup_parser():
     _add_import_wikis_parser(subparsers)
     _add_precache_parser(subparsers)
     _add_purge_parser(subparsers)
+    _add_sync_wikis_parser(subparsers)
     _add_update_ratings_parser(subparsers)
     _add_wiki_index_parser(subparsers)
 

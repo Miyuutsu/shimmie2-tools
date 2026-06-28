@@ -1,13 +1,12 @@
 """Wiki management tools (Universal Indexing, Static Site Gen, and Archiving)."""
 import re
 import html
-import json
 import sqlite3
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import quote, urljoin
 from datetime import datetime
-
+import orjson
 import psycopg2
 import requests
 
@@ -217,8 +216,7 @@ def _shimmie_to_html(text, current_bucket):
         r'<a href="\1" target="_blank">\2</a>',
         text
     )
-    text = text.replace('\n', '<br>')
-    return text
+    return text.replace('\n', '<br>')
 
 def _write_static_page(out_dir, entry, revisions, css_file):
     """Writes a single HTML page (and its revisions)."""
@@ -369,7 +367,7 @@ def _write_category_index_html(path, category, titles, css_file):
 
     style = "column-count: 3; list-style: none; padding: 0;"
     # Split for pylint
-    list_items = "\n".join([f"<li>{l}</li>" for l in links])
+    list_items = "\n".join([f"<li>{link}</li>" for link in links])
     content = f"<ul style='{style}'>\n{list_items}\n</ul>"
 
     # Category pages are 1 deep: category/index.html -> ../style.css
@@ -672,15 +670,13 @@ def _get_page_data(session, page, endpoint, args, solver):
 
         resp = session.get(target_url, params={"page": page, "limit": 1000}, timeout=30)
 
-        if args.captcha and solver:
-            if solver.detect(resp.text[:2000]):
-                if solver.solve(session, resp.text, resp.url):
-                    print("[INFO] Captcha solved. Retrying...")
-                    resp = session.get(
-                        target_url, params={"page": page, "limit": 1000}, timeout=30
-                    )
-                else:
-                    return None
+        if args.captcha and solver.detect(resp.text[:2000]) and solver.solve(session, resp.text, resp.url):
+            print("[INFO] Captcha solved. Retrying...")
+            resp = session.get(
+                target_url, params={"page": page, "limit": 1000}, timeout=30
+            )
+        else:
+            return None
         resp.raise_for_status()
 
         # Robust JSON Parsing with Fallback for Leading Whitespace
@@ -690,7 +686,7 @@ def _get_page_data(session, page, endpoint, args, solver):
             # Server might return \n[...] or other whitespace noise
             if resp.text and resp.text.strip():
                 try:
-                    return json.loads(resp.text.strip())
+                    return orjson.loads(resp.text.strip())
                 except ValueError:
                     return None
             return None
@@ -704,7 +700,7 @@ def _fetch_and_cache(args, endpoint):
     conn, cur = _init_cache()
     session = requests.Session()
     solver = None
-    if args.captcha and get_protected_session:
+    if args.captcha and get_protected_session and AntiBotSolver:
         session = get_protected_session()
         solver = AntiBotSolver()
 

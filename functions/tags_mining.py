@@ -1,5 +1,3 @@
-# pylint: disable=line-too-long,too-many-locals,too-many-branches,too-many-statements,too-many-nested-blocks
-"""Tools and classes for Mining tags to find equivalent mappings."""
 import os
 import re
 import csv
@@ -7,6 +5,7 @@ import subprocess
 from collections import defaultdict, Counter
 import tqdm
 
+# if I'm importing functions, then this isn't a function, fix it
 from functions.common import compute_md5
 from functions.tags_curation import get_sidecar_tags
 from functions.db_cache import get_bulk_canonical_tags
@@ -68,10 +67,7 @@ class TagCategoryGuard:
         if cat_s in self.strict and cat_c in self.strict and cat_s != cat_c:
             return False
 
-        if cat_s in self.strict and cat_c == 'general':
-            return False
-
-        return True
+        return not (cat_s in self.strict and cat_c == 'general')
 
 def _extract_hashes(image_list):
     """Helper to extract MD5s rapidly using regex and fallback."""
@@ -221,11 +217,8 @@ def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, globa
     shares_root = guard.shares_lexical_root(s_tag, best_match)
 
     # 1. Strict Namespace Protection
-    if cat_s != cat_c:
-        if not shares_root:
-            # Deprecated tags can only cross namespaces if the math is undeniably strong
-            if not (is_deprecated and jaccard > 0.50):
-                return None
+    if cat_s != cat_c and not shares_root and not (is_deprecated and jaccard > 0.50):
+        return None
 
     # 2. Mode-Specific Lexical & Redundancy Guards
     if mode == "mining":
@@ -240,25 +233,20 @@ def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, globa
             return "_DROP_"
 
         # Lexical Guard
-        if jaccard < 0.75 and not shares_root:
-            # Minimum Standard: Deprecated tags MUST have strong inclusion to map without root
-            if not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
-                return None
+        if jaccard < 0.75 and not shares_root and not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
+            return None
     else:
         # Lexical Guard (Retro Curation)
-        if jaccard < 0.75 and not shares_root:
-            # Minimum Standard: Deprecated tags MUST have strong inclusion to map without root
-            if not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
-                return None
+        if jaccard < 0.75 and not shares_root and not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
+            return None
 
     # 3. Structural Guard
     if not guard.check(s_tag, best_match, s_count):
         return None
 
     # 4. The Absolute Panic Limit (No safe harbor bypasses for non-deprecated tags)
-    if not is_deprecated and (db_cnt > 500 or db_cnt > (s_count * 0.5)):
-        if jaccard < 0.95:
-            return None
+    if jaccard < 0.95 and not is_deprecated and (db_cnt > 500 or db_cnt > (s_count * 0.5)):
+        return None
 
     return best_match
 
@@ -291,10 +279,7 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
             raw_db_cnt = global_ctx[0].get(s_tag, freqs[2].get(s_tag, 0))
 
             # Database counts must only be artificially adjusted during retro-curation
-            if mode == "retro":
-                adjusted_db_cnt = max(0, raw_db_cnt - s_count)
-            else:
-                adjusted_db_cnt = raw_db_cnt
+            adjusted_db_cnt = max(0, raw_db_cnt - s_count) if mode == "retro" else raw_db_cnt
 
             final_match = _evaluate_match_guards(
                 s_tag, best_match, s_count, best_inclusion, best_jaccard, global_ctx, adjusted_db_cnt, guard, mode, freqs, thresholds
@@ -310,10 +295,9 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                     # Namespace inversion to upgrade DB tags
                     s_parts = s_tag.split(':', 1)
                     c_parts = final_match.split(':', 1)
-                    if len(s_parts) == 2 and len(c_parts) == 1:
-                        if s_parts[1] == final_match:
-                            out_s = final_match
-                            out_c = s_tag
+                    if len(s_parts) == 2 and len(c_parts) == 1 and s_parts[1] == final_match:
+                        out_s = final_match
+                        out_c = s_tag
                 else:
                     if final_match == "_DROP_":
                         confidence = 1.0

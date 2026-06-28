@@ -3,14 +3,13 @@ import io
 import hashlib
 import subprocess
 from pathlib import Path
+from typing import Any
 import pyvips
 from PIL import Image
 
-from functions.common import VIDEO_EXTS
-
 def compute_danbooru_pixel_hash(image_path: Path) -> str:
     """Compute Danbooru's specific pixel hash for image deduplication."""
-    image = pyvips.Image.new_from_file(str(image_path), access="sequential")
+    image: Any = pyvips.Image.new_from_file(str(image_path), access="sequential")
 
     if image.get_typeof("icc-profile-data") != 0:
         image = image.icc_transform("srgb")
@@ -58,7 +57,9 @@ def process_webp(task):
     """Process an image or video into a WebP thumbnail."""
     src_path, dst_path = task
 
-    if Path(src_path).suffix.lower() in VIDEO_EXTS:
+    video_exts = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
+
+    if Path(src_path).suffix.lower() in video_exts:
         try:
             extract_video_thumbnail(src_path, dst_path)
         except subprocess.CalledProcessError as e:

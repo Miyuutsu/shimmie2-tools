@@ -3,6 +3,7 @@
 The 'too big to manage again' edition.
 Image Downloader with Threaded API, Subfolders, Checkpoints, WAL Support, and Error Logging.
 """
+import contextlib
 import hashlib
 import time
 import sqlite3
@@ -311,10 +312,8 @@ def _parse_input_query(query, default_base):
             start_id = page_param
             start_page = None
         else:
-            try:
+            with contextlib.suppress(ValueError):
                 start_page = int(page_param)
-            except ValueError:
-                pass
 
     return tags, start_page, start_id, detected_base
 
@@ -642,10 +641,9 @@ def _download_worker(task: DownloadTask, db_path):
         res = _download_file(task, db_ctx)
 
         if isinstance(res, Path):
-            if task.args.sidecar:
-                tag_str = _construct_tag_string(task.post)
-                with res.with_name(f"{res.name}.txt").open('w', encoding='utf-8') as f:
-                    f.write(tag_str)
+            tag_str = _construct_tag_string(task.post)
+            with res.with_name(f"{res.name}.txt").open('w', encoding='utf-8') as f:
+                f.write(tag_str)
 
             _record_success(task, task.post.get('md5', ''), res, db_ctx)
             return f"[Downloaded] {res.name}"
@@ -727,7 +725,7 @@ def _fetch_metadata_page(url, params, ctx) -> Union[dict, list, str, None]:
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 410:
+        if e.response == 410:
             print(f"\n[!] API Limit Reached (410 Gone). Page {params.get('page')} is too deep.")
             print("    Switching to ID-based pagination...")
             return "410_GONE"
@@ -874,10 +872,10 @@ def _process_batch_results(ctx, batch_results, last_batch_min_id):
 
     return batch_posts, last_batch_min_id, batch_has_data, abort_fetch
 
-def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict], Optional[str]]:
+def _fetch_threaded_loop(ctx, start_page: int) -> Tuple[List[dict], Optional[str]]:
     """Handles the threaded page-based fetching loop."""
     all_posts = []
-    batch_size = max(5, min(ctx.args.threads, 50))
+    batch_size = max(5, ctx.args.threads)
 
     current_page = start_page if start_page is not None else 1
     next_start_id = None
@@ -931,7 +929,7 @@ def _fetch_threaded_loop(ctx: FetchContext, start_page: int) -> Tuple[List[dict]
 
     return all_posts, next_start_id
 
-def _fetch_sequential_loop(ctx: FetchContext, start_id: str) -> List[dict]:
+def _fetch_sequential_loop(ctx, start_id: str) -> List[dict]:
     """Handles the sequential ID-based fetching loop."""
     all_posts = []
     base_api = f"{ctx.base_url}/posts.json"
@@ -986,11 +984,10 @@ def _fetch_all_posts_threaded(ctx: FetchContext, start_page: int, start_id: Opti
     all_posts = []
 
     forced_threaded = False
-    if start_id:
-        if _probe_smart_resume(ctx, start_id):
-            forced_threaded = True
-            start_page = 1
-            start_id = None
+    if start_id and _probe_smart_resume(ctx, start_id):
+        forced_threaded = True
+        start_page = 1
+        start_id = None
 
     use_sequential = (
         (start_page is not None and start_page >= PAGINATION_LIMIT) or
@@ -1009,11 +1006,7 @@ def _fetch_all_posts_threaded(ctx: FetchContext, start_page: int, start_id: Opti
 
     if use_sequential:
         if not start_id:
-            if all_posts and all_posts[-1].get('id'):
-                start_id = f"b{all_posts[-1]['id']}"
-            else:
-                start_id = "b999999999"
-
+            start_id = f"b{all_posts[-1]['id']}" if all_posts and all_posts[-1].get('id') else "b999999999"
         seq_posts = _fetch_sequential_loop(ctx, start_id)
         all_posts.extend(seq_posts)
 
@@ -1142,51 +1135,47 @@ def _detect_v1_api(session, base_url) -> Tuple[bool, Optional[Any]]:
         pass
     return False, None
 
-# pylint: disable=too-many-locals
 def _configure_download(args):
-    """Parses arguments and sets up configuration for the run."""
-
-    # TRICK 1: Star unpack (*) intermediate variables!
-    # This automatically captures start_page_parsed and start_id_parsed into a single
-    # lightweight list without changing the helper function's signature.
     session, solver, tags, *parsed_starts, base_url = \
         _setup_network_and_parse_input(args)
 
     if tags is None:
         return None
 
-    # We then unpack them right back out using the star!
     start_page, start_id, end_page_limit, end_id_limit = \
         _resolve_state_and_conditions(
             session, args, *parsed_starts
         )
 
-    sitename, root_output_path, db_path = _setup_site_paths(
-        session, args, base_url
-    )
+    if base_url:
+        sitename, root_output_path, db_path = _setup_site_paths(
+            session, args, base_url
+        )
 
-    if getattr(args, 'resume', False):
-        last_page = _get_last_checkpoint_page(db_path, tags)
-        if last_page:
-            print(f"[✓] Auto-Resume triggered: Jumping to Page {last_page} for '{tags}'")
-            start_page = last_page
-            start_id = None
+        if getattr(args, 'resume', False):
+            last_page = _get_last_checkpoint_page(db_path, tags)
+            if last_page:
+                print(f"[✓] Auto-Resume triggered: Jumping to Page {last_page} for '{tags}'")
+                start_page = last_page
+                start_id = None
 
-    is_v1, api_client = _detect_v1_api(session, base_url)
+        is_v1, api_client = _detect_v1_api(session, base_url)
 
-    return FetchContext(
-        session=session,
-        args=args,
-        solver=solver,
-        tags=tags,
-        base_url=base_url,
-        end_page=end_page_limit,
-        end_id=end_id_limit,
-        db_path=db_path,
-        is_v1=is_v1,
-        api_client=api_client,
-        sitename=sitename
-    ), start_page, start_id, sitename, root_output_path
+        return FetchContext(
+            session=session,
+            args=args,
+            solver=solver,
+            tags=tags,
+            base_url=base_url,
+            end_page=end_page_limit,
+            end_id=end_id_limit,
+            db_path=db_path,
+            is_v1=is_v1,
+            api_client=api_client,
+            sitename=sitename
+        ), start_page, start_id, sitename, root_output_path
+
+    return None
 
 def _prepare_tasks(all_posts, args, root_output_path, sitename, ctx, blacklist_tags):
     """Generates and queues all DownloadTask objects."""

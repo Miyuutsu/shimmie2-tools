@@ -1,7 +1,3 @@
-"""
-Captcha and Anti-Bot handling logic.
-Edit COOKIES_FILE to point to your Netscape-formatted cookies.txt
-"""
 import re
 import hashlib
 from pathlib import Path
@@ -28,23 +24,26 @@ class AntiBotSolver:
         return "challenge-container" in html and "powSeed" in html
 
     def _extract_params(self, text):
-        """Extracts regex parameters to reduce local variables in solve."""
+        def _get_match(pattern: str, fallback: str | None = None) -> str:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+            if fallback is not None:
+                return fallback
+            raise AttributeError(f"Pattern {pattern} not found")
+
         try:
             return {
-                "id": re.search(r'const challenge_id = "(.*?)";', text).group(1),
-                "gen": re.search(r'const challenge_generated = "(.*?)";', text).group(1),
-                "exp": re.search(r'const challenge_cookie_expires = "(.*?)";', text).group(1),
-                "seed": re.search(r'const powSeed = "(.*?)";', text).group(1),
-                "prefix": (
-                    re.search(r'const powPrefix = "(.*?)";', text).group(1)
-                    if "powPrefix" in text else "00000"
-                )
+                "id": _get_match(r'const challenge_id = "(.*?)";'),
+                "gen": _get_match(r'const challenge_generated = "(.*?)";'),
+                "exp": _get_match(r'const challenge_cookie_expires = "(.*?)";'),
+                "seed": _get_match(r'const powSeed = "(.*?)";'),
+                "prefix": _get_match(r'const powPrefix = "(.*?)";', fallback="00000")
             }
         except AttributeError:
             return None
 
     def solve(self, session, response_text, current_url):
-        """Solves the SHA1 PoW challenge."""
         print("[!] Anti-Bot Challenge triggered. Solving...")
         params = self._extract_params(response_text)
         if not params:
@@ -88,7 +87,6 @@ class AntiBotSolver:
         return False
 
 def get_protected_session():
-    """Initializes a robust session with cookies and retries."""
     session = requests.Session()
 
     # Retry Strategy
@@ -104,7 +102,7 @@ def get_protected_session():
         try:
             cj = MozillaCookieJar(COOKIES_FILE)
             cj.load(ignore_discard=True, ignore_expires=True)
-            session.cookies = cj
+            session.cookies.update(cj)
             print(f"[INFO] Loaded cookies from {COOKIES_FILE}")
         except (LoadError, OSError) as e:
             print(f"[WARNING] Failed to load cookies: {e}")

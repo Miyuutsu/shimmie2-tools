@@ -1,12 +1,12 @@
 # pylint: disable=duplicate-code,line-too-long,too-many-locals,too-many-branches,too-many-statements
 """Database management tools (SQLite Conversions, Precaching, Rating Updates)."""
 import csv
-import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-
 from collections import Counter, defaultdict
+import orjson
+
 import psycopg2
 import psycopg2.extras
 import tqdm
@@ -16,17 +16,10 @@ from functions.tags_mining import _fetch_global_context, TagCategoryGuard, calcu
 from functions.db_cache import get_shimmie_db_credentials
 from functions.tags_curation import rating_from_score, apply_tag_curation, load_dynamic_mappings
 
-# Try to use orjson for speed, fallback to standard json
-try:
-    import orjson as fastjson
-    def json_loads(x):
-        """Loads JSON fast."""
-        return fastjson.loads(x) # pylint: disable=no-member,c-extension-no-member
-except ImportError:
-    fastjson = None
-    def json_loads(x):
-        """Loads JSON."""
-        return json.loads(x)
+
+def json_loads(x):
+    """Loads JSON fast."""
+    return orjson.loads(x)
 
 # ==========================================
 # Tool 1: CSV to SQLite
@@ -117,12 +110,11 @@ def precache_posts(args):
 
     results = []
 
-    with posts_path.open("r", encoding="utf-8", errors="ignore") as f:
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
-            mapper = executor.map(_parse_post_line, f, chunksize=100)
-            for result in tqdm.tqdm(mapper, total=total_lines, desc="Parsing JSON"):
-                if result:
-                    results.append(result)
+    with posts_path.open("r", encoding="utf-8", errors="ignore") as f, ThreadPoolExecutor(max_workers=args.threads) as executor:
+        mapper = executor.map(_parse_post_line, f, chunksize=100)
+        for result in tqdm.tqdm(mapper, total=total_lines, desc="Parsing JSON"):
+            if result:
+                results.append(result)
 
     with sqlite3.connect(db_out) as conn:
         cur = conn.cursor()
@@ -290,199 +282,200 @@ def purge_images(args):
 
     db_config = get_shimmie_db_credentials(args.spath)
     shimmie_root = Path(args.spath)
+    if db_config:
+        with psycopg2.connect(**db_config) as conn:
+            cur = conn.cursor()
 
-    with psycopg2.connect(**db_config) as conn:
-        cur = conn.cursor()
-
-        # Step 1: Fetch suspects and ALL their tags using a CTE
-        cur.execute("""
-            WITH suspect_images AS (
-                SELECT DISTINCT i.id, i.hash
-                FROM images i
-                JOIN image_tags it ON i.id = it.image_id
+            # Step 1: Fetch suspects and ALL their tags using a CTE
+            cur.execute("""
+                WITH suspect_images AS (
+                    SELECT DISTINCT i.id, i.hash
+                    FROM images i
+                    JOIN image_tags it ON i.id = it.image_id
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE t.tag = ANY(%s)
+                    OR (
+                        t.tag NOT LIKE 'tagai:%%'
+                        AND t.tag NOT LIKE 'booru:%%'
+                        AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
+                    )
+                )
+                SELECT s.id, s.hash, string_agg(t.tag, ' ') as all_tags
+                FROM suspect_images s
+                JOIN image_tags it ON s.id = it.image_id
                 JOIN tags t ON it.tag_id = t.id
-                WHERE t.tag = ANY(%s)
-                   OR (
-                       t.tag NOT LIKE 'tagai:%%'
-                       AND t.tag NOT LIKE 'booru:%%'
-                       AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
-                   )
-            )
-            SELECT s.id, s.hash, string_agg(t.tag, ' ') as all_tags
-            FROM suspect_images s
-            JOIN image_tags it ON s.id = it.image_id
-            JOIN tags t ON it.tag_id = t.id
-            GROUP BY s.id, s.hash
-        """, (prefilter_list, prefilter_list))
+                GROUP BY s.id, s.hash
+            """, (prefilter_list, prefilter_list))
 
-        suspects = cur.fetchall()
+            suspects = cur.fetchall()
 
-        # Step 2: Evaluate the suspects locally against the complex rules
-        trash_images = []
-        breakdown_counts = {r['raw']: 0 for r in rules}
+            # Step 2: Evaluate the suspects locally against the complex rules
+            trash_images = []
+            breakdown_counts = {r['raw']: 0 for r in rules}
 
-        for img_id, hsh, tag_string in suspects:
-            raw_tags = tag_string.split(' ')
+            for img_id, hsh, tag_string in suspects:
+                raw_tags = tag_string.split(' ')
 
-            # Build an evaluation set that handles your broad sweep (stripping prefixes)
-            clean_tags = set(raw_tags)
-            for t in raw_tags:
-                if not t.startswith(("tagai:", "booru:")) and ":" in t:
-                    clean_tags.add(t.split(":", 1)[1])
+                # Build an evaluation set that handles your broad sweep (stripping prefixes)
+                clean_tags = set(raw_tags)
+                for t in raw_tags:
+                    if not t.startswith(("tagai:", "booru:")) and ":" in t:
+                        clean_tags.add(t.split(":", 1)[1])
 
-            # --- The Immunity Shield ---
-            if preserve_tags and any(pt in clean_tags for pt in preserve_tags):
-                continue  # Image is instantly spared!
+                # --- The Immunity Shield ---
+                if preserve_tags and any(pt in clean_tags for pt in preserve_tags):
+                    continue  # Image is instantly spared!
 
-            # Evaluate against all blacklist rules
-            triggered_rules = []
-            for rule in rules:
-                has_all_pos = all(p in clean_tags for p in rule['pos'])
-                has_any_neg = any(n in clean_tags for n in rule['neg'])
+                # Evaluate against all blacklist rules
+                triggered_rules = []
+                for rule in rules:
+                    has_all_pos = all(p in clean_tags for p in rule['pos'])
+                    has_any_neg = any(n in clean_tags for n in rule['neg'])
 
-                if has_all_pos and not has_any_neg:
-                    triggered_rules.append(rule['raw'])
+                    if has_all_pos and not has_any_neg:
+                        triggered_rules.append(rule['raw'])
 
-            if triggered_rules:
-                for r in triggered_rules:
-                    breakdown_counts[r] += 1
-                trash_images.append((img_id, hsh, tag_string, triggered_rules))
+                if triggered_rules:
+                    for r in triggered_rules:
+                        breakdown_counts[r] += 1
+                    trash_images.append((img_id, hsh, tag_string, triggered_rules))
 
-        # Sort breakdown by count descending
-        sorted_breakdown = sorted(breakdown_counts.items(), key=lambda item: item[1], reverse=True)
-        sorted_breakdown = [item for item in sorted_breakdown if item[1] > 0]
+            # Sort breakdown by count descending
+            sorted_breakdown = sorted(breakdown_counts.items(), key=lambda item: item[1], reverse=True)
+            sorted_breakdown = [item for item in sorted_breakdown if item[1] > 0]
 
-        if not trash_images:
-            print("[✓] Database is clean. No images found matching the blacklist.")
-            return
+            if not trash_images:
+                print("[✓] Database is clean. No images found matching the blacklist.")
+                return
 
-        print(f"\n[⚠️ WARNING] Found {len(trash_images)} unique images to permanently delete.")
-        print("\n=== CASUALTY BREAKDOWN BY RULE ===")
-        for rule_text, count in sorted_breakdown[:20]:
-            print(f"  - '{rule_text}': {count} images")
-        if len(sorted_breakdown) > 20:
-            print(f"  ... and {len(sorted_breakdown) - 20} more rules.")
-        print("==================================\n")
+            print(f"\n[⚠️ WARNING] Found {len(trash_images)} unique images to permanently delete.")
+            print("\n=== CASUALTY BREAKDOWN BY RULE ===")
+            for rule_text, count in sorted_breakdown[:20]:
+                print(f"  - '{rule_text}': {count} images")
+            if len(sorted_breakdown) > 20:
+                print(f"  ... and {len(sorted_breakdown) - 20} more rules.")
+            print("==================================\n")
 
-        # --- Dry Run Handler ---
-        if args.dry_run:
-            report_path = Path("purge_dry_run.txt")
+            # --- Dry Run Handler ---
+            if args.dry_run:
+                report_path = Path("purge_dry_run.txt")
 
-            # --- TOP 100 NOISE FILTERS ---
-            ignore_prefixes = ("booru:", "tagai:")
+                # --- TOP 100 NOISE FILTERS ---
+                ignore_prefixes = ("booru:", "tagai:")
 
-            # Tally up associated tags and track the rules that condemned them
-            associated_tags = {}
-            for _, _, tag_string, triggered_rules in trash_images:
-                for t in tag_string.split():
-                    if t.startswith(ignore_prefixes) or t in ignore_tags:
-                        continue
+                # Tally up associated tags and track the rules that condemned them
+                associated_tags = {}
+                for _, _, tag_string, triggered_rules in trash_images:
+                    for t in tag_string.split():
+                        if t.startswith(ignore_prefixes) or t in ignore_tags:
+                            continue
 
-                    base_t = t.split(":", 1)[1] if not t.startswith(("tagai:", "booru:")) and ":" in t else t
+                        base_t = t.split(":", 1)[1] if not t.startswith(("tagai:", "booru:")) and ":" in t else t
 
-                    if t not in prefilter_tags and base_t not in prefilter_tags:
-                        # Initialize the nested dictionary if this is a new tag
-                        if t not in associated_tags:
-                            associated_tags[t] = {'total': 0, 'rules': {}}
+                        if t not in prefilter_tags and base_t not in prefilter_tags:
+                            # Initialize the nested dictionary if this is a new tag
+                            if t not in associated_tags:
+                                associated_tags[t] = {'total': 0, 'rules': {}}
 
-                        associated_tags[t]['total'] += 1
+                            associated_tags[t]['total'] += 1
 
-                        # Tally up which specific rules brought this tag down
-                        for rule in triggered_rules:
-                            associated_tags[t]['rules'][rule] = associated_tags[t]['rules'].get(rule, 0) + 1
+                            # Tally up which specific rules brought this tag down
+                            for rule in triggered_rules:
+                                associated_tags[t]['rules'][rule] = associated_tags[t]['rules'].get(rule, 0) + 1
 
-            # 1. Sort by total frequency descending to find the 100 heaviest casualties
-            top_by_purge = sorted(associated_tags.items(), key=lambda x: x[1]['total'], reverse=True)[:100]
+                # 1. Sort by total frequency descending to find the 100 heaviest casualties
+                top_by_purge = sorted(associated_tags.items(), key=lambda x: x[1]['total'], reverse=True)[:100]
 
-            # 2. Fetch total database counts for those Top 100
-            top_tag_names = [t[0] for t in top_by_purge]
-            if top_tag_names:
-                cur.execute("SELECT tag, count FROM tags WHERE tag = ANY(%s)", (top_tag_names,))
-                db_totals = dict(cur.fetchall())
-            else:
-                db_totals = {}
+                # 2. Fetch total database counts for those Top 100
+                top_tag_names = [t[0] for t in top_by_purge]
+                if top_tag_names:
+                    cur.execute("SELECT tag, count FROM tags WHERE tag = ANY(%s)", (top_tag_names,))
+                    db_totals = dict(cur.fetchall())
+                else:
+                    db_totals = {}
 
-            # 3. Calculate remaining counts and build a final sortable list
-            final_top_100 = []
-            for tag_name, tag_data in top_by_purge:
-                purge_count = tag_data['total']
-                total = db_totals.get(tag_name, 0)
-                remaining = max(0, total - purge_count)
+                # 3. Calculate remaining counts and build a final sortable list
+                final_top_100 = []
+                for tag_name, tag_data in top_by_purge:
+                    purge_count = tag_data['total']
+                    total = db_totals.get(tag_name, 0)
+                    remaining = max(0, total - purge_count)
 
-                # Find the single rule that caused the most damage to this tag
-                top_rule, top_rule_count = max(tag_data['rules'].items(), key=lambda item: item[1])
+                    # Find the single rule that caused the most damage to this tag
+                    top_rule, top_rule_count = max(tag_data['rules'].items(), key=lambda item: item[1])
 
-                final_top_100.append({
-                    'tag_name': tag_name,
-                    'purge_count': purge_count,
-                    'remaining': remaining,
-                    'top_rule': top_rule,
-                    'top_rule_count': top_rule_count
-                })
+                    final_top_100.append({
+                        'tag_name': tag_name,
+                        'purge_count': purge_count,
+                        'remaining': remaining,
+                        'top_rule': top_rule,
+                        'top_rule_count': top_rule_count
+                    })
 
-            # 4. Re-sort the Top 100 strictly by what is remaining (Ascending, so 0 is at the top)
-            final_top_100.sort(key=lambda x: x['remaining'], reverse=True)
+                # 4. Re-sort the Top 100 strictly by what is remaining (Ascending, so 0 is at the top)
+                final_top_100.sort(key=lambda x: x['remaining'], reverse=True)
 
-            with open(report_path, "w", encoding="utf-8") as f:
-                f.write("=== CASUALTY BREAKDOWN BY RULE ===\n")
-                for rule_text, count in sorted_breakdown:
-                    f.write(f"  - '{rule_text}': {count} images\n")
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write("=== CASUALTY BREAKDOWN BY RULE ===\n")
+                    for rule_text, count in sorted_breakdown:
+                        f.write(f"  - '{rule_text}': {count} images\n")
 
-                f.write("\n=== TOP 100 MOST COMMON ASSOCIATED TAGS ===\n")
-                f.write("(Sorted by highest remaining count. Shows tags heavily impacted by the crossfire.)\n")
-                for item in final_top_100:
-                    f.write(f"  - {item['tag_name']}: {item['remaining']} remaining images ({item['purge_count']} purging) (Primary Offender: '{item['top_rule']}' with {item['top_rule_count']} hits)\n")
+                    f.write("\n=== TOP 100 MOST COMMON ASSOCIATED TAGS ===\n")
+                    f.write("(Sorted by highest remaining count. Shows tags heavily impacted by the crossfire.)\n")
+                    for item in final_top_100:
+                        f.write(f"  - {item['tag_name']}: {item['remaining']} remaining images \
+                            ({item['purge_count']} purging) (Primary Offender: '{item['top_rule']}' with {item['top_rule_count']} hits)\n")
 
-                f.write("\n=== IMAGES FLAGGED FOR DELETION ===\n")
-                for img_id, hsh, tag_string, triggered_rules in trash_images:
-                    f.write(f"ID: {img_id} | Hash: {hsh} | Triggered By: [{', '.join(triggered_rules)}] | Tags: {tag_string}\n")
+                    f.write("\n=== IMAGES FLAGGED FOR DELETION ===\n")
+                    for img_id, hsh, tag_string, triggered_rules in trash_images:
+                        f.write(f"ID: {img_id} | Hash: {hsh} | Triggered By: [{', '.join(triggered_rules)}] | Tags: {tag_string}\n")
 
-            print(f"[ℹ️ DRY RUN] Safe abort. Wrote full breakdown, collateral tags, and {len(trash_images)} targets to {report_path.resolve()}")
-            return
+                print(f"[ℹ️ DRY RUN] Safe abort. Wrote full breakdown, collateral tags, and {len(trash_images)} targets to {report_path.resolve()}")
+                return
 
-        confirm = input("Type 'YES' to delete files and database records: ")
-        if confirm != "YES":
-            print("Aborting.")
-            return
+            confirm = input("Type 'YES' to delete files and database records: ")
+            if confirm != "YES":
+                print("Aborting.")
+                return
 
-        deleted_files = 0
-        img_ids_to_drop = []
+            deleted_files = 0
+            img_ids_to_drop = []
 
-        # 1. Delete physical files off the hard drive
-        print("\n[Step 1/3] Deleting physical files from disk...")
-        for img_id, hsh, *_ in tqdm.tqdm(trash_images, desc="Files Purged", unit="file"):
-            img_ids_to_drop.append(img_id)
+            # 1. Delete physical files off the hard drive
+            print("\n[Step 1/3] Deleting physical files from disk...")
+            for img_id, hsh, *_ in tqdm.tqdm(trash_images, desc="Files Purged", unit="file"):
+                img_ids_to_drop.append(img_id)
 
-            # Shimmie2 path logic: data/images/ab/cd/hash (NO EXTENSIONS)
-            prefix1, prefix2 = hsh[0:2], hsh[2:4]
-            img_file = shimmie_root / "data" / "images" / prefix1 / prefix2 / hsh
-            thumb_file = shimmie_root / "data" / "thumbs" / prefix1 / prefix2 / hsh
+                # Shimmie2 path logic: data/images/ab/cd/hash (NO EXTENSIONS)
+                prefix1, prefix2 = hsh[0:2], hsh[2:4]
+                img_file = shimmie_root / "data" / "images" / prefix1 / prefix2 / hsh
+                thumb_file = shimmie_root / "data" / "thumbs" / prefix1 / prefix2 / hsh
 
-            if img_file.exists():
-                img_file.unlink()
-                deleted_files += 1
-            if thumb_file.exists():
-                thumb_file.unlink()
+                if img_file.exists():
+                    img_file.unlink()
+                    deleted_files += 1
+                if thumb_file.exists():
+                    thumb_file.unlink()
 
-        # 2. Delete from Postgres
-        print("\n[Step 2/3] Scrubbing Postgres database...")
-        print("  -> Dropping metadata links (image_tags)...")
-        cur.execute("DELETE FROM image_tags WHERE image_id = ANY(%s)", (img_ids_to_drop,))
-        print("  -> Dropping core image records (images)...")
-        cur.execute("DELETE FROM images WHERE id = ANY(%s)", (img_ids_to_drop,))
+            # 2. Delete from Postgres
+            print("\n[Step 2/3] Scrubbing Postgres database...")
+            print("  -> Dropping metadata links (image_tags)...")
+            cur.execute("DELETE FROM image_tags WHERE image_id = ANY(%s)", (img_ids_to_drop,))
+            print("  -> Dropping core image records (images)...")
+            cur.execute("DELETE FROM images WHERE id = ANY(%s)", (img_ids_to_drop,))
 
-        # 3. Recalculate tag counts and drop orphaned tags (count = 0)
-        print("\n[Step 3/3] Fixing Shimmie tag UI counts...")
-        print("  -> Recalculating tag usage counts (this may take a moment)...")
-        cur.execute("""
-            UPDATE tags
-            SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
-        """)
-        print("  -> Pruning orphaned tags with 0 count...")
-        cur.execute("DELETE FROM tags WHERE count = 0")
+            # 3. Recalculate tag counts and drop orphaned tags (count = 0)
+            print("\n[Step 3/3] Fixing Shimmie tag UI counts...")
+            print("  -> Recalculating tag usage counts (this may take a moment)...")
+            cur.execute("""
+                UPDATE tags
+                SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
+            """)
+            print("  -> Pruning orphaned tags with 0 count...")
+            cur.execute("DELETE FROM tags WHERE count = 0")
 
-        conn.commit()
-        print(f"\n[✓] Purge Complete: Destroyed {deleted_files} files and {len(img_ids_to_drop)} database entries.")
+            conn.commit()
+            print(f"\n[✓] Purge Complete: Destroyed {deleted_files} files and {len(img_ids_to_drop)} database entries.")
 
 # ==========================================
 # Tool 5: Retroactive Database Tag Curator

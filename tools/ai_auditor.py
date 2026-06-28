@@ -1,13 +1,12 @@
 # pylint: disable=line-too-long disable=too-many-locals disable=too-many-branches disable=too-many-statements disable=too-many-arguments disable=too-many-positional-arguments
 """Bridge script for integrating the SD-Tag-Editor submodule safely via JSON."""
 import os
-import json
 import sqlite3
 import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-
+import orjson
 import psycopg2
 import psycopg2.extras
 import tqdm
@@ -123,13 +122,14 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
             print("[ERROR] No thumbnails found matching the database records.")
             return
 
-        tagger_script = SUBMODULE_PATH / "run_json.py"
+        tagger_script = SUBMODULE_PATH / "run.py"
         cmd = [
             str(venv_python), "-u", str(tagger_script),
             f"--model={args.model}",
             f"--batch_size={args.batch}",
             f"--gen_threshold={args.gen_threshold}",
             f"--char_threshold={args.char_threshold}",
+            "--output_json",
             str(staging_dir)
         ]
 
@@ -168,7 +168,7 @@ def _run_scan(args, pg_cur, s_cur, q_cur):
             current_rating = data['rating']
 
             with open(json_file, 'r', encoding='utf-8') as f:
-                output = json.load(f)
+                output = orjson.loads(f.read())
 
             ratings = output.get("rating", {})
             char_tags = output.get("character", {})
@@ -421,27 +421,28 @@ def run_auditor(args):
         print("[ERROR] SD-Tag-Editor submodule not found.")
         return
 
-    actions = [a for a, flag in zip(["SCAN", "REVIEW", "APPLY", "REVERT"], [args.scan, args.review, args.apply, args.revert]) if flag]
+    actions = [a for a, flag in zip(["SCAN", "REVIEW", "APPLY", "REVERT"], [args.scan, args.review, args.apply, args.revert], strict=True) if flag]
     print(f"=== AI Safety Auditor ({' & '.join(actions)}) ===")
 
     db_config = get_shimmie_db_credentials(args.spath)
-    pg_conn = psycopg2.connect(**db_config)
-    pg_cur = pg_conn.cursor()
+    if db_config:
+        pg_conn = psycopg2.connect(**db_config)
+        pg_cur = pg_conn.cursor()
 
-    q_conn, s_conn, r_conn = _init_databases()
-    q_cur, s_cur, r_cur = q_conn.cursor(), s_conn.cursor(), r_conn.cursor()
+        q_conn, s_conn, r_conn = _init_databases()
+        q_cur, s_cur, r_cur = q_conn.cursor(), s_conn.cursor(), r_conn.cursor()
 
-    try:
-        if args.scan:
-            _run_scan(args, pg_cur, s_cur, q_cur)
-        if args.review:
-            _run_review(s_cur)
-        if args.apply:
-            _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=args.tags_only)
-        if args.revert:
-            _run_revert(pg_conn, pg_cur, r_conn, r_cur)
-    finally:
-        pg_conn.close()
-        for conn in (q_conn, s_conn, r_conn):
-            conn.commit()
-            conn.close()
+        try:
+            if args.scan:
+                _run_scan(args, pg_cur, s_cur, q_cur)
+            if args.review:
+                _run_review(s_cur)
+            if args.apply:
+                _run_apply(pg_conn, pg_cur, s_conn, s_cur, r_conn, r_cur, tags_only=args.tags_only)
+            if args.revert:
+                _run_revert(pg_conn, pg_cur, r_conn, r_cur)
+        finally:
+            pg_conn.close()
+            for conn in (q_conn, s_conn, r_conn):
+                conn.commit()
+                conn.close()

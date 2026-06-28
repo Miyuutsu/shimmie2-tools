@@ -1,14 +1,6 @@
-"""Common utilities and shared constants."""
-import os
 import sys
 import hashlib
 from pathlib import Path
-
-VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
-
-def get_cpu_threads():
-    """Determine CPU threads for multithreading"""
-    return os.cpu_count()
 
 def add_module_path(relative_path: str):
     """Adds the given relative path to sys.path if it's not already present."""

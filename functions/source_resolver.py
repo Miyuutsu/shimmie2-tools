@@ -1,4 +1,3 @@
-"""Functions for parsing and resolving source URLs."""
 import re
 
 def get_source_score(url):

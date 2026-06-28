@@ -1,8 +1,5 @@
-# pylint: disable=too-many-locals,broad-exception-caught
-"""Database and caching functions."""
 import os
 import re
-import sys
 import sqlite3
 import threading
 import subprocess
@@ -11,7 +8,8 @@ from contextlib import contextmanager
 from pathlib import Path
 import tqdm
 
-from functions.common import compute_md5, VIDEO_EXTS
+# if I'm importing functions, then this isn't a function, fix it
+from functions.common import compute_md5
 from functions.media import compute_danbooru_pixel_hash
 from functions.tags_curation import parse_tags
 
@@ -47,19 +45,20 @@ def _check_shimmie_for_md5(md5, shimmie_path, dbuser):
         ]
         res = subprocess.run(cmd, capture_output=True, text=True, check=False, cwd=shimmie_path)
         return md5 in res.stdout
-    except Exception: # pylint: disable=broad-exception-caught
-        print(f"Error checking Shimmie2 database! ({sys.exc_info()[0].__name__})")
+    except Exception as e: # pylint: disable=broad-exception-caught
+        print(f"Error checking Shimmie2 database! ({type(e).__name__})")
         return "error"
 
 def resolve_post(image: Path, shimmie_path, skip_existing, dbuser, cache) -> tuple:
     """Resolves the post information from the database or adds it to cache."""
+    video_exts = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
     with get_cache_conn(cache) as conn:
         cur = conn.cursor()
         post = None
 
         match = re.compile(r"[a-fA-F0-9]{32}").search(image.stem)
         md5 = match.group(0).lower() if match else compute_md5(image)
-        is_video = image.suffix.lower() in VIDEO_EXTS
+        is_video = image.suffix.lower() in video_exts
         px_hash = None
 
         if md5:
