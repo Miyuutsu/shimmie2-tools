@@ -1,6 +1,6 @@
 # Shimmie2 Master Toolsuite
 
-A consolidated, modular CLI application designed to manage, extend, and automate Shimmie2 database workflows. This toolsuite handles everything from massive batch CSV generation to local SQLite precaching and Danbooru wiki migrations.
+A consolidated, modular CLI application designed to manage, extend, and automate Shimmie2 database workflows. This toolsuite handles everything from massive batch CSV generation to local SQLite precaching.
 
 ---
 
@@ -10,12 +10,9 @@ The original standalone scripts have been unified into a single powerful entry p
 
 - **`audit-ratings`**: AI-powered safety auditor using the `SD-Tag-Editor` submodule to scan thumbnails, upgrade ratings, and apply shadow tags (`tagai:`).
 - **`csv2sqlite`**: Utility command to convert any standard CSV into an SQLite database.
-- **`import-wikis`**: Fetches Danbooru wiki pages, converts them to Shimmie-compatible BBCode/HTML, and imports them seamlessly.
 - **`make-csv`**: Generates bulk import CSVs for Shimmie2 with automated tag curation, source resolution, thumbnail generation, and dynamic tag mining.
 - **`precache`**: Parses massive Danbooru `posts.json` dumps into a fast, indexed SQLite database for rapid local tag lookups.
-- **`sync-wikis`**: Synchronizes offline wiki cache to your live Postgres database using custom HTML formatting.
 - **`update-ratings`**: Batch updates existing Shimmie image ratings based on dominant tag weights.
-- **`wiki-index`**: Creates and alphabetically sorts wiki index pages directly from the Shimmie2 database.
 
 ---
 
@@ -71,14 +68,7 @@ python shimmie_tool.py precache "input/posts.json" -o "database/posts_cache.db" 
 
 ```
 
-**3. Import Danbooru Wikis**
-
-```bash
-python shimmie_tool.py import-wikis --spath "/path/to/shimmie2/" --start-page 1 --pages 20 --convert shimmie
-
-```
-
-**4. Audit Ratings with AI**
+**3. Audit Ratings with AI**
 
 ```bash
 # Scan thumbnails and stage AI changes
@@ -98,7 +88,6 @@ shimmie2-tools/
 ├── database/                   # SQLite caches and mapping databases
 │   ├── artists.db
 │   ├── characters.db
-│   ├── danbooru_wiki_cache.db
 │   ├── posts_cache.db
 │   └── tag_rating_dominant.db
 ├── functions/                  # Core processing modules
@@ -114,7 +103,6 @@ shimmie2-tools/
 │   ├── csv_builder.py
 │   ├── db.py
 │   ├── images.py
-│   └── wiki.py
 ├── SD-Tag-Editor/              # AI submodule (Fork)
 ├── requirements.txt
 └── shimmie_tool.py             # Master CLI entry point
@@ -130,7 +118,6 @@ Pre-built database files are current as of **April 19, 2025**, using the Danboor
 Place these directly into your `database/` directory:
 
 * `posts_cache.db`: 4.1GB
-* `danbooru_wiki_cache.db`: 89.6MB
 
 🔗 **[Download Database files on Google Drive](https://drive.google.com/drive/folders/106pn_tpW4QgpPj-kwHC4x6cvdiqw5MaH?usp=drive_link)**
 
