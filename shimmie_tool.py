@@ -4,7 +4,7 @@ import argparse
 import os
 import sys
 
-from tools import csv_builder, db, images, wiki, ai_auditor, auto_tagger, extractor
+from tools import ai_auditor, auto_tagger, csv_builder, db, extractor, images
 
 def _add_audit_ratings_parser(subparsers):
     """Adds the audit-ratings command."""
@@ -184,28 +184,6 @@ def _add_generate_map_parser(subparsers):
     parser.add_argument("--target-tag", required=True, help="The tag identifying the botched batch (e.g., booru:bad_import)")
     parser.add_argument("--reference-tag", required=True, help="The pure historical tag (e.g., booru:gelbooru)")
 
-def _add_import_wikis_parser(subparsers):
-    """Adds the import-wikis command."""
-    parser = subparsers.add_parser("import-wikis", help="Import Danbooru wikis")
-    parser.add_argument("--spath", help="Path to shimmie root (Optional for cache-only mode)")
-    parser.add_argument("--start-page", type=int, default=1)
-    parser.add_argument("--pages", type=int, default=200)
-    parser.add_argument("--update-existing", action="store_true")
-    parser.add_argument(
-        "--convert",
-        choices=["raw", "markdown", "html", "shimmie"],
-        default="shimmie"
-    )
-    parser.add_argument("--update-cache", action="store_true")
-    parser.add_argument("--clear-cache", action="store_true")
-    parser.add_argument(
-        "--captcha", action="store_true", help="Enable Anti-Bot/PoW solver")
-    parser.add_argument(
-        "--endpoint",
-        default="wiki_pages.json",
-        help="Comma-separated endpoints (e.g. wiki_pages.json,pools.json)"
-    )
-
 def _add_precache_parser(subparsers):
     """Adds the precache command."""
     parser = subparsers.add_parser("precache", help="Pre-cache Danbooru posts.json to SQLite")
@@ -219,31 +197,12 @@ def _add_purge_parser(subparsers):
     parser.add_argument("--blacklist", default="blacklist.txt", help="Path to your blacklist text file")
     parser.add_argument("--dry-run", action="store_true", help="Generate a report without deleting anything")
 
-def _add_sync_wikis_parser(subparsers):
-    """Adds the sync-wikis command."""
-    parser = subparsers.add_parser("sync-wikis", help="Sync offline SQLite wiki cache to Shimmie2")
-    parser.add_argument("--spath", required=True, help="Path to shimmie root")
-    parser.add_argument("--update-existing", action="store_true",
-                        help="Overwrite existing pages in Shimmie")
-
 def _add_update_ratings_parser(subparsers):
     """Adds the update-ratings command."""
     parser = subparsers.add_parser("update-ratings", help="Update image ratings in Shimmie")
     parser.add_argument("--spath", required=True, help="Path to shimmie root")
     parser.add_argument("-q", "--qmax", type=int, default=250, help="Max questionable rating")
     parser.add_argument("-s", "--smax", type=int, default=50, help="Max safe rating")
-
-def _add_wiki_index_parser(subparsers):
-    """Adds the wiki-index command."""
-    parser = subparsers.add_parser(
-        "wiki-index", help="Create static HTML wiki site"
-    )
-    parser.add_argument("--spath", help="Path to shimmie root (Optional for offline mode)")
-    parser.add_argument("--output", type=str, default="wiki_html", help="Output directory path")
-    parser.add_argument("--sort", action="store_true", help="Enable sorting of tags in index")
-    parser.add_argument(
-        "--order", type=str, default="c,s,a,g", help="Sort order (Default: c,s,a,g)"
-    )
 
 def setup_parser():
     """Constructs the argument parser."""
@@ -270,12 +229,9 @@ def setup_parser():
     _add_download_parser(subparsers)
     _add_extractor_parser(subparsers)
     _add_generate_map_parser(subparsers)
-    _add_import_wikis_parser(subparsers)
     _add_precache_parser(subparsers)
     _add_purge_parser(subparsers)
-    _add_sync_wikis_parser(subparsers)
     _add_update_ratings_parser(subparsers)
-    _add_wiki_index_parser(subparsers)
 
     return parser, parser_csv, subparsers
 
@@ -319,12 +275,9 @@ def main():
         "download": images.run,
         "extract-chars": extractor.run_extractor,
         "generate-db-map": db.generate_db_curation_map,
-        "import-wikis": wiki.import_danbooru,
         "precache": db.precache_posts,
         "purge": db.purge_images,
-        "sync-wikis": wiki.sync_to_shimmie,
         "update-ratings": db.update_ratings,
-        "wiki-index": wiki.create_index
     }
 
     if args.command == "make-csv":

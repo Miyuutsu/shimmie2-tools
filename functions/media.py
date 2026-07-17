@@ -6,6 +6,8 @@ from pathlib import Path
 import pyvips
 from PIL import Image
 
+video_exts = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
+
 def compute_danbooru_pixel_hash(image_path: Path) -> str:
     """Compute Danbooru's specific pixel hash for image deduplication."""
     image = pyvips.Image.new_from_file(str(image_path), access="sequential")
@@ -56,7 +58,7 @@ def process_webp(task):
     """Process an image or video into a WebP thumbnail."""
     src_path, dst_path = task
 
-    if Path(src_path).suffix.lower() in VIDEO_EXTS:
+    if Path(src_path).suffix.lower() in video_exts:
         try:
             extract_video_thumbnail(src_path, dst_path)
         except subprocess.CalledProcessError as e:

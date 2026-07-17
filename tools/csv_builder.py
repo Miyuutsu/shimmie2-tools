@@ -39,6 +39,8 @@ CACHE_PATH = DB_DIR / "posts_cache.db"
 # Data Structures
 ResolutionData = namedtuple('ResolutionData', ['image', 'post', 'md5', 'px_hash', 'exists'])
 Mappings = namedtuple('Mappings', ['char', 'artist', 'rating'])
+video_exts = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
+
 
 def collect_files(image_path, video_path, batch_size):
     """Finds all valid files from provided paths, handles duplicates, and chunks them."""
@@ -52,7 +54,7 @@ def collect_files(image_path, video_path, batch_size):
     if video_path:
         vid_dir = Path(video_path)
         if vid_dir.is_dir():
-            files.extend([f for f in vid_dir.rglob("*") if f.is_file() and f.suffix.lower() in VIDEO_EXTS and f.stat().st_size > 0])
+            files.extend([f for f in vid_dir.rglob("*") if f.is_file() and f.suffix.lower() in video_exts and f.stat().st_size > 0])
 
     grouped_files = {}
     for f in files:
@@ -139,9 +141,8 @@ def enrich_tags(initial_tags, mappings):
         final_tags.append(tag)
         base_tag = tag.split(":", 1)[1] if tag.startswith(("character:", "artist:")) else tag
 
-        if base_tag in mappings.artist:
-            if f"artist:{base_tag}" not in final_tags:
-                final_tags.append(f"artist:{base_tag}")
+        if base_tag in mappings.artist and  f"artist:{base_tag}" not in final_tags:
+            final_tags.append(f"artist:{base_tag}")
 
     # Drop the raw, unprefixed artist tags
     return [t for t in final_tags if t not in mappings.artist]
@@ -181,9 +182,9 @@ def clean_resolution_tags(tags, image_path):
     """Calculates resolution tags based on pixel count and dimensions."""
     res_group = {"lowres", "highres", "absurdres",
                  "incredibly_absurdres", "wide_image", "tall_image"}
-    res_tags = [t for t in tags if not t in res_group]
+    res_tags = [t for t in tags if t not in res_group]
 
-    if image_path.suffix.lower() in VIDEO_EXTS:
+    if image_path.suffix.lower() in video_exts:
         width, height = get_video_resolution(image_path)
     else:
         width, height = get_image_resolution(image_path)
@@ -253,10 +254,7 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
         print(f"\n{image} skipped due to error!")
         return None, None, ("corrupt or unreadable", image.name)
 
-    if args.image_path and image.is_relative_to(args.image_path):
-        base_path = Path(args.image_path)
-    else:
-        base_path = Path(args.video_path)
+    base_path = Path(args.image_path) if args.image_path and image.is_relative_to(args.image_path) else Path(args.video_path)
     rel_path = image.relative_to(base_path)
     thumb_path = Path(args.prefix) / "thumbnails" / rel_path if args.thumbnail else ""
 
