@@ -6,8 +6,6 @@ from pathlib import Path
 import pyvips
 from PIL import Image
 
-from functions.common import VIDEO_EXTS
-
 def compute_danbooru_pixel_hash(image_path: Path) -> str:
     """Compute Danbooru's specific pixel hash for image deduplication."""
     image = pyvips.Image.new_from_file(str(image_path), access="sequential")

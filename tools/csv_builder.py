@@ -10,7 +10,6 @@ import warnings
 import tqdm
 from PIL import Image
 
-from functions.common import VIDEO_EXTS
 from functions.source_resolver import resolve_best_source
 from functions.db_cache import (
     resolve_post, save_post_to_cache, get_shimmie_db_credentials, get_cache_conn
