@@ -1,11 +1,11 @@
 # pylint: disable=line-too-long,too-many-locals,too-many-branches,too-many-statements,too-many-nested-blocks
 """Tools and classes for Mining tags to find equivalent mappings."""
-import os
-import re
 import csv
-import subprocess
-from collections import defaultdict, Counter
+import os
+import psycopg2
+import re
 import tqdm
+from collections import defaultdict, Counter
 
 from functions.common import compute_md5
 from functions.tags_curation import get_sidecar_tags
@@ -68,10 +68,7 @@ class TagCategoryGuard:
         if cat_s in self.strict and cat_c in self.strict and cat_s != cat_c:
             return False
 
-        if cat_s in self.strict and cat_c == 'general':
-            return False
-
-        return True
+        return not (cat_s in self.strict and cat_c == 'general')
 
 def _extract_hashes(image_list):
     """Helper to extract MD5s rapidly using regex and fallback."""
@@ -96,12 +93,19 @@ def _calculate_co_occurrences(image_list, img_to_md5, bulk_tags):
     valid_pairs = 0
 
     for img_path in tqdm.tqdm(image_list, desc="2/2: Mapping Co-occurrences", unit="img"):
-        canonical = bulk_tags.get(img_to_md5[img_path])
+        canonical_raw = bulk_tags.get(img_to_md5[img_path])
+        if not canonical_raw:
+            continue
+
+        # SHIELD 1: Strip AI tags from the Database canonical list
+        canonical = {t for t in canonical_raw if not t.startswith('tagai:')}
         if not canonical:
             continue
 
         valid_pairs += 1
-        sidecars = set(get_sidecar_tags(img_path))
+
+        # SHIELD 2: Strip AI tags from the Sidecar list
+        sidecars = {t for t in get_sidecar_tags(img_path) if not t.startswith('tagai:')}
 
         for s_tag in sidecars:
             sidecar_counts[s_tag] += 1
@@ -122,93 +126,58 @@ def build_tag_frequencies(image_list, db_conn, sqlite_conn):
     bulk_tags = get_bulk_canonical_tags(md5_set, db_conn, sqlite_conn)
     return _calculate_co_occurrences(image_list, img_to_md5, bulk_tags)
 
-def _process_context_chunk(escaped, db_conn, env, dep_sql):
-    """Helper to process a chunk of tags and return context sets/dicts."""
-    esc_str = "', '".join(escaped)
+def _process_context_chunk(tags_chunk, db_conn):
+    """Helper to process a chunk of tags and return context dicts."""
     chunk_counts = {}
-    chunk_deprecated = set()
-    chunk_wiki = set()
 
     try:
-        cmd = [
-            "psql", "-d", db_conn['dbname'], "-U", db_conn['user'],
-            "-h", db_conn['host'], "-t", "-A", "-c",
-            f"SELECT tag, count FROM tags WHERE tag IN ('{esc_str}');"
-        ]
-        res = subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
-        for line in res.stdout.strip().split('\n'):
-            if '|' in line:
-                parts = line.rsplit('|', 1)
-                chunk_counts[parts[0]] = int(parts[1])
-    except Exception as e: # pylint: disable=broad-exception-caught
+        with psycopg2.connect(**db_conn) as conn, conn.cursor() as cur:
+            # Safely pass the tags_chunk list directly into the execute parameters
+            cur.execute("""
+                SELECT
+                    CASE WHEN position(':' in tag) > 0
+                            THEN substring(tag from position(':' in tag) + 1)
+                            ELSE tag END,
+                    SUM(count)
+                FROM tags
+                WHERE tag = ANY(%s) OR substring(tag from position(':' in tag) + 1) = ANY(%s)
+                GROUP BY 1;
+            """, (tags_chunk, tags_chunk))
+
+            for tag_name, total_count in cur.fetchall():
+                chunk_counts[tag_name] = int(total_count)
+    except Exception as e:
         print(f"\n[WARNING] Global counts query failed: {e}")
 
-    try:
-        cmd_wiki = [
-            "psql", "-d", db_conn['dbname'], "-U", db_conn['user'],
-            "-h", db_conn['host'], "-t", "-A", "-c",
-            "SELECT REPLACE(LOWER(title), ' ', '_'), "
-            f"CASE WHEN {dep_sql} THEN 1 ELSE 0 END "
-            f"FROM wiki_pages WHERE REPLACE(LOWER(title), ' ', '_') IN ('{esc_str}');"
-        ]
-        res = subprocess.run(cmd_wiki, env=env, capture_output=True, text=True, check=True)
-        for line in res.stdout.strip().split('\n'):
-            if '|' in line:
-                parts = line.rsplit('|', 1)
-                chunk_wiki.add(parts[0])
-                if parts[1] == '1':
-                    chunk_deprecated.add(parts[0])
-    except Exception as e: # pylint: disable=broad-exception-caught
-        print(f"\n[WARNING] Wiki check query failed: {e}")
-
-    return chunk_counts, chunk_deprecated, chunk_wiki
+    return chunk_counts
 
 
 def _fetch_global_context(tags_set, db_conn, chunk_size=1000):
-    """Fetches full DB counts and wiki deprecation status."""
+    """Fetches full DB counts, entirely ignoring wiki deprecation."""
     g_counts = {}
-    deprecated = set()
-    has_wiki = set()
 
     if not db_conn:
-        return g_counts, deprecated, has_wiki
+        # Return empty sets for wiki outputs to maintain tuple compatibility
+        return g_counts, set(), set()
 
     env = os.environ.copy()
     if db_conn.get('password'):
         env['PGPASSWORD'] = db_conn['password']
 
     tags_set = list(tags_set)
-    print("\n[INFO] Fetching global DB stats and wiki context...")
-
-    dep_sql = (
-        r"REGEXP_REPLACE(body, ',\s*(do not use|ambiguous)', 'SAFE', 'ig') ~* '("
-        r"deprecated tag\.|ambiguous tag\. do not use\.|ambiguous\. do not use\.|"
-        r"do not use\. use|do not use this tag\. instead|do not use this tag\. use|"
-        r"\. do not use this tag\.</p>|; do not use this tag\.</p>|"
-        r"<p>do not use this tag\.</p>|\ndo not use this tag\.</p>|"
-        r"^do not use this tag\.</p>)'"
-    )
+    print("\n[INFO] Fetching global DB stats...")
 
     for i in tqdm.tqdm(range(0, len(tags_set), chunk_size), leave=False):
-        escaped = [t.replace("'", "''") for t in tags_set[i:i+chunk_size]]
-        if escaped:
-            c_counts, c_dep, c_wiki = _process_context_chunk(escaped, db_conn, env, dep_sql)
+        chunk = tags_set[i:i+chunk_size]
+        if chunk:
+            c_counts = _process_context_chunk(chunk, db_conn)
             g_counts.update(c_counts)
-            deprecated.update(c_dep)
-            has_wiki.update(c_wiki)
 
-    return g_counts, deprecated, has_wiki
+    return g_counts, set(), set()
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
 def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, global_ctx, db_cnt, guard, mode, freqs, thresholds):
     """Helper evaluating strict rules, segregated into Mining and Retro modes."""
-    is_deprecated = s_tag in global_ctx[1]
-
-    # Ignore subset formatting
-    if re.sub(r'_\([^)]+\)', '', s_tag) == re.sub(r'_\([^)]+\)', '', best_match):
-        return None
-    if f"({best_match})" in s_tag:
-        return None
 
     # Namespace Firewall
     cat_s = guard.get_category(s_tag)
@@ -221,44 +190,37 @@ def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, globa
     shares_root = guard.shares_lexical_root(s_tag, best_match)
 
     # 1. Strict Namespace Protection
-    if cat_s != cat_c:
-        if not shares_root:
-            # Deprecated tags can only cross namespaces if the math is undeniably strong
-            if not (is_deprecated and jaccard > 0.50):
-                return None
+    if cat_s != cat_c and not shares_root:
+        return None
+
+    # Calculate an effective score: Subsets get to use their inclusion score, others rely purely on Jaccard
+    effective_score = max(jaccard, inclusion) if shares_root else jaccard
 
     # 2. Mode-Specific Lexical & Redundancy Guards
     if mode == "mining":
-        # Redundancy Drop Logic
         if (freqs[4][s_tag][best_match] / s_count) >= thresholds[1]:
             if not guard.can_drop(s_tag, best_match):
                 return None
-            if not is_deprecated and (db_cnt > (s_count * 0.5) or db_cnt > 500):
-                return None
-            if s_tag in global_ctx[2] and not is_deprecated:
-                return None
             return "_DROP_"
 
-        # Lexical Guard
-        if jaccard < 0.75 and not shares_root:
-            # Minimum Standard: Deprecated tags MUST have strong inclusion to map without root
-            if not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
-                return None
+        jaccard_threshold = 0.60 if shares_root else 0.75
+        if effective_score < jaccard_threshold:
+            return None
     else:
-        # Lexical Guard (Retro Curation)
-        if jaccard < 0.75 and not shares_root:
-            # Minimum Standard: Deprecated tags MUST have strong inclusion to map without root
-            if not (is_deprecated and inclusion >= 0.50 and jaccard >= 0.15):
-                return None
+        jaccard_threshold = 0.60 if shares_root else 0.75
+        if effective_score < jaccard_threshold:
+            return None
 
     # 3. Structural Guard
     if not guard.check(s_tag, best_match, s_count):
         return None
 
-    # 4. The Absolute Panic Limit (No safe harbor bypasses for non-deprecated tags)
-    if not is_deprecated and (db_cnt > 500 or db_cnt > (s_count * 0.5)):
-        if jaccard < 0.95:
-            return None
+    # 4. The Absolute Panic Limit (Revised)
+    # We relax the strict Jaccard requirement if it is a proven alias/subset
+    is_proven_subset = shares_root and inclusion >= 0.85
+
+    if (db_cnt > 500 or db_cnt > (s_count * 0.5)) and not is_proven_subset and jaccard < 0.95:
+        return None
 
     return best_match
 
@@ -277,7 +239,8 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
             if c_tag == s_tag:
                 continue
 
-            union = s_count + freqs[2].get(c_tag, 0) - shared
+            global_c_count = global_ctx[0].get(c_tag, freqs[2].get(c_tag, 0))
+            union = s_count + global_c_count - shared
             jaccard = shared / union if union > 0 else 0
 
             if jaccard > best_jaccard:
@@ -285,16 +248,11 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                 best_match = c_tag
                 best_inclusion = shared / s_count
 
-        is_deprecated = s_tag in global_ctx[1]
-
         if best_match:
             raw_db_cnt = global_ctx[0].get(s_tag, freqs[2].get(s_tag, 0))
 
             # Database counts must only be artificially adjusted during retro-curation
-            if mode == "retro":
-                adjusted_db_cnt = max(0, raw_db_cnt - s_count)
-            else:
-                adjusted_db_cnt = raw_db_cnt
+            adjusted_db_cnt = max(0, raw_db_cnt - s_count) if mode == "retro" else raw_db_cnt
 
             final_match = _evaluate_match_guards(
                 s_tag, best_match, s_count, best_inclusion, best_jaccard, global_ctx, adjusted_db_cnt, guard, mode, freqs, thresholds
@@ -310,10 +268,9 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                     # Namespace inversion to upgrade DB tags
                     s_parts = s_tag.split(':', 1)
                     c_parts = final_match.split(':', 1)
-                    if len(s_parts) == 2 and len(c_parts) == 1:
-                        if s_parts[1] == final_match:
-                            out_s = final_match
-                            out_c = s_tag
+                    if len(s_parts) == 2 and len(c_parts) == 1 and s_parts[1] == final_match:
+                        out_s = final_match
+                        out_c = s_tag
                 else:
                     if final_match == "_DROP_":
                         confidence = 1.0
@@ -324,10 +281,6 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                     "Confidence": round(confidence, 4),
                     "Sample_Size": s_count
                 })
-            elif is_deprecated:
-                results.append({"Sidecar_Tag": s_tag, "Canonical_Tag": "_DROP_", "Confidence": 1.0, "Sample_Size": s_count})
-        elif is_deprecated:
-            results.append({"Sidecar_Tag": s_tag, "Canonical_Tag": "_DROP_", "Confidence": 1.0, "Sample_Size": s_count})
 
     return results
 

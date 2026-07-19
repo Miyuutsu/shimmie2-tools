@@ -8,15 +8,7 @@ from tools import ai_auditor, auto_tagger, csv_builder, db, extractor, images
 
 def _add_audit_ratings_parser(subparsers):
     """Adds the audit-ratings command."""
-    parser = subparsers.add_parser("audit-ratings", help="Audit safe images using AI Tagger submodule")
-
-    # Independent action flags
-    parser.add_argument("--scan", action="store_true", help="Run the AI model and stage tags/ratings")
-    parser.add_argument("--review", action="store_true", help="Print a summary of the staged changes")
-    parser.add_argument("--apply", action="store_true", help="Push staged tags/ratings to Shimmie")
-    parser.add_argument("--revert", action="store_true", help="Undo the last applied batch of AI changes")
-    parser.add_argument("--all", action="store_true", help="Scan ALL images, regardless of current rating.")
-    parser.add_argument("--tags-only", action="store_true", help="When applying, only push shadow tags and ignore rating upgrades.")
+    parser = subparsers.add_parser("audit-ratings", help="Audit images using AI Tagger submodule to inject shadow tags")
 
     parser.add_argument("--spath", required=True, help="Path to Shimmie root")
     parser.add_argument("--thumbs", help="Path to thumbnails (Defaults to spath/data/thumbs)")

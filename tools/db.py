@@ -117,8 +117,10 @@ def precache_posts(args):
 
     results = []
 
-    with posts_path.open("r", encoding="utf-8", errors="ignore") as f:
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+    with(
+        posts_path.open("r", encoding="utf-8", errors="ignore") as f,
+        ThreadPoolExecutor(max_workers=args.threads) as executor
+    ):
             mapper = executor.map(_parse_post_line, f, chunksize=100)
             for result in tqdm.tqdm(mapper, total=total_lines, desc="Parsing JSON"):
                 if result:
@@ -162,9 +164,14 @@ def _update_single_image(pg_cur, image_id, tag_rating_map, smax, qmax):
 
     total_score = 0
     for tag in tags:
-        clean_tag = tag[6:] if tag.startswith("tagai:") else tag
+        # 1. Real tags only: Ignore AI and booru metadata tags
+        if tag.startswith("booru:"):
+            continue
 
-        weight = tag_rating_map.get(clean_tag)
+        # 2. Strip standard namespaces to check against dominant rules
+        base_tag = tag.split(':', 1)[-1] if ':' in tag else tag
+
+        weight = tag_rating_map.get(base_tag)
         if weight is None:
             continue
         if weight == 1 and total_score == 0:
@@ -172,20 +179,19 @@ def _update_single_image(pg_cur, image_id, tag_rating_map, smax, qmax):
         elif weight > 1:
             total_score += weight
 
-    rating_letter = None
+    calc_rating = None
     if total_score > 0:
-        rating_letter = rating_from_score(total_score, smax, qmax)
+        calc_rating = rating_from_score(total_score, smax, qmax)
 
     pg_cur.execute("SELECT rating FROM images WHERE id = %s", (image_id,))
     current_rating = pg_cur.fetchone()[0]
 
-    if rating_letter is None:
-        rating_letter = current_rating if current_rating is not None else "?"
+    new_rating = calc_rating if calc_rating else current_rating
 
-    if current_rating != rating_letter:
+    if new_rating != current_rating:
         pg_cur.execute(
             "UPDATE images SET rating = %s WHERE id = %s",
-            (rating_letter, image_id)
+            (new_rating, image_id)
         )
         return 1
     return 0
@@ -431,7 +437,11 @@ def purge_images(args):
                 f.write("\n=== TOP 100 MOST COMMON ASSOCIATED TAGS ===\n")
                 f.write("(Sorted by highest remaining count. Shows tags heavily impacted by the crossfire.)\n")
                 for item in final_top_100:
-                    f.write(f"  - {item['tag_name']}: {item['remaining']} remaining images ({item['purge_count']} purging) (Primary Offender: '{item['top_rule']}' with {item['top_rule_count']} hits)\n")
+                    f.write(
+                        f"  - {item['tag_name']}: {item['remaining']} remaining images "
+                        f"({item['purge_count']} purging) "
+                        f"(Primary Offender: '{item['top_rule']}' with {item['top_rule_count']} hits)\n"
+                    )
 
                 f.write("\n=== IMAGES FLAGGED FOR DELETION ===\n")
                 for img_id, hsh, tag_string, triggered_rules in trash_images:
@@ -628,9 +638,6 @@ def generate_db_curation_map(args):
 
         print(f"[*] Locating Rosetta Stones (Images with both '{target_tag}' and '{ref_tag}')...")
 
-        pure_history_like = f"%{ref_tag}%"
-        bad_history_like = f"%{target_tag}%"
-
         cur.execute("""
             WITH rosetta_images AS (
                 SELECT it1.image_id
@@ -646,8 +653,8 @@ def generate_db_curation_map(args):
                     SELECT th.tags
                     FROM tag_histories th
                     WHERE th.image_id = r.image_id
-                      AND th.tags LIKE %s
-                      AND th.tags NOT LIKE %s
+                      AND %s = ANY(string_to_array(th.tags, ' '))
+                      AND NOT (%s = ANY(string_to_array(th.tags, ' ')))
                     ORDER BY th.id DESC LIMIT 1
                 ) as pure_history_tags,
                 (
@@ -657,7 +664,7 @@ def generate_db_curation_map(args):
                     WHERE it.image_id = r.image_id
                 ) as current_tags
             FROM rosetta_images r;
-        """, (target_tag, ref_tag, pure_history_like, bad_history_like))
+        """, (target_tag, ref_tag, ref_tag, target_tag))
 
         rows = cur.fetchall()
         print(f"    -> Found {len(rows):,} overlapping images to analyze.")
@@ -669,7 +676,7 @@ def generate_db_curation_map(args):
     co_occurrences = defaultdict(Counter)
     sidecar_overlap = defaultdict(Counter)
 
-    for pure_history, current_tags in tqdm.tqdm(rows, desc="Mapping Frequencies"):
+    for _, pure_history, current_tags in tqdm.tqdm(rows, desc="Mapping Frequencies"):
         if not pure_history or not current_tags:
             continue
 

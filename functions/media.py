@@ -1,6 +1,7 @@
 """Media processing functions (ImageMagick, FFmpeg, PyVips)."""
-import io
 import hashlib
+import io
+import json
 import subprocess
 from pathlib import Path
 import pyvips
@@ -97,15 +98,18 @@ def get_video_resolution(file_path: Path):
     try:
         cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0",
+            "-show_entries", "stream=width,height", "-of", "json",
             str(file_path)
         ]
         output = subprocess.check_output(cmd, text=True).strip()
-        if output and 'x' in output:
-            parts = output.split('\n', maxsplit=1)[0].split('x')
-            return int(parts[0]), int(parts[1])
-    except Exception as e: #pylint: disable=broad-exception-caught
+        data = json.loads(output)
+
+        if "streams" in data and len(data["streams"]) > 0:
+            stream = data["streams"][0]
+            return int(stream.get("width")), int(stream.get("height"))
+    except Exception as e:
         print(f"\nError getting resolution for {file_path}: {e}")
+
     return None, None
 
 def extract_video_thumbnail(src_path: Path, dst_path: Path):

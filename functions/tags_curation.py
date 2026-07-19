@@ -1,7 +1,7 @@
 """Functions for parsing, sorting, formatting, and reading text tags."""
-import re
-import html
 import csv
+import html
+import re
 from pathlib import Path
 
 def rating_from_score(total_score: int, safe_max: int, questionable_max: int) -> str:
@@ -61,9 +61,8 @@ def apply_tag_curation(tags, dynamic_mappings=None):
     step1_tags = []
 
     for tag in tags:
-        if ':' not in tag:
-            if any(f"{p}{tag}" in original_set for p in prefixes):
-                continue
+        if ':' not in tag and any(f"{p}{tag}" in original_set for p in prefixes):
+            continue
         step1_tags.append(tag)
 
     step2_tags = [master_merge_list.get(tag, tag) for tag in step1_tags]
@@ -71,18 +70,16 @@ def apply_tag_curation(tags, dynamic_mappings=None):
     step3_tags = []
 
     for tag in step2_tags:
-        if ':' not in tag:
-            if any(f"{p}{tag}" in merged_set for p in prefixes):
-                continue
+        if ':' not in tag and any(f"{p}{tag}" in merged_set for p in prefixes):
+            continue
         step3_tags.append(tag)
 
     step3_set = set(step3_tags)
     step4_tags = []
     for tag in step3_tags:
-        if tag.endswith("_(cosplay)"):
-            if f"character:{tag[:-10]}" in step3_set:
-                step4_tags.append("cosplay")
-                continue
+        if tag.endswith("_(cosplay)") and f"character:{tag[:-10]}" in step3_set:
+            step4_tags.append("cosplay")
+            continue
         step4_tags.append(tag)
 
     tags[:] = [t for t in step4_tags if t not in ("tagme", "_DROP_")]

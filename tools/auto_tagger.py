@@ -31,7 +31,10 @@ def run_auto_tagger(args):
             dbuser = creds.get('user')
 
     all_images = [f for f in image_dir.rglob("*") if f.is_file() and f.suffix.lower() in ALLOWED_EXTS]
-    missing_sidecars = [f for f in all_images if not f.with_suffix(".txt").exists()]
+    missing_sidecars = [
+        f for f in all_images
+        if not f.with_suffix(".txt").exists() and not f.with_name(f.name + ".txt").exists()
+    ]
 
     if not missing_sidecars:
         print("[✓] All images already have sidecars. No action needed.")

@@ -1,4 +1,3 @@
-import os
 import re
 import sqlite3
 import threading
@@ -6,6 +5,7 @@ import subprocess
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
+import psycopg2
 import tqdm
 
 # if I'm importing functions, then this isn't a function, fix it
@@ -192,35 +192,26 @@ def _fetch_postgres_tags(md5_list, db_conn, chunk_size, results):
     if not db_conn:
         return
 
-    env = os.environ.copy()
-    if db_conn.get('password'):
-        env['PGPASSWORD'] = db_conn['password']
-
     missing = [m for m in md5_list if m not in results]
-    for i in tqdm.tqdm(range(0, len(missing), chunk_size), desc="Querying Postgres", leave=False):
-        chunk = missing[i:i+chunk_size]
-        if not chunk:
-            continue
+    try:
+        with psycopg2.connect(**db_conn) as conn, conn.cursor() as cur :
+            for i in tqdm.tqdm(range(0, len(missing), chunk_size), desc="Querying Postgres", leave=False):
+                chunk = missing[i:i+chunk_size]
+                if not chunk:
+                    continue
 
-        query = (
-            "SELECT i.hash, t.tag FROM tags t "
-            "JOIN image_tags it ON t.id = it.tag_id JOIN images i ON i.id = it.image_id "
-            "WHERE i.hash IN ('" + "', '".join(chunk) + "');"
-        )
-        try:
-            cmd = [
-                "psql", "-d", db_conn['dbname'], "-U", db_conn['user'],
-                "-h", db_conn['host'], "-t", "-A", "-c", query
-            ]
-            res = subprocess.run(
-                cmd, env=env, capture_output=True, text=True, check=True
-            )
-            for line in res.stdout.strip().split('\n'):
-                if '|' in line:
-                    hsh, tag = line.split('|', 1)
+                # The ANY operator natively accepts a Python list/tuple
+                cur.execute("""
+                    SELECT i.hash, t.tag FROM tags t
+                    JOIN image_tags it ON t.id = it.tag_id
+                    JOIN images i ON i.id = it.image_id
+                    WHERE i.hash = ANY(%s);
+                """, (chunk,))
+
+                for hsh, tag in cur.fetchall():
                     results[hsh].add(tag.strip())
-        except Exception as e:
-            print(f"\n[WARNING] Bulk DB query failed for a chunk: {e}")
+    except Exception as e:
+        print(f"\n[WARNING] Bulk DB query failed for a chunk: {e}")
 
 def get_bulk_canonical_tags(md5_set, db_conn, sqlite_conn, chunk_size=1000):
     """Fetches canonical tags for a large set of MD5s in bulk to avoid N+1 queries."""

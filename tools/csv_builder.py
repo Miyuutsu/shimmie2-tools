@@ -150,33 +150,51 @@ def enrich_tags(initial_tags, mappings):
 def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
     """Determines rating based on tag weights or fallback to database if available"""
     total_score = 0
+    real_tag_count = 0
     for tag in tags:
-        clean_tag = tag[6:] if tag.startswith("tagai:") else tag
+        # 1. Real tags only
+        if tag.startswith(("tagai:", "booru:")):
+            continue
 
-        weight = rating_map.get(clean_tag, 0)
+        real_tag_count += 1
+
+        # 2. Strip namespace
+        base_tag = tag.split(":", 1)[-1] if ":" in tag else tag
+
+        weight = rating_map.get(base_tag, 0)
         if weight > 1:
             total_score += weight
         elif weight == 1 and total_score == 0:
             total_score = 1
 
-    rating_letter = None
+    calc_rating = None
     if 0 < total_score <= smax and "tagme" in tags:
-        rating_letter = "?"
+        calc_rating = "?"
     elif total_score > 0:
-        rating_letter = rating_from_score(total_score, smax, qmax)
+        calc_rating = rating_from_score(total_score, smax, qmax)
 
-    if rating_letter is None:
-        r_str = str(post_rating_list).lower()
-        if  r_str in ["e", "explicit"]:
-            rating_letter = "e"
-        elif r_str in ["q", "questionable", "sensitive"]:
-            rating_letter = "q"
-        elif r_str in ["s", "g", "general", "safe"]:
-            rating_letter = "s"
+    # Resolve the original source rating
+    r_str = str(post_rating_list).lower()
+    if r_str in ["e", "explicit"]:
+        fallback_rating = "e"
+    elif r_str in ["q", "questionable", "sensitive"]:
+        fallback_rating = "q"
+    elif r_str in ["s", "g", "general", "safe"]:
+        fallback_rating = "s"
+    else:
+        fallback_rating = "?"
+
+    # 3. The AI Auditor Hierarchy Rule
+    if calc_rating:
+        if real_tag_count >= 10:
+            # Local tag math overrules source metadata completely
+            final_rating = calc_rating
         else:
-            rating_letter = "?"
+            # Too few tags: apply the AI Auditor Hierarchy rule (only upgrade)
+            hierarchy = {'s': 0, 'q': 1, 'e': 2}
+            final_rating = calc_rating if hierarchy.get(calc_rating, 0) > hierarchy.get(fallback_rating, 0) else fallback_rating
 
-    return "s" if rating_letter == "g" else rating_letter
+    return "s" if final_rating == "g" else final_rating
 
 def clean_resolution_tags(tags, image_path):
     """Calculates resolution tags based on pixel count and dimensions."""
