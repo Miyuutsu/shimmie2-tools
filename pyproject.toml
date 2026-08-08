@@ -13,10 +13,6 @@ select = [
     "RET",
     "B",
     "SIM",
+    "PLE",
+    "PLW",
 ]
-
-[tool.pyright]
-venvPath = "."
-venv = "venv"
-extraPaths = ["functions", "tools"]
-typeCheckingMode = "standard"

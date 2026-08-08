@@ -144,15 +144,15 @@ def _run_audit_pipeline(args, pg_conn, pg_cur, q_conn, q_cur):
                 base_db_tags = {t.split(':', 1)[-1] if ':' in t else t for t in data.get('tags', set())}
 
                 for tag, confidence in all_tags.items():
-                    tag = tag.replace(" ", "_").lower()
+                    tag_clean = tag.replace(" ", "_").lower()
 
                     q_cur.execute("INSERT OR IGNORE INTO ai_tags (image_hash, tag, confidence) VALUES (?, ?, ?)",
-                                  (img_hash, tag, confidence))
+                                  (img_hash, tag_clean, confidence))
 
-                    if tag in base_db_tags:
+                    if tag_clean in base_db_tags:
                         continue
 
-                    prefixed_tag = f"tagai:{tag}"
+                    prefixed_tag = f"tagai:{tag_clean}"
                     if prefixed_tag in tag_id_cache:
                         tag_id = tag_id_cache[prefixed_tag]
                     else:

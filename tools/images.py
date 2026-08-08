@@ -3,6 +3,7 @@
 The 'too big to manage again' edition.
 Image Downloader with Threaded API, Subfolders, Checkpoints, WAL Support, and Error Logging.
 """
+from contextlib import suppress
 import hashlib
 import time
 import sqlite3
@@ -311,10 +312,8 @@ def _parse_input_query(query, default_base):
             start_id = page_param
             start_page = None
         else:
-            try:
+            with suppress(ValueError):
                 start_page = int(page_param)
-            except ValueError:
-                pass
 
     return tags, start_page, start_id, detected_base
 
@@ -986,11 +985,10 @@ def _fetch_all_posts_threaded(ctx: FetchContext, start_page: int, start_id: Opti
     all_posts = []
 
     forced_threaded = False
-    if start_id:
-        if _probe_smart_resume(ctx, start_id):
-            forced_threaded = True
-            start_page = 1
-            start_id = None
+    if start_id and _probe_smart_resume(ctx, start_id):
+        forced_threaded = True
+        start_page = 1
+        start_id = None
 
     use_sequential = (
         (start_page is not None and start_page >= PAGINATION_LIMIT) or
@@ -1009,10 +1007,7 @@ def _fetch_all_posts_threaded(ctx: FetchContext, start_page: int, start_id: Opti
 
     if use_sequential:
         if not start_id:
-            if all_posts and all_posts[-1].get('id'):
-                start_id = f"b{all_posts[-1]['id']}"
-            else:
-                start_id = "b999999999"
+            start_id = f"b{all_posts[-1]['id']}" if all_posts and all_posts[-1].get('id') else "b999999999"
 
         seq_posts = _fetch_sequential_loop(ctx, start_id)
         all_posts.extend(seq_posts)

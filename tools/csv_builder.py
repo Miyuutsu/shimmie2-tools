@@ -422,7 +422,7 @@ def _process_single_batch(batch, maps, args, dbuser, existing_thumbs):
     thumb_tasks = []
     batch_skips = []
 
-    for img, res_tuple in zip(batch, results):
+    for img, res_tuple in zip(batch, results, strict=True):
         row, thumb_key, skip_info = process_image_result(
             img, ResolutionData(*res_tuple), args, mappings, dynamic_mappings
         )
