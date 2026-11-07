@@ -3,7 +3,6 @@
 import csv
 import json
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from collections import Counter, defaultdict
@@ -57,99 +56,6 @@ def csv_to_sqlite(args):
             )
 
     print(f"[✓] Converted '{args.csv}' to '{args.db}' in table '{args.table}'.")
-
-# ==========================================
-# Tool 2: Precache Posts to SQLite
-# ==========================================
-def _parse_post_line(line: str):
-    """Parses a single line of Danbooru posts.json."""
-    try:
-        post = json_loads(line)
-    except Exception as e: # pylint: disable=broad-exception-caught
-        print(f"[SKIP] JSON decode error: {e}")
-        return None
-
-    md5 = post.get("md5") or post.get("media_asset", {}).get("md5")
-    pixel_hash = post.get("media_asset", {}).get("pixel_hash")
-    raw_key = md5 or pixel_hash
-
-    if not isinstance(raw_key, str):
-        return None
-
-    cache_key = raw_key.lower()
-    general_tags = post.get("tag_string_general", "").split()
-    character_tags = post.get("tag_string_character", "").split()
-    series_tags = post.get("tag_string_copyright", "").split()
-    artist_tags = post.get("tag_string_artist", "").split()
-    rating = post.get("rating", "")
-    source = post.get("source", None)
-
-    has_data = any([
-        general_tags, character_tags, series_tags,
-        artist_tags, rating, source, pixel_hash
-    ])
-    if not has_data:
-        return None
-
-    return (cache_key, {
-        "pixel_hash": pixel_hash or "",
-        "rating": rating,
-        "source": source,
-        "general": general_tags,
-        "character": character_tags,
-        "artist": artist_tags,
-        "series": series_tags
-    })
-
-def precache_posts(args):
-    """Pre-caches JSON dump to SQLite for fast lookups."""
-    posts_path = Path(args.posts_json)
-    db_out = Path(args.output)
-
-    print("=== Precache Run Summary ===")
-    print(f"📁 Input File:      {posts_path}")
-    print(f"🗄️ Output DB:       {db_out}")
-    print(f"🧵 Threads:         {args.threads}\n")
-
-    # FIX: Use 'with' to safely open and read line counts
-    with posts_path.open("r", encoding="utf-8", errors="ignore") as file_obj:
-        total_lines = sum(1 for _ in file_obj)
-
-    results = []
-
-    with(
-        posts_path.open("r", encoding="utf-8", errors="ignore") as f,
-        ThreadPoolExecutor(max_workers=args.threads) as executor
-    ):
-            mapper = executor.map(_parse_post_line, f, chunksize=100)
-            for result in tqdm.tqdm(mapper, total=total_lines, desc="Parsing JSON"):
-                if result:
-                    results.append(result)
-
-    with sqlite3.connect(db_out) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS posts (
-                md5 TEXT PRIMARY KEY, pixel_hash TEXT, rating TEXT, source TEXT,
-                general TEXT, character TEXT, artist TEXT, series TEXT
-            )
-        """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_pixel_hash ON posts(pixel_hash)")
-
-        print(f"[INFO] Writing {len(results):,} records to SQLite...")
-        for md5, post in results:
-            cur.execute("""
-                INSERT OR REPLACE INTO posts (
-                    md5, pixel_hash, rating, source, general, character, artist, series
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                md5, post.get("pixel_hash"), post.get("rating"), post.get("source"),
-                ",".join(post.get("general", [])), ",".join(post.get("character", [])),
-                ",".join(post.get("artist", [])), ",".join(post.get("series", []))
-            ))
-
-        conn.commit()
-    print(f"[✓] SQLite DB written to: {db_out}")
 
 # ==========================================
 # Tool 3: Update Postgres Ratings

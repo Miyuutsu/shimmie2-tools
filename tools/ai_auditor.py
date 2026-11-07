@@ -29,15 +29,16 @@ def _init_databases():
     q_conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_tags_hash ON ai_tags(image_hash)")
     return q_conn
 
-def _get_image_batches(pg_conn, batch_size=50000):
+def _get_image_batches(pg_conn, batch_size=5000):
     """Yields manageable dictionaries of images using a server-side cursor to prevent OOM."""
-    # A named cursor forces psycopg2 to keep the results on the server and stream them
     with pg_conn.cursor(name="audit_cursor") as cur:
         query = """
-            SELECT i.id, i.hash, t.tag
+            SELECT i.id, i.hash, array_agg(t.tag)
             FROM images i
             LEFT JOIN image_tags it ON i.id = it.image_id
             LEFT JOIN tags t ON it.tag_id = t.id
+            WHERE LOWER(i.ext) NOT IN ('gif', 'webm', 'mp4', 'flv', 'm4v', 'f4v', 'f4p', 'ogv')
+            GROUP BY i.id, i.hash
         """
         cur.execute(query)
 
@@ -47,11 +48,9 @@ def _get_image_batches(pg_conn, batch_size=50000):
                 break
 
             images_data = {}
-            for img_id, img_hash, tag in rows:
-                if img_hash not in images_data:
-                    images_data[img_hash] = {"id": img_id, "tags": set()}
-                if tag:
-                    images_data[img_hash]["tags"].add(tag)
+            for img_id, img_hash, tag_list in rows:
+                clean_tags = {t for t in tag_list if t is not None}
+                images_data[img_hash] = {"id": img_id, "tags": clean_tags}
 
             yield {
                 img_hash: data for img_hash, data in images_data.items()

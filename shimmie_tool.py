@@ -22,7 +22,8 @@ def _add_audit_ratings_parser(subparsers):
 def _add_auto_tag_parser(subparsers):
     """Adds the auto-tag command."""
     parser = subparsers.add_parser("auto-tag", help="Auto-generate missing sidecars using AI")
-    parser.add_argument("--images", required=True, help="Path to target images directory")
+    parser.add_argument("--images", help="Path to target images directory")
+    parser.add_argument("--videos", help="Path to target videos/GIFs directory")
     parser.add_argument("--spath", help="Path to Shimmie root (for Postgres DB checking)")
     parser.add_argument("--dir-as-artist", action="store_true", help="Use parent directory name as an un-prefixed artist tag")
 
@@ -62,7 +63,6 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
     parser.add_argument("--blacklist", default="blacklist.txt", help="Text file containing tags to drop (one per line)")
     parser.add_argument("--chunk-size", type=int, default=500, help="Split csv into chunks (Default: 500 lines)")
-    return parser
 
 def _add_csv2sqlite_parser(subparsers):
     """Adds the csv2sqlite command."""
@@ -78,8 +78,6 @@ def _add_curate_db_parser(subparsers):
     parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
     parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map for dynamic curation")
     parser.add_argument("--target-tag", help="Only curate images containing this specific tag")
-
-
 
 def _add_generate_map_parser(subparsers):
     """Adds the generate-db-map command."""
@@ -167,7 +165,6 @@ def main():
         "csv2sqlite": db.csv_to_sqlite,
         "curate-db": db.curate_existing_tags,
         "generate-db-map": db.generate_db_curation_map,
-        "precache": db.precache_posts,
         "purge": db.purge_images,
         "update-ratings": db.update_ratings,
     }
