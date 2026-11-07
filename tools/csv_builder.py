@@ -185,14 +185,13 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
         fallback_rating = "?"
 
     # 3. The AI Auditor Hierarchy Rule
-    if calc_rating:
-        if real_tag_count >= 10:
-            # Local tag math overrules source metadata completely
-            final_rating = calc_rating
-        else:
-            # Too few tags: apply the AI Auditor Hierarchy rule (only upgrade)
-            hierarchy = {'s': 0, 'q': 1, 'e': 2}
-            final_rating = calc_rating if hierarchy.get(calc_rating, 0) > hierarchy.get(fallback_rating, 0) else fallback_rating
+    if real_tag_count >= 10:
+        # Local tag math overrules source metadata completely
+        final_rating = calc_rating
+    else:
+        # Too few tags: apply the AI Auditor Hierarchy rule (only upgrade)
+        hierarchy = {'s': 0, 'q': 1, 'e': 2}
+        final_rating = calc_rating if hierarchy.get(calc_rating, 0) > hierarchy.get(fallback_rating, 0) else fallback_rating
 
     return "s" if final_rating == "g" else final_rating
 
