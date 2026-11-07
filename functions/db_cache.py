@@ -8,15 +8,15 @@ from pathlib import Path
 import psycopg2
 import tqdm
 
-# if I'm importing functions, then this isn't a function, fix it
 from functions.common import compute_md5
 from functions.media import compute_danbooru_pixel_hash
 from functions.tags_curation import parse_tags
 
+thread_local = threading.local()
+
 @contextmanager
 def get_cache_conn(cache):
     '''Use a connection cache'''
-    thread_local = threading.local()
     conn = getattr(thread_local, "conn", None)
     if conn is None:
         conn = sqlite3.connect(cache, check_same_thread=False)
