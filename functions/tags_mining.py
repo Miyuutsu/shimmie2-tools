@@ -1,7 +1,8 @@
 # pylint: disable=line-too-long,too-many-locals,too-many-branches,too-many-statements,too-many-nested-blocks
 """Tools and classes for Mining tags to find equivalent mappings."""
 import csv
-import os
+import json
+from pathlib import Path
 import psycopg2
 import re
 import tqdm
@@ -23,10 +24,38 @@ class TagCategoryGuard:
                     self.series.update(val)
                 else:
                     self.series.add(val)
-        self.strict = {'character', 'artist', 'series'}
+        self.strict = {'character', 'artist', 'series', 'studio', 'meta'}
+        self.known_general = self._load_known_general()
+
+    @staticmethod
+    def _load_known_general():
+        """Loads canonical general tags from tag_groups.json so valid tags don't overwrite each other."""
+        known = set()
+        root_dir = Path(__file__).parent.parent
+        candidates = [root_dir / "SD-Tag-Editor" / "tag_groups.json", root_dir / "tag_groups.json"]
+        group_file = next((p for p in candidates if p.is_file()), None)
+        if not group_file:
+            return known
+
+        with group_file.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        for subgroups in data.values():
+            if not isinstance(subgroups, dict):
+                continue
+            for content in subgroups.values():
+                if isinstance(content, list):
+                    known.update(content)
+                elif isinstance(content, dict):
+                    for sub_list in content.values():
+                        if isinstance(sub_list, list):
+                            known.update(sub_list)
+        return known
 
     def get_category(self, tag):
-        """Determines the category of a given tag based on mappings."""
+        """Determines the category of a given tag based on prefix or mappings."""
+        if tag.startswith(('character:', 'artist:', 'series:', 'studio:', 'meta:')):
+            return tag.split(':', 1)[0]
         if tag in self.chars:
             return 'character'
         if tag in self.artists:
@@ -37,14 +66,19 @@ class TagCategoryGuard:
 
     def shares_lexical_root(self, tag1, tag2):
         """Checks if two tags share a significant root word."""
-        w1 = {w for w in re.findall(r'[a-z0-9]+', re.sub(r'\([^)]+\)', '', tag1)) if len(w) > 2}
-        w2 = {w for w in re.findall(r'[a-z0-9]+', re.sub(r'\([^)]+\)', '', tag2)) if len(w) > 2}
+        b1 = tag1.split(':', 1)[-1]
+        b2 = tag2.split(':', 1)[-1]
+        w1 = {w for w in re.findall(r'[a-z0-9]+', re.sub(r'\([^)]+\)', '', b1)) if len(w) > 2}
+        w2 = {w for w in re.findall(r'[a-z0-9]+', re.sub(r'\([^)]+\)', '', b2)) if len(w) > 2}
         return bool(w1 & w2)
 
     def check(self, s_tag, c_tag, s_count):
         """Returns True if the category mapping is structurally permitted."""
         cat_s = self.get_category(s_tag)
         cat_c = self.get_category(c_tag)
+
+        if s_tag in self.known_general and c_tag in self.known_general:
+            return False
 
         if cat_s in self.strict and cat_c in self.strict and cat_s != cat_c:
             return False
@@ -53,8 +87,8 @@ class TagCategoryGuard:
             return False
 
         if cat_s == 'character' and cat_c == 'character' and s_count < 50:
-            b1 = re.sub(r'_\([^)]+\)$', '', s_tag)
-            b2 = re.sub(r'_\([^)]+\)$', '', c_tag)
+            b1 = re.sub(r'_\([^)]+\)$', '', s_tag.split(':', 1)[-1])
+            b2 = re.sub(r'_\([^)]+\)$', '', c_tag.split(':', 1)[-1])
             if b1 != b2 and b1 not in b2 and b2 not in b1:
                 return False
 
@@ -126,90 +160,64 @@ def build_tag_frequencies(image_list, db_conn, sqlite_conn):
     bulk_tags = get_bulk_canonical_tags(md5_set, db_conn, sqlite_conn)
     return _calculate_co_occurrences(image_list, img_to_md5, bulk_tags)
 
-def _process_context_chunk(tags_chunk, db_conn):
-    """Helper to process a chunk of tags and return context dicts."""
-    chunk_counts = {}
-
-    try:
-        with psycopg2.connect(**db_conn) as conn, conn.cursor() as cur:
-            # Safely pass the tags_chunk list directly into the execute parameters
-            cur.execute("""
-                SELECT
-                    CASE WHEN position(':' in tag) > 0
-                            THEN substring(tag from position(':' in tag) + 1)
-                            ELSE tag END,
-                    SUM(count)
-                FROM tags
-                WHERE tag = ANY(%s) OR substring(tag from position(':' in tag) + 1) = ANY(%s)
-                GROUP BY 1;
-            """, (tags_chunk, tags_chunk))
-
-            for tag_name, total_count in cur.fetchall():
-                chunk_counts[tag_name] = int(total_count)
-    except Exception as e:
-        print(f"\n[WARNING] Global counts query failed: {e}")
-
-    return chunk_counts
-
-
-def _fetch_global_context(tags_set, db_conn, chunk_size=1000):
-    """Fetches full DB counts, entirely ignoring wiki deprecation."""
+def _fetch_global_context(tags_set, db_conn):
+    """Fetches full DB counts in a single pass, entirely ignoring wiki deprecation."""
     g_counts = {}
 
-    if not db_conn:
+    if not db_conn or not tags_set:
         # Return empty sets for wiki outputs to maintain tuple compatibility
         return g_counts, set(), set()
 
-    env = os.environ.copy()
-    if db_conn.get('password'):
-        env['PGPASSWORD'] = db_conn['password']
-
-    tags_set = list(tags_set)
     print("\n[INFO] Fetching global DB stats...")
 
-    for i in tqdm.tqdm(range(0, len(tags_set), chunk_size), leave=False):
-        chunk = tags_set[i:i+chunk_size]
-        if chunk:
-            c_counts = _process_context_chunk(chunk, db_conn)
-            g_counts.update(c_counts)
+    # Pre-strip any prefixes in Python so we have a clean set of lookup targets
+    target_set = set(tags_set) | {t.split(":", 1)[-1] for t in tags_set if ":" in t}
+
+    try:
+        with psycopg2.connect(**db_conn) as conn, conn.cursor() as cur:
+            # Scan the `tags` table only ONCE instead of once per 1,000-tag chunk
+            cur.execute("SELECT tag, count FROM tags WHERE count > 0;")
+            for raw_tag, count in cur.fetchall():
+                cnt = int(count)
+                base_tag = raw_tag.split(":", 1)[-1] if ":" in raw_tag else raw_tag
+                if raw_tag in target_set or base_tag in target_set:
+                    g_counts[base_tag] = g_counts.get(base_tag, 0) + cnt
+                    if raw_tag != base_tag:
+                        g_counts[raw_tag] = g_counts.get(raw_tag, 0) + cnt
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"\n[WARNING] Global counts query failed: {e}")
 
     return g_counts, set(), set()
 
-# pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
-def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, global_ctx, db_cnt, guard, mode, freqs, thresholds):
+def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, db_cnt, guard, mode, freqs, thresholds):
     """Helper evaluating strict rules, segregated into Mining and Retro modes."""
 
     # Namespace Firewall
     cat_s = guard.get_category(s_tag)
     cat_c = guard.get_category(best_match)
-    if s_tag.startswith(('character:', 'artist:', 'series:', 'studio:', 'meta:')):
-        cat_s = s_tag.split(':', 1)[0]
-    if best_match.startswith(('character:', 'artist:', 'series:', 'studio:', 'meta:')):
-        cat_c = best_match.split(':', 1)[0]
 
     shares_root = guard.shares_lexical_root(s_tag, best_match)
 
     # 1. Strict Namespace Protection
-    if cat_s != cat_c and not shares_root:
+    if cat_s in guard.strict and cat_c in guard.strict and cat_s != cat_c:
         return None
+    # Never downgrade a prefixed tag into an unprefixed general tag
+    if ':' in s_tag and ':' not in best_match and mode != "retro":
+        return None
+    # If crossing between general and a strict category, require identical base root
+    if cat_s != cat_c:
+        b_s = re.sub(r'_\([^)]+\)$', '', s_tag.split(':', 1)[-1])
+        b_c = re.sub(r'_\([^)]+\)$', '', best_match.split(':', 1)[-1])
+        if b_s != b_c:
+            return None
 
     # Calculate an effective score: Subsets get to use their inclusion score, others rely purely on Jaccard
     effective_score = max(jaccard, inclusion) if shares_root else jaccard
 
-    # 2. Mode-Specific Lexical & Redundancy Guards
-    if mode == "mining":
-        if (freqs[4][s_tag][best_match] / s_count) >= thresholds[1]:
-            if not guard.can_drop(s_tag, best_match):
-                return None
-            return "_DROP_"
-
-        jaccard_threshold = 0.60 if shares_root else 0.75
-        if effective_score < jaccard_threshold:
-            return None
-    else:
-        jaccard_threshold = 0.60 if shares_root else 0.75
-        if effective_score < jaccard_threshold:
-            return None
+    # 2. Lexical / Jaccard Threshold Guard
+    jaccard_threshold = 0.60 if shares_root else 0.75
+    if effective_score < jaccard_threshold:
+        return None
 
     # 3. Structural Guard
     if not guard.check(s_tag, best_match, s_count):
@@ -221,6 +229,12 @@ def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, globa
 
     if (db_cnt > 500 or db_cnt > (s_count * 0.5)) and not is_proven_subset and jaccard < 0.95:
         return None
+
+    # 5. Redundancy Drop Check (ONLY runs after passing Jaccard + Panic Limit!)
+    if mode == "mining" and (freqs[4][s_tag][best_match] / s_count) >= thresholds[1]:
+        if not guard.can_drop(s_tag, best_match):
+            return None
+        return "_DROP_"
 
     return best_match
 
@@ -239,7 +253,8 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
             if c_tag == s_tag:
                 continue
 
-            global_c_count = global_ctx[0].get(c_tag, freqs[2].get(c_tag, 0))
+            # Ensure global_c_count is never smaller than the local sample count (prevents >1.0 Jaccard when SQLite > Postgres)
+            global_c_count = max(global_ctx[0].get(c_tag, 0), freqs[2].get(c_tag, 0))
             union = s_count + global_c_count - shared
             jaccard = shared / union if union > 0 else 0
 
@@ -255,7 +270,7 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
             adjusted_db_cnt = max(0, raw_db_cnt - s_count) if mode == "retro" else raw_db_cnt
 
             final_match = _evaluate_match_guards(
-                s_tag, best_match, s_count, best_inclusion, best_jaccard, global_ctx, adjusted_db_cnt, guard, mode, freqs, thresholds
+                s_tag, best_match, s_count, best_inclusion, best_jaccard, adjusted_db_cnt, guard, mode, freqs, thresholds
             )
 
             if final_match:
@@ -265,12 +280,16 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                 confidence = max(best_jaccard, best_inclusion)
 
                 if mode == "retro":
-                    # Namespace inversion to upgrade DB tags
                     s_parts = s_tag.split(':', 1)
                     c_parts = final_match.split(':', 1)
-                    if len(s_parts) == 2 and len(c_parts) == 1 and s_parts[1] == final_match:
-                        out_s = final_match
-                        out_c = s_tag
+                    if len(s_parts) == 2 and len(c_parts) == 1:
+                        s_base_clean = re.sub(r'_\([^)]+\)$', '', s_parts[1])
+                        if s_parts[1] == final_match or s_base_clean == final_match:
+                            out_s = final_match
+                            out_c = s_tag
+                        else:
+                            # Never downgrade a prefixed tag to a different unprefixed tag!
+                            continue
                 else:
                     if final_match == "_DROP_":
                         confidence = 1.0
@@ -282,7 +301,16 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                     "Sample_Size": s_count
                 })
 
-    return results
+    non_root_targets = Counter(
+        r["Canonical_Tag"] for r in results
+        if r["Canonical_Tag"] != "_DROP_"
+        and not guard.shares_lexical_root(r["Sidecar_Tag"], r["Canonical_Tag"])
+    )
+    return [
+        r for r in results
+        if non_root_targets[r["Canonical_Tag"]] <= 2
+        or guard.shares_lexical_root(r["Sidecar_Tag"], r["Canonical_Tag"])
+    ]
 
 def mine_tag_equivalencies(image_list, conns, output_path, mappings, thresholds=(10, 0.5)):
     """Scans images to discover 1:1 tag mappings using Jaccard similarity."""
@@ -297,7 +325,7 @@ def mine_tag_equivalencies(image_list, conns, output_path, mappings, thresholds=
     else:
         print(f"Successfully aligned {freqs[0]} images with database records.")
 
-    global_ctx = _fetch_global_context(freqs[1].keys(), db_conn)
+    global_ctx = _fetch_global_context(set(freqs[1].keys()) | set(freqs[2].keys()), db_conn)
     guard = TagCategoryGuard(mappings)
 
     # FIX: Explicitly pass mode="mining" to trigger the standard import defenses

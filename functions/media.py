@@ -163,7 +163,7 @@ def extract_video_frames(src_path: Path, max_frames: int = 5) -> list[Image.Imag
             return frames
 
         stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
+        #stream.thread_type = "AUTO"
 
         # Single slightly-randomized thumbnail (15% to 35% into the video)
         pcts = (

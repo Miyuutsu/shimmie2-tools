@@ -71,7 +71,7 @@ def _update_single_image(pg_cur, image_id, tag_rating_map, smax, qmax):
     total_score = 0
     for tag in tags:
         # 1. Real tags only: Ignore AI and booru metadata tags
-        if tag.startswith("booru:"):
+        if tag.startswith(("booru:", "tagai:")):
             continue
 
         # 2. Strip standard namespaces to check against dominant rules
@@ -457,6 +457,9 @@ def curate_existing_tags(args):
 
             apply_tag_curation(curated_tags, dynamic_mappings)
 
+            if "tagme" in current_tags and len(curated_tags) < 15:
+                curated_tags.append("tagme")
+
             curr_set = set(current_tags)
             cur_set = set(curated_tags)
 
@@ -513,11 +516,14 @@ def curate_existing_tags(args):
             )
 
         # 4. Sweep and Sync
-        print("Recalculating global UI tag counts...")
-        cur.execute("""
-            UPDATE tags
-            SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
-        """)
+        affected_tag_ids = list({tag_id_map[t] for _, t in tags_to_add} | {tid for _, tid in tags_to_remove})
+        if affected_tag_ids:
+            print(f"Recalculating UI tag counts for {len(affected_tag_ids)} affected tags...")
+            cur.execute("""
+                UPDATE tags
+                SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
+                WHERE id = ANY(%s)
+            """, (affected_tag_ids,))
 
         print("Dropping orphaned tags...")
         cur.execute("DELETE FROM tags WHERE count = 0")
@@ -611,7 +617,7 @@ def generate_db_curation_map(args):
 
     print("[*] Fetching mappings and global context to satisfy tags_mining.py...")
     mappings = load_mappings()
-    global_ctx = _fetch_global_context(sidecar_counts.keys(), db_config)
+    global_ctx = _fetch_global_context(set(sidecar_counts.keys()) | set(canonical_counts.keys()), db_config)
 
     # Blinder restored to bypass the 500-count limit specifically for inflated typos
     guard = TagCategoryGuard(mappings)

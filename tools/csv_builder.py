@@ -1,7 +1,7 @@
 # pylint: disable=too-many-locals,line-too-long,too-many-branches,too-many-statements
 """This is designed to help with batch importing into shimmie2"""
 from collections import defaultdict, namedtuple
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import csv
 import re
@@ -321,7 +321,7 @@ def process_image_result(image, res_data, args, mappings, dynamic_mappings):
         tag_str,
         "",
         rating,
-        str(thumb_path) if args.thumbnail else '""'
+        str(thumb_path) if args.thumbnail else ""
     ]
     return row, None, None
 
@@ -404,7 +404,7 @@ def generate_thumbnails(tasks, threads):
     """Handles the CPU-bound task of processing images."""
     if not tasks:
         return
-    with ProcessPoolExecutor(max_workers=threads) as imgpro:
+    with ThreadPoolExecutor(max_workers=threads) as imgpro:
         list(imgpro.map(process_webp, tasks))
 
 def get_thumbnail_path(img, args):

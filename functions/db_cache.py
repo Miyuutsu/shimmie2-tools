@@ -6,7 +6,9 @@ from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
 import psycopg2
+import psycopg2.extras
 import tqdm
+from urllib.parse import urlparse, parse_qs
 
 from functions.common import compute_md5
 from functions.media import compute_danbooru_pixel_hash
@@ -133,7 +135,7 @@ def save_post_to_cache(res_data, rating_letter, tags: list[str], pure_source_lin
         conn.commit()
 
 def get_shimmie_db_credentials(spath):
-    """Parses Shimmie2 config.php to extract PostgreSQL credentials."""
+    """Parses Shimmie2 config.php to extract PostgreSQL credentials across all DSN formats."""
     if not spath:
         return None
 
@@ -142,9 +144,9 @@ def get_shimmie_db_credentials(spath):
         print(f"[WARNING] Could not find Shimmie config at {spath}")
         return None
 
-    content = config_path.read_text(encoding='utf-8')
-    dsn_match = re.search(r"['\"]pgsql:([^'\"]+)['\"]", content)
+    content = config_path.read_text(encoding="utf-8")
 
+    # Optional standalone user/pass definitions (Legacy configs)
     user_match = (
         re.search(r"\$database_user\s*=\s*['\"]([^'\"]+)['\"]", content) or
         re.search(r"define\s*\(\s*['\"]DATABASE_USER['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", content)
@@ -154,16 +156,43 @@ def get_shimmie_db_credentials(spath):
         re.search(r"define\s*\(\s*['\"]DATABASE_PASS['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", content)
     )
 
+    # Case 1: URI-style DSN (e.g., pgsql://user:pass@localhost:5432/shimmie?host=/run/postgresql)
+    uri_match = re.search(r"['\"]((?:pgsql|postgres|postgresql)://[^'\"]+)['\"]", content)
+    if uri_match:
+        parsed = urlparse(uri_match.group(1))
+        query_params = parse_qs(parsed.query)
+        host = query_params.get("host", [parsed.hostname or "localhost"])[0]
+        res = {
+            "host": host,
+            "dbname": parsed.path.lstrip("/") or "shimmie",
+            "user": parsed.username or (user_match.group(1) if user_match else "postgres"),
+            "password": parsed.password or (pass_match.group(1) if pass_match else ""),
+        }
+        if parsed.port:
+            res["port"] = parsed.port
+        return res
+
+    # Case 2: PDO key-value DSN (e.g., pgsql:user=miyuu;host=/run/postgresql;dbname=shimmie)
+    dsn_match = re.search(r"['\"]pgsql:([^'\"]+)['\"]", content)
     if not dsn_match:
         return None
 
-    dsn_parts = dict(part.split('=') for part in dsn_match.group(1).split(';') if '=' in part)
-    return {
-        "host": dsn_parts.get('host', 'localhost'),
-        "dbname": dsn_parts.get('dbname', 'shimmie'),
-        "user": user_match.group(1) if user_match else 'postgres',
-        "password": pass_match.group(1) if pass_match else ''
+    dsn_parts = dict(
+        part.split("=", 1) for part in dsn_match.group(1).split(";") if "=" in part
+    )
+    res = {
+        "host": dsn_parts.get("host", "localhost"),
+        "dbname": dsn_parts.get("dbname", "shimmie"),
+        "user": dsn_parts.get("user") or (user_match.group(1) if user_match else "postgres"),
+        "password": (
+            dsn_parts["password"]
+            if "password" in dsn_parts
+            else (pass_match.group(1) if pass_match else "")
+        ),
     }
+    if "port" in dsn_parts:
+        res["port"] = dsn_parts["port"]
+    return res
 
 def _fetch_sqlite_tags(md5_list, sqlite_conn, results):
     """Helper to fetch tags from SQLite cache to reduce local variables."""
@@ -188,30 +217,40 @@ def _fetch_sqlite_tags(md5_list, sqlite_conn, results):
                     results[row[0]].update(clean_tags)
 
 def _fetch_postgres_tags(md5_list, db_conn, chunk_size, results):
-    """Helper to fetch tags from PostgreSQL to reduce local variables."""
+    """Helper to fetch tags from PostgreSQL in a single bulk pass."""
     if not db_conn:
         return
 
     missing = [m for m in md5_list if m not in results]
+    if not missing:
+        return
+
     try:
-        with psycopg2.connect(**db_conn) as conn, conn.cursor() as cur :
-            for i in tqdm.tqdm(range(0, len(missing), chunk_size), desc="Querying Postgres", leave=False):
-                chunk = missing[i:i+chunk_size]
-                if not chunk:
-                    continue
+        with psycopg2.connect(**db_conn) as conn, conn.cursor() as cur:
+            print("  -> Uploading hash list to temporary Postgres table...")
+            cur.execute("CREATE TEMP TABLE tmp_hashes (hash VARCHAR(32)) ON COMMIT DROP")
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO tmp_hashes (hash) VALUES %s",
+                [(m,) for m in missing],
+                page_size=10000
+            )
+            cur.execute("ANALYZE tmp_hashes")
 
-                # The ANY operator natively accepts a Python list/tuple
-                cur.execute("""
-                    SELECT i.hash, t.tag FROM tags t
-                    JOIN image_tags it ON t.id = it.tag_id
-                    JOIN images i ON i.id = it.image_id
-                    WHERE i.hash = ANY(%s);
-                """, (chunk,))
+            print("  -> Streaming matched tags from Postgres...")
+            cur.execute("""
+                SELECT i.hash, array_agg(t.tag)
+                FROM tmp_hashes th
+                JOIN images i ON i.hash = th.hash
+                JOIN image_tags it ON i.id = it.image_id
+                JOIN tags t ON it.tag_id = t.id
+                GROUP BY i.hash;
+            """)
 
-                for hsh, tag in cur.fetchall():
-                    results[hsh].add(tag.strip())
+            for hsh, tag_list in tqdm.tqdm(cur.fetchall(), desc="Reading Postgres tags", leave=False):
+                results[hsh].update(t.strip() for t in tag_list if t)
     except Exception as e:
-        print(f"\n[WARNING] Bulk DB query failed for a chunk: {e}")
+        print(f"\n[WARNING] Bulk DB query failed: {e}")
 
 def get_bulk_canonical_tags(md5_set, db_conn, sqlite_conn, chunk_size=1000):
     """Fetches canonical tags for a large set of MD5s in bulk to avoid N+1 queries."""
