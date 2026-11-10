@@ -6,6 +6,7 @@ import sys
 
 from tools import ai_auditor, auto_tagger, csv_builder, db
 
+
 def _add_audit_ratings_parser(subparsers):
     """Adds the audit-ratings command."""
     parser = subparsers.add_parser("audit-ratings", help="Audit images using AI Tagger submodule to inject shadow tags")
@@ -18,6 +19,7 @@ def _add_audit_ratings_parser(subparsers):
     parser.add_argument("--batch", type=int, default=20, help="Batch size for the AI inference")
     parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag confidence threshold")
     parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag confidence threshold")
+
 
 def _add_auto_tag_parser(subparsers):
     """Adds the auto-tag command."""
@@ -32,6 +34,7 @@ def _add_auto_tag_parser(subparsers):
     parser.add_argument("--batch", type=int, default=10, help="Batch size for AI inference")
     parser.add_argument("--gen-threshold", type=float, default=0.35, help="General tag threshold")
     parser.add_argument("--char-threshold", type=float, default=0.75, help="Character tag threshold")
+
 
 def _add_csv_parser(subparsers):
     """Adds the make-csv command."""
@@ -63,6 +66,8 @@ def _add_csv_parser(subparsers):
     parser.add_argument("--videos", dest="video_path", help="Path to videos directory")
     parser.add_argument("--blacklist", default="blacklist.txt", help="Text file containing tags to drop (one per line)")
     parser.add_argument("--chunk-size", type=int, default=500, help="Split csv into chunks (Default: 500 lines)")
+    return parser
+
 
 def _add_csv2sqlite_parser(subparsers):
     """Adds the csv2sqlite command."""
@@ -72,12 +77,14 @@ def _add_csv2sqlite_parser(subparsers):
     parser.add_argument("--drop_table", action="store_true", help="Drop table if exists")
     parser.add_argument("--table", default="data", help="Table name")
 
+
 def _add_curate_db_parser(subparsers):
     """Adds the curate-db command."""
     parser = subparsers.add_parser("curate-db", help="Retroactively apply curation rules to existing images in Shimmie2")
     parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
     parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map for dynamic curation")
     parser.add_argument("--target-tag", help="Only curate images containing this specific tag")
+
 
 def _add_generate_map_parser(subparsers):
     """Adds the generate-db-map command."""
@@ -86,11 +93,33 @@ def _add_generate_map_parser(subparsers):
     parser.add_argument("--target-tag", required=True, help="The tag identifying the botched batch (e.g., booru:bad_import)")
     parser.add_argument("--reference-tag", required=True, help="The pure historical tag (e.g., booru:gelbooru)")
 
+
 def _add_purge_parser(subparsers):
+    """Adds the purge command."""
     parser = subparsers.add_parser("purge", help="Permanently delete images based on blacklisted tags")
     parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
     parser.add_argument("--blacklist", default="blacklist.txt", help="Path to your blacklist text file")
     parser.add_argument("--dry-run", action="store_true", help="Generate a report without deleting anything")
+
+
+def _add_tag_dump_parser(subparsers):
+    """Adds the tag-dump command."""
+    parser = subparsers.add_parser("tag-dump", help="Dump low-frequency DB tags to a curation CSV")
+    parser.add_argument("--spath", required=True, help="Path to your Shimmie2 web root")
+    parser.add_argument("--min", type=int, default=5000, help="Dump tags used this many times or fewer (Default: 5000)")
+    parser.add_argument("--dv", type=float, default=0.20, help="Ratio of --min at or below which tags are auto-assigned _DROP_ (Default: 0.20)")
+    parser.add_argument(
+        "--exclude-prefix",
+        default="",
+        help="Comma-separated prefixes to exclude from the start of a tag (e.g., 'artist:, character:, series:')"
+    )
+    parser.add_argument(
+        "--exclude",
+        default="",
+        help="Comma-separated substrings to exclude if matched anywhere in a tag"
+    )
+    parser.add_argument("-o", "--out", default="tag_dump.csv", help="Output CSV file path (Default: tag_dump.csv)")
+
 
 def _add_update_ratings_parser(subparsers):
     """Adds the update-ratings command."""
@@ -98,6 +127,7 @@ def _add_update_ratings_parser(subparsers):
     parser.add_argument("--spath", required=True, help="Path to shimmie root")
     parser.add_argument("-q", "--qmax", type=int, default=250, help="Max questionable rating")
     parser.add_argument("-s", "--smax", type=int, default=50, help="Max safe rating")
+
 
 def setup_parser():
     """Constructs the argument parser."""
@@ -123,9 +153,11 @@ def setup_parser():
     _add_curate_db_parser(subparsers)
     _add_generate_map_parser(subparsers)
     _add_purge_parser(subparsers)
+    _add_tag_dump_parser(subparsers)
     _add_update_ratings_parser(subparsers)
 
     return parser, parser_csv, subparsers
+
 
 def _handle_make_csv(args, parser_csv):
     """Input validation wrapper for make-csv."""
@@ -141,15 +173,16 @@ def _handle_make_csv(args, parser_csv):
 
     csv_builder.run(args)
 
+
 def main():
     """Main CLI router."""
     parser, parser_csv, subparsers = setup_parser()
 
     if "--help-all" in sys.argv:
         parser.print_help()
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         for name, subparser in subparsers.choices.items():
-            print(f"\n[Command: {name}]\n" + "-"*30)
+            print(f"\n[Command: {name}]\n" + "-" * 30)
             subparser.print_help()
         sys.exit(0)
 
@@ -166,6 +199,7 @@ def main():
         "curate-db": db.curate_existing_tags,
         "generate-db-map": db.generate_db_curation_map,
         "purge": db.purge_images,
+        "tag-dump": db.tag_dump,
         "update-ratings": db.update_ratings,
     }
 
@@ -173,6 +207,7 @@ def main():
         _handle_make_csv(args, parser_csv)
     else:
         dispatch[args.command](args)
+
 
 if __name__ == "__main__":
     main()

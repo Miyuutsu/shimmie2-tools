@@ -48,7 +48,6 @@
 #// GENERIC WHITELIST
 #// ==========================================
 #// whitelist: banned_artist #// This IS for preservation to some degree, afterall...
-#// whitelist: animated,animated_gif,video #// This isn't properly handled at this time so retain all
 #// Need to find a way to filter down precure and doremi some...
 #// ==========================================
 #// NOISE FILTER FOR COMMON TAGS
@@ -130,6 +129,7 @@
 #// ==========================================
 
 4chan
+a_plague_tale:_innocence
 adventure_time
 aereist
 aika_(idwtbamg)
@@ -232,6 +232,8 @@ dc_comics
 deadinside97
 deleted_ot
 demiandwmx2
+dennis_mitchell
+dennis_the_menace
 despicable_me
 dewey_duck
 dil_pickles
@@ -309,6 +311,7 @@ gegege_no_kitarou_3
 gegege_no_kitarou_4
 gegege_no_kitarou_5
 gegege_no_kitarou_6
+gina_gillotti
 gipehtyboo
 gonelson_(artist)
 gonelson_characters
@@ -329,6 +332,7 @@ harriet_the_spy
 harvydraws
 hawkboku
 hazbin_hotel
+hb3d
 heckie
 hellaverse
 helluva_boss
@@ -380,6 +384,7 @@ kimberly_harris
 king_ghost-oh
 kino_makoto
 kiyoruki
+maicching_machiko-sensei
 knight_white
 knullmannen
 konaloid
@@ -557,6 +562,7 @@ sailor_senshi
 sailor_venus
 sally_(problemali12)
 salry_cheeze
+saltpeter_art
 sarah_colton
 satanas_potens
 sciurid
@@ -566,6 +572,7 @@ senninha
 senpaibuns
 senshi05
 serial_experiments_lain
+series:a_plague_tale
 series:mouthwashing
 sesame_street
 shadman
@@ -607,6 +614,7 @@ summerlumi
 super_sailor_chibi_moon
 susto_(artist)
 sweethex
+sweetstuff
 tails_(sonic)
 takaneru
 tarokana
@@ -621,12 +629,17 @@ the_boondocks
 the_coffin_of_andy_and_leyley
 the_flintstones
 the_grim_adventures_of_billy_&_mandy
+the_last_of_us 3d
+the_last_of_us 3d_(artwork)
+the_last_of_us 3d_animation
+the_last_of_us 3d_render
 the_little_girl_who_lives_down_the_lane
 the_little_mermaid
 the_loud_house
 the_mitchells_vs._the_machines
 the_mystery
 the_oblongs
+the_proud_family
 the_rookwood_sister_(king_ghost-oh)
 the_secret_of_kells
 the_simpsons
@@ -671,7 +684,6 @@ yasueye
 yokappa
 yolticki
 yoshimi
-youtube
 zeirat0_(artist)
 zeklullaby
 zinnyz_(artist)

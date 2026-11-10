@@ -195,13 +195,17 @@ def get_shimmie_db_credentials(spath):
     return res
 
 def _fetch_sqlite_tags(md5_list, sqlite_conn, results):
-    """Helper to fetch tags from SQLite cache to reduce local variables."""
+    """Helper to fetch tags from SQLite cache ONLY for hashes missing from Postgres."""
     if not sqlite_conn:
         return
 
+    missing = [m for m in md5_list if m not in results]
+    if not missing:
+        return
+
     cur = sqlite_conn.cursor()
-    for i in range(0, len(md5_list), 999):
-        chunk = md5_list[i:i+999]
+    for i in range(0, len(missing), 999):
+        chunk = missing[i:i+999]
         placeholders = ','.join(['?'] * len(chunk))
 
         query = (
@@ -217,12 +221,8 @@ def _fetch_sqlite_tags(md5_list, sqlite_conn, results):
                     results[row[0]].update(clean_tags)
 
 def _fetch_postgres_tags(md5_list, db_conn, chunk_size, results):
-    """Helper to fetch tags from PostgreSQL in a single bulk pass."""
-    if not db_conn:
-        return
-
-    missing = [m for m in md5_list if m not in results]
-    if not missing:
+    """Helper to fetch authoritative tags from PostgreSQL first in a single bulk pass."""
+    if not db_conn or not md5_list:
         return
 
     try:
@@ -232,8 +232,8 @@ def _fetch_postgres_tags(md5_list, db_conn, chunk_size, results):
             psycopg2.extras.execute_values(
                 cur,
                 "INSERT INTO tmp_hashes (hash) VALUES %s",
-                [(m,) for m in missing],
-                page_size=10000
+                [(m,) for m in md5_list],
+                page_size=chunk_size
             )
             cur.execute("ANALYZE tmp_hashes")
 
@@ -252,10 +252,10 @@ def _fetch_postgres_tags(md5_list, db_conn, chunk_size, results):
     except Exception as e:
         print(f"\n[WARNING] Bulk DB query failed: {e}")
 
-def get_bulk_canonical_tags(md5_set, db_conn, sqlite_conn, chunk_size=1000):
-    """Fetches canonical tags for a large set of MD5s in bulk to avoid N+1 queries."""
+def get_bulk_canonical_tags(md5_set, db_conn, sqlite_conn, chunk_size=10000):
+    """Fetches canonical tags for a large set of MD5s, prioritizing live Postgres over SQLite cache."""
     results = defaultdict(set)
     md5_list = list(md5_set)
-    _fetch_sqlite_tags(md5_list, sqlite_conn, results)
     _fetch_postgres_tags(md5_list, db_conn, chunk_size, results)
+    _fetch_sqlite_tags(md5_list, sqlite_conn, results)
     return results

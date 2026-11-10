@@ -1,31 +1,26 @@
 # pylint: disable=duplicate-code,line-too-long,too-many-locals,too-many-branches,too-many-statements
-"""Database management tools (SQLite Conversions, Precaching, Rating Updates)."""
-import csv
-import json
-import sqlite3
-from pathlib import Path
-
+"""Database management tools (SQLite Conversions, Precaching, Rating Updates, Tag Curation)."""
 from collections import Counter, defaultdict
+import csv
+import re
+from pathlib import Path
+import sqlite3
+
 import psycopg2
 import psycopg2.extras
 import tqdm
 
-from tools.csv_builder import load_mappings
-from functions.tags_mining import _fetch_global_context, TagCategoryGuard, calculate_equivalencies
 from functions.db_cache import get_shimmie_db_credentials
-from functions.tags_curation import rating_from_score, apply_tag_curation, load_dynamic_mappings
+from functions.source_resolver import get_source_score, resolve_prefixed_tag
+from functions.tags_curation import (
+    MASTER_MERGE_LIST,
+    apply_tag_curation,
+    load_dynamic_mappings,
+    rating_from_score,
+)
+from functions.tags_mining import TagCategoryGuard, _fetch_global_context, calculate_equivalencies
+from tools.csv_builder import load_mappings
 
-# Try to use orjson for speed, fallback to standard json
-try:
-    import orjson as fastjson
-    def json_loads(x):
-        """Loads JSON fast."""
-        return fastjson.loads(x) # pylint: disable=no-member,c-extension-no-member
-except ImportError:
-    fastjson = None
-    def json_loads(x):
-        """Loads JSON."""
-        return json.loads(x)
 
 # ==========================================
 # Tool 1: CSV to SQLite
@@ -36,47 +31,39 @@ def csv_to_sqlite(args):
     if not csv_path.is_file():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
-    with open(csv_path, newline='', encoding='utf-8') as f:
+    with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         headers = next(reader)
 
         safe_table = f'"{args.table.replace("\"", "\"\"")}"'
-        create_cols = ', '.join([f'"{h.replace("\"", "\"\"")}" TEXT' for h in headers])
-        insert_cols = ', '.join([f'"{h.replace("\"", "\"\"")}"' for h in headers])
-        placeholders = ', '.join(['?'] * len(headers))
+        create_cols = ", ".join([f'"{h.replace("\"", "\"\"")}" TEXT' for h in headers])
+        insert_cols = ", ".join([f'"{h.replace("\"", "\"\"")}"' for h in headers])
+        placeholders = ", ".join(["?"] * len(headers))
 
         with sqlite3.connect(args.db) as conn:
             cursor = conn.cursor()
             if args.drop_table:
                 cursor.execute(f"DROP TABLE IF EXISTS {safe_table}")
-            cursor.execute(f'CREATE TABLE {safe_table} ({create_cols})')
+            cursor.execute(f"CREATE TABLE {safe_table} ({create_cols})")
             cursor.executemany(
-                f'INSERT INTO {safe_table} ({insert_cols}) VALUES ({placeholders})',
+                f"INSERT INTO {safe_table} ({insert_cols}) VALUES ({placeholders})",
                 reader
             )
 
     print(f"[✓] Converted '{args.csv}' to '{args.db}' in table '{args.table}'.")
 
-# ==========================================
-# Tool 3: Update Postgres Ratings
-# ==========================================
-def _update_single_image(pg_cur, image_id, tag_rating_map, smax, qmax):
-    """Helper to process a single image's rating to reduce local variables."""
-    pg_cur.execute("""
-        SELECT t.tag FROM tags t JOIN image_tags it ON t.id = it.tag_id
-        WHERE it.image_id = %s
-    """, (image_id,))
-    tags = [t[0] for t in pg_cur.fetchall()]
 
+# ==========================================
+# Tool 2: Update Postgres Ratings
+# ==========================================
+def _calculate_new_rating(tags, current_rating, tag_rating_map, smax, qmax):
+    """Calculates a single image's new rating from its tag list."""
     total_score = 0
     for tag in tags:
-        # 1. Real tags only: Ignore AI and booru metadata tags
-        if tag.startswith(("booru:", "tagai:")):
+        if not tag or tag.startswith(("booru:", "tagai:")):
             continue
 
-        # 2. Strip standard namespaces to check against dominant rules
-        base_tag = tag.split(':', 1)[-1] if ':' in tag else tag
-
+        base_tag = tag.split(":", 1)[-1] if ":" in tag else tag
         weight = tag_rating_map.get(base_tag)
         if weight is None:
             continue
@@ -85,22 +72,9 @@ def _update_single_image(pg_cur, image_id, tag_rating_map, smax, qmax):
         elif weight > 1:
             total_score += weight
 
-    calc_rating = None
-    if total_score > 0:
-        calc_rating = rating_from_score(total_score, smax, qmax)
+    calc_rating = rating_from_score(total_score, smax, qmax) if total_score > 0 else None
+    return calc_rating if calc_rating else current_rating
 
-    pg_cur.execute("SELECT rating FROM images WHERE id = %s", (image_id,))
-    current_rating = pg_cur.fetchone()[0]
-
-    new_rating = calc_rating if calc_rating else current_rating
-
-    if new_rating != current_rating:
-        pg_cur.execute(
-            "UPDATE images SET rating = %s WHERE id = %s",
-            (new_rating, image_id)
-        )
-        return 1
-    return 0
 
 def update_ratings(args):
     """Updates existing ratings in shimmiedb based on dominant tags."""
@@ -122,20 +96,44 @@ def update_ratings(args):
 
     with psycopg2.connect(**pg_config) as pg_conn:
         pg_cur = pg_conn.cursor()
-        pg_cur.execute("SELECT id FROM images")
-        ids = [row[0] for row in pg_cur.fetchall()]
-        updated = 0
+        print("Fetching images and tags from Postgres...")
+        pg_cur.execute("""
+            SELECT i.id, i.rating, array_agg(t.tag)
+            FROM images i
+            LEFT JOIN image_tags it ON i.id = it.image_id
+            LEFT JOIN tags t ON it.tag_id = t.id
+            GROUP BY i.id, i.rating
+        """)
+        rows = pg_cur.fetchall()
 
-        for i, image_id in enumerate(ids, start=1):
-            print(f"Processing image {i}/{len(ids)}", end="\r")
-            updated += _update_single_image(pg_cur, image_id, tag_rating_map, args.smax, args.qmax)
+        updates = []
+        for image_id, current_rating, tags in tqdm.tqdm(rows, desc="Evaluating Ratings", leave=False):
+            new_rating = _calculate_new_rating(
+                tags or (), current_rating, tag_rating_map, args.smax, args.qmax
+            )
+            if new_rating != current_rating:
+                updates.append((image_id, new_rating))
 
-        print(" " * 60, end="\r")
+        if updates:
+            psycopg2.extras.execute_values(
+                pg_cur,
+                """
+                UPDATE images AS i
+                SET rating = v.new_rating
+                FROM (VALUES %s) AS v(id, new_rating)
+                WHERE i.id = v.id
+                """,
+                updates,
+                page_size=10000
+            )
+            pg_conn.commit()
+
+        updated = len(updates)
         print(f"[✓] Updated {updated} image rating{'s' if updated != 1 else ''}.\n")
-        pg_conn.commit()
+
 
 # ==========================================
-# Tool 4: Purge Blacklisted Images
+# Tool 3: Purge Blacklisted Images
 # ==========================================
 def purge_images(args):
     """Purges images containing blacklisted tags from DB and disk."""
@@ -144,7 +142,6 @@ def purge_images(args):
         print(f"[ERROR] Blacklist not found: {args.blacklist}")
         return
 
-    # Load tags to delete
     rules = []
     prefilter_tags = set()
     preserve_tags = set()
@@ -155,9 +152,7 @@ def purge_images(args):
 
         # 1. Catch the whitelist directive BEFORE stripping comments
         if raw_line.replace(" ", "").startswith("#//whitelist:"):
-            # Extract everything after "whitelist:" and split by comma
             whitelist_content = raw_line.split("whitelist:", 1)[1]
-
             clean_whitelist = whitelist_content.split("#//")[0]
             for pt in clean_whitelist.split(","):
                 clean_pt = pt.strip()
@@ -175,10 +170,8 @@ def purge_images(args):
                     ignore_tags.add(clean_pt)
             continue
 
-        # 2. Safely strip normal comments and grab what's left
+        # 3. Safely strip normal comments and grab what's left
         clean_line = raw_line.split("#//")[0].strip()
-
-        # 3. Skip if the line is now empty
         if not clean_line:
             continue
 
@@ -195,72 +188,103 @@ def purge_images(args):
             print(f"[ERROR] Invalid rule '{clean_line}'. You must include at least one positive tag.")
             return
 
-        rules.append({'pos': pos_tags, 'neg': neg_tags, 'raw': clean_line})
+        rules.append({"pos": pos_tags, "neg": neg_tags, "raw": clean_line})
 
     print(f"[INFO] Loaded {len(rules)} rules and {len(preserve_tags)} global preservation tags. Hunting...")
-    prefilter_list = list(prefilter_tags)
 
     db_config = get_shimmie_db_credentials(args.spath)
+    if not db_config:
+        print(f"[ERROR] Could not load DB credentials from {args.spath}")
+        return
+
     shimmie_root = Path(args.spath)
 
     with psycopg2.connect(**db_config) as conn:
         cur = conn.cursor()
 
-        # Step 1: Fetch suspects and ALL their tags using a CTE
+        # Fetch all tag IDs and counts once so we can pick the rarest tag per rule
+        cur.execute("SELECT tag, id, count FROM tags")
+        tag_counts = defaultdict(int)
+        tag_to_ids = defaultdict(list)
+        for t_name, t_id, t_count in cur.fetchall():
+            safe_count = t_count or 0
+            tag_counts[t_name] += safe_count
+            tag_to_ids[t_name].append(t_id)
+            if not t_name.startswith(("tagai:", "booru:")):
+                base_name = t_name
+                if ":" in t_name:
+                    base_name = t_name.split(":", 1)[1]
+                    tag_counts[base_name] += safe_count
+                    tag_to_ids[base_name].append(t_id)
+                if "_(" in base_name and base_name.endswith(")"):
+                    root_name = base_name.split("_(", 1)[0]
+                    tag_counts[root_name] += safe_count
+                    tag_to_ids[root_name].append(t_id)
+
+        # Group active rules by their single rarest positive tag
+        rules_by_anchor = defaultdict(list)
+        anchor_tag_ids = set()
+        for rule in rules:
+            if any(p not in tag_to_ids for p in rule["pos"]):
+                continue
+            anchor = min(rule["pos"], key=lambda p: tag_counts[p])
+            rules_by_anchor[anchor].append((set(rule["pos"]), set(rule["neg"]), rule["raw"]))
+            anchor_tag_ids.update(tag_to_ids[anchor])
+
+        if not anchor_tag_ids:
+            print("[✓] Database is clean. No images found matching the blacklist.")
+            return
+
+        # Step 1: Fetch ONLY suspects that contain at least one rule's rarest anchor tag_id
         cur.execute("""
             WITH suspect_images AS (
-                SELECT DISTINCT i.id, i.hash
-                FROM images i
-                JOIN image_tags it ON i.id = it.image_id
-                JOIN tags t ON it.tag_id = t.id
-                WHERE t.tag = ANY(%s)
-                   OR (
-                       t.tag NOT LIKE 'tagai:%%'
-                       AND t.tag NOT LIKE 'booru:%%'
-                       AND substring(t.tag from position(':' in t.tag) + 1) = ANY(%s)
-                   )
+                SELECT DISTINCT it.image_id
+                FROM image_tags it
+                WHERE it.tag_id = ANY(%s)
             )
-            SELECT s.id, s.hash, string_agg(t.tag, ' ') as all_tags
+            SELECT i.id, i.hash, string_agg(t.tag, ' ') as all_tags
             FROM suspect_images s
-            JOIN image_tags it ON s.id = it.image_id
+            JOIN images i ON s.image_id = i.id
+            JOIN image_tags it ON i.id = it.image_id
             JOIN tags t ON it.tag_id = t.id
-            GROUP BY s.id, s.hash
-        """, (prefilter_list, prefilter_list))
+            GROUP BY i.id, i.hash
+        """, (list(anchor_tag_ids),))
 
         suspects = cur.fetchall()
 
-        # Step 2: Evaluate the suspects locally against the complex rules
+        # Step 2: Evaluate suspects ONLY against rules whose anchor tag is on the image
         trash_images = []
-        breakdown_counts = {r['raw']: 0 for r in rules}
+        breakdown_counts = {r["raw"]: 0 for r in rules}
 
-        for img_id, hsh, tag_string in suspects:
-            raw_tags = tag_string.split(' ')
+        for img_id, hsh, tag_string in tqdm.tqdm(suspects, desc="Evaluating Suspects", leave=False):
+            raw_tags = tag_string.split(" ")
 
-            # Build an evaluation set that handles your broad sweep (stripping prefixes)
             clean_tags = set(raw_tags)
             for t in raw_tags:
-                if not t.startswith(("tagai:", "booru:")) and ":" in t:
-                    clean_tags.add(t.split(":", 1)[1])
+                if not t.startswith(("tagai:", "booru:")):
+                    base_t = t
+                    if ":" in t:
+                        base_t = t.split(":", 1)[1]
+                        clean_tags.add(base_t)
+                    if "_(" in base_t and base_t.endswith(")"):
+                        clean_tags.add(base_t.split("_(", 1)[0])
 
             # --- The Immunity Shield ---
-            if preserve_tags and any(pt in clean_tags for pt in preserve_tags):
-                continue  # Image is instantly spared!
+            if preserve_tags and not preserve_tags.isdisjoint(clean_tags):
+                continue
 
-            # Evaluate against all blacklist rules
             triggered_rules = []
-            for rule in rules:
-                has_all_pos = all(p in clean_tags for p in rule['pos'])
-                has_any_neg = any(n in clean_tags for n in rule['neg'])
-
-                if has_all_pos and not has_any_neg:
-                    triggered_rules.append(rule['raw'])
+            for tag in clean_tags:
+                if tag in rules_by_anchor:
+                    for pos_set, neg_set, raw_rule in rules_by_anchor[tag]:
+                        if pos_set.issubset(clean_tags) and neg_set.isdisjoint(clean_tags):
+                            triggered_rules.append(raw_rule)
 
             if triggered_rules:
                 for r in triggered_rules:
                     breakdown_counts[r] += 1
                 trash_images.append((img_id, hsh, tag_string, triggered_rules))
 
-        # Sort breakdown by count descending
         sorted_breakdown = sorted(breakdown_counts.items(), key=lambda item: item[1], reverse=True)
         sorted_breakdown = [item for item in sorted_breakdown if item[1] > 0]
 
@@ -279,32 +303,28 @@ def purge_images(args):
         # --- Dry Run Handler ---
         if args.dry_run:
             report_path = Path("purge_dry_run.txt")
-
-            # --- TOP 100 NOISE FILTERS ---
             ignore_prefixes = ("booru:", "tagai:")
 
-            # Tally up associated tags and track the rules that condemned them
             associated_tags = {}
             for _, _, tag_string, triggered_rules in trash_images:
                 for t in tag_string.split():
                     if t.startswith(ignore_prefixes) or t in ignore_tags:
                         continue
 
-                    base_t = t.split(":", 1)[1] if not t.startswith(("tagai:", "booru:")) and ":" in t else t
+                    base_t = t.split(":", 1)[1] if ":" in t else t
+                    root_t = base_t.split("_(", 1)[0] if "_(" in base_t and base_t.endswith(")") else base_t
 
-                    if t not in prefilter_tags and base_t not in prefilter_tags:
-                        # Initialize the nested dictionary if this is a new tag
+                    if t not in prefilter_tags and base_t not in prefilter_tags and root_t not in prefilter_tags:
                         if t not in associated_tags:
-                            associated_tags[t] = {'total': 0, 'rules': {}}
+                            associated_tags[t] = {"total": 0, "rules": {}}
 
-                        associated_tags[t]['total'] += 1
+                        associated_tags[t]["total"] += 1
 
-                        # Tally up which specific rules brought this tag down
                         for rule in triggered_rules:
-                            associated_tags[t]['rules'][rule] = associated_tags[t]['rules'].get(rule, 0) + 1
+                            associated_tags[t]["rules"][rule] = associated_tags[t]["rules"].get(rule, 0) + 1
 
             # 1. Sort by total frequency descending to find the 100 heaviest casualties
-            top_by_purge = sorted(associated_tags.items(), key=lambda x: x[1]['total'], reverse=True)[:100]
+            top_by_purge = sorted(associated_tags.items(), key=lambda x: x[1]["total"], reverse=True)[:100]
 
             # 2. Fetch total database counts for those Top 100
             top_tag_names = [t[0] for t in top_by_purge]
@@ -317,23 +337,22 @@ def purge_images(args):
             # 3. Calculate remaining counts and build a final sortable list
             final_top_100 = []
             for tag_name, tag_data in top_by_purge:
-                purge_count = tag_data['total']
+                purge_count = tag_data["total"]
                 total = db_totals.get(tag_name, 0)
                 remaining = max(0, total - purge_count)
 
-                # Find the single rule that caused the most damage to this tag
-                top_rule, top_rule_count = max(tag_data['rules'].items(), key=lambda item: item[1])
+                top_rule, top_rule_count = max(tag_data["rules"].items(), key=lambda item: item[1])
 
                 final_top_100.append({
-                    'tag_name': tag_name,
-                    'purge_count': purge_count,
-                    'remaining': remaining,
-                    'top_rule': top_rule,
-                    'top_rule_count': top_rule_count
+                    "tag_name": tag_name,
+                    "purge_count": purge_count,
+                    "remaining": remaining,
+                    "top_rule": top_rule,
+                    "top_rule_count": top_rule_count
                 })
 
             # 4. Re-sort the Top 100 strictly by what is remaining (Ascending, so 0 is at the top)
-            final_top_100.sort(key=lambda x: x['remaining'], reverse=True)
+            final_top_100.sort(key=lambda x: (x["remaining"], -x["purge_count"]))
 
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("=== CASUALTY BREAKDOWN BY RULE ===\n")
@@ -341,7 +360,7 @@ def purge_images(args):
                     f.write(f"  - '{rule_text}': {count} images\n")
 
                 f.write("\n=== TOP 100 MOST COMMON ASSOCIATED TAGS ===\n")
-                f.write("(Sorted by highest remaining count. Shows tags heavily impacted by the crossfire.)\n")
+                f.write("(Sorted by lowest remaining count. Shows tags heavily impacted by the crossfire.)\n")
                 for item in final_top_100:
                     f.write(
                         f"  - {item['tag_name']}: {item['remaining']} remaining images "
@@ -369,7 +388,6 @@ def purge_images(args):
         for img_id, hsh, *_ in tqdm.tqdm(trash_images, desc="Files Purged", unit="file"):
             img_ids_to_drop.append(img_id)
 
-            # Shimmie2 path logic: data/images/ab/cd/hash (NO EXTENSIONS)
             prefix1, prefix2 = hsh[0:2], hsh[2:4]
             img_file = shimmie_root / "data" / "images" / prefix1 / prefix2 / hsh
             thumb_file = shimmie_root / "data" / "thumbs" / prefix1 / prefix2 / hsh
@@ -387,7 +405,7 @@ def purge_images(args):
         print("  -> Dropping core image records (images)...")
         cur.execute("DELETE FROM images WHERE id = ANY(%s)", (img_ids_to_drop,))
 
-        # 3. Recalculate tag counts and drop orphaned tags (count = 0)
+        # 3. Recalculate tag counts and drop orphaned tags (count <= 0)
         print("\n[Step 3/3] Fixing Shimmie tag UI counts...")
         print("  -> Recalculating tag usage counts (this may take a moment)...")
         cur.execute("""
@@ -395,20 +413,40 @@ def purge_images(args):
             SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
         """)
         print("  -> Pruning orphaned tags with 0 count...")
-        cur.execute("DELETE FROM tags WHERE count = 0")
+        cur.execute("DELETE FROM tags WHERE count <= 0")
 
         conn.commit()
         print(f"\n[✓] Purge Complete: Destroyed {deleted_files} files and {len(img_ids_to_drop)} database entries.")
 
+
 # ==========================================
-# Tool 5: Retroactive Database Tag Curator
+# Tool 4: Retroactive Database Tag Curator
 # ==========================================
+def _collect_Trigger_tag_ids(tag_id_map, merged_map):
+    """Finds all tag IDs that could trigger a curation change on an image."""
+    trigger_ids = set()
+    prefixes = ("artist:", "character:", "series:", "source:")
+
+    for tag_name, tag_id in tag_id_map.items():
+        if tag_name in merged_map or tag_name.endswith("_(cosplay)"):
+            trigger_ids.add(tag_id)
+            continue
+        if tag_name.startswith(prefixes):
+            base_tag = tag_name.split(":", 1)[1]
+            if base_tag in tag_id_map:
+                # Add the rarer of the pair so SQL pre-filtering stays selective
+                trigger_ids.add(tag_id_map[base_tag])
+
+    return list(trigger_ids)
+
+
 def curate_existing_tags(args):
     """Applies hardcoded and dynamic curation rules to images already in Postgres."""
-    dynamic_mappings = None
-    if getattr(args, 'use_map_csv', None):
+    merged_map = dict(MASTER_MERGE_LIST)
+    if getattr(args, "use_map_csv", None):
         dynamic_mappings = load_dynamic_mappings(args.use_map_csv)
-        print(f"[INFO] Loaded {len(dynamic_mappings)} dynamic tag mappings.")
+        merged_map.update(dynamic_mappings)
+        print(f"[INFO] Loaded {len(dynamic_mappings):,} dynamic tag mappings.")
 
     db_config = get_shimmie_db_credentials(args.spath)
     if not db_config:
@@ -422,40 +460,82 @@ def curate_existing_tags(args):
         cur.execute("SELECT tag, id FROM tags")
         tag_id_map = dict(cur.fetchall())
 
-        if getattr(args, 'target_tag', None):
+        if getattr(args, "target_tag", None):
             print(f"Fetching image tags from Postgres strictly for batch '{args.target_tag}'...")
             cur.execute("""
-                SELECT it.image_id, array_agg(t.tag)
-                FROM image_tags it
+                SELECT i.id, i.source, array_agg(t.tag)
+                FROM images i
+                JOIN image_tags it ON i.id = it.image_id
                 JOIN tags t ON it.tag_id = t.id
-                WHERE it.image_id IN (
+                WHERE i.id IN (
                     SELECT it2.image_id FROM image_tags it2
                     JOIN tags t2 ON it2.tag_id = t2.id
                     WHERE t2.tag = %s
                 )
-                GROUP BY it.image_id
+                GROUP BY i.id, i.source
             """, (args.target_tag,))
+            images_data = cur.fetchall()
         else:
-            print("Fetching ALL image tags from Postgres...")
-            cur.execute("""
-                SELECT it.image_id, array_agg(t.tag)
-                FROM image_tags it
-                JOIN tags t ON it.tag_id = t.id
-                GROUP BY it.image_id
-            """)
+            trigger_tag_ids = _collect_Trigger_tag_ids(tag_id_map, merged_map)
+            if not trigger_tag_ids:
+                print("\n[✓] No matching trigger tags exist in the database. No changes needed.")
+                return
 
-        images_data = cur.fetchall()
+            print(f"Filtering database for images containing any of {len(trigger_tag_ids):,} targetable tags...")
+            cur.execute("CREATE TEMP TABLE tmp_trigger_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO tmp_trigger_tags (tag_id) VALUES %s",
+                [(tid,) for tid in trigger_tag_ids],
+                page_size=10000
+            )
+            cur.execute("ANALYZE tmp_trigger_tags")
+
+            cur.execute("""
+                WITH candidate_images AS (
+                    SELECT DISTINCT it.image_id
+                    FROM image_tags it
+                    JOIN tmp_trigger_tags tt ON it.tag_id = tt.tag_id
+                )
+                SELECT i.id, i.source, array_agg(t.tag)
+                FROM candidate_images ci
+                JOIN images i ON ci.image_id = i.id
+                JOIN image_tags it ON i.id = it.image_id
+                JOIN tags t ON it.tag_id = t.id
+                GROUP BY i.id, i.source
+            """)
+            images_data = cur.fetchall()
+
+        if not images_data:
+            print("\n[✓] No candidate images matched for curation.")
+            return
+
+        print(f"Evaluating {len(images_data):,} candidate images...")
 
         tags_to_add = []
         tags_to_remove = []
+        source_updates = []
         new_unique_tags = set()
 
-        # Process the curation locally in Python
-        for img_id, raw_tags in tqdm.tqdm(images_data, desc="Curating Tags"):
+        for img_id, current_source, raw_tags in tqdm.tqdm(images_data, desc="Curating Tags"):
             current_tags = list(raw_tags)
             curated_tags = list(current_tags)
 
-            apply_tag_curation(curated_tags, dynamic_mappings)
+            apply_tag_curation(curated_tags, merged_map)
+
+            # Promote the best source:... tag into images.source ONLY when images.source is empty/null
+            if not (current_source and current_source.strip()):
+                source_tags = sorted(
+                    {t for t in curated_tags if t.lower().startswith("source:") and len(t) > 7},
+                    key=lambda t: (get_source_score(t.split(":", 1)[1]), t)
+                )
+                if source_tags:
+                    best_src_tag = source_tags[0]
+                    best_url = best_src_tag.split(":", 1)[1].strip()
+                    if best_url:
+                        source_updates.append((img_id, best_url))
+                        # Strip only the promoted source tag; any remaining source: tags stay attached as tags
+                        curated_tags = [t for t in curated_tags if t != best_src_tag]
 
             if "tagme" in current_tags and len(curated_tags) < 15:
                 curated_tags.append("tagme")
@@ -474,28 +554,47 @@ def curate_existing_tags(args):
             for t in removed:
                 tags_to_remove.append((img_id, tag_id_map[t]))
 
-        if not tags_to_add and not tags_to_remove:
+        if not tags_to_add and not tags_to_remove and not source_updates:
             print("\n[✓] All tags are already clean. No changes needed.")
             return
 
-        print(f"\n[INFO] Found {len(tags_to_add)} missing links to add and {len(tags_to_remove)} junk links to drop.")
+        print(
+            f"\n[INFO] Found {len(tags_to_add):,} missing links to add, "
+            f"{len(tags_to_remove):,} junk links to drop, and "
+            f"{len(source_updates):,} empty image sources to populate."
+        )
 
-        # 1. Create missing tags in the master tags table
+        # 1. Populate empty images.source columns
+        if source_updates:
+            print("Populating empty image source fields...")
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                UPDATE images AS i
+                SET source = v.new_source
+                FROM (VALUES %s) AS v(id, new_source)
+                WHERE i.id = v.id
+                  AND (i.source IS NULL OR BTRIM(i.source) = '')
+                """,
+                source_updates,
+                page_size=10000
+            )
+
+        # 2. Create missing tags in the master tags table
         if new_unique_tags:
-            print(f"Injecting {len(new_unique_tags)} entirely new tags into the database...")
+            print(f"Injecting {len(new_unique_tags):,} entirely new tags into the database...")
             psycopg2.extras.execute_values(
                 cur,
                 "INSERT INTO tags (tag, count) VALUES %s ON CONFLICT (tag) DO NOTHING",
-                [(t, 0) for t in new_unique_tags]
+                [(t, 0) for t in new_unique_tags],
+                page_size=10000
             )
-            # Refresh the ID map with the newly generated IDs
             cur.execute("SELECT tag, id FROM tags WHERE tag = ANY(%s)", (list(new_unique_tags),))
             tag_id_map.update(dict(cur.fetchall()))
 
-        # 2. Bulk Remove Junk Tags
+        # 3. Bulk Remove Junk Tags
         if tags_to_remove:
             print("Purging old tag links...")
-            # Deleting by composite key using a temporary table for speed
             cur.execute("CREATE TEMP TABLE tmp_del (img_id INT, tag_id INT) ON COMMIT DROP")
             psycopg2.extras.execute_values(cur, "INSERT INTO tmp_del VALUES %s", tags_to_remove, page_size=10000)
             cur.execute("""
@@ -504,7 +603,7 @@ def curate_existing_tags(args):
                 WHERE image_tags.image_id = tmp_del.img_id AND image_tags.tag_id = tmp_del.tag_id
             """)
 
-        # 3. Bulk Insert Clean Tags
+        # 4. Bulk Insert Clean Tags
         if tags_to_add:
             print("Applying new tag links...")
             insert_records = [(img_id, tag_id_map[t]) for img_id, t in tags_to_add]
@@ -515,24 +614,39 @@ def curate_existing_tags(args):
                 page_size=10000
             )
 
-        # 4. Sweep and Sync
+        # 5. Fast Single-Pass Sweep and Sync
         affected_tag_ids = list({tag_id_map[t] for _, t in tags_to_add} | {tid for _, tid in tags_to_remove})
         if affected_tag_ids:
-            print(f"Recalculating UI tag counts for {len(affected_tag_ids)} affected tags...")
+            print(f"Recalculating UI tag counts for {len(affected_tag_ids):,} affected tags...")
+            cur.execute("CREATE TEMP TABLE tmp_affected_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO tmp_affected_tags (tag_id) VALUES %s",
+                [(tid,) for tid in affected_tag_ids],
+                page_size=10000
+            )
             cur.execute("""
-                UPDATE tags
-                SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = tags.id)
-                WHERE id = ANY(%s)
-            """, (affected_tag_ids,))
+                WITH new_counts AS (
+                    SELECT tat.tag_id, COUNT(it.image_id) AS cnt
+                    FROM tmp_affected_tags tat
+                    LEFT JOIN image_tags it ON tat.tag_id = it.tag_id
+                    GROUP BY tat.tag_id
+                )
+                UPDATE tags AS t
+                SET count = nc.cnt
+                FROM new_counts nc
+                WHERE t.id = nc.tag_id
+            """)
 
         print("Dropping orphaned tags...")
-        cur.execute("DELETE FROM tags WHERE count = 0")
+        cur.execute("DELETE FROM tags WHERE count <= 0")
 
         conn.commit()
         print("\n[✓] Retroactive curation complete.")
 
+
 # ==========================================
-# Tool 6: Retroactive Database Mapper
+# Tool 5: Retroactive Database Mapper
 # ==========================================
 def generate_db_curation_map(args):
     """Generates a curation CSV by piping DB overlap natively into tags_mining.py."""
@@ -568,7 +682,15 @@ def generate_db_curation_map(args):
                       AND %s = ANY(string_to_array(th.tags, ' '))
                       AND NOT (%s = ANY(string_to_array(th.tags, ' ')))
                     ORDER BY th.id DESC LIMIT 1
-                ) as pure_history_tags,
+                ) as pure_ref_history,
+                (
+                    SELECT th.tags
+                    FROM tag_histories th
+                    WHERE th.image_id = r.image_id
+                      AND %s = ANY(string_to_array(th.tags, ' '))
+                      AND NOT (%s = ANY(string_to_array(th.tags, ' ')))
+                    ORDER BY th.id DESC LIMIT 1
+                ) as pure_target_history,
                 (
                     SELECT string_agg(t.tag, ' ')
                     FROM image_tags it
@@ -576,55 +698,198 @@ def generate_db_curation_map(args):
                     WHERE it.image_id = r.image_id
                 ) as current_tags
             FROM rosetta_images r;
-        """, (target_tag, ref_tag, ref_tag, target_tag))
+        """, (target_tag, ref_tag, ref_tag, target_tag, target_tag, ref_tag))
 
         rows = cur.fetchall()
         print(f"    -> Found {len(rows):,} overlapping images to analyze.")
 
-    print("[*] Translating DB overlap into tags_mining.py frequency format...")
-    valid_pairs = 0
-    sidecar_counts = Counter()
-    canonical_counts = Counter()
-    co_occurrences = defaultdict(Counter)
-    sidecar_overlap = defaultdict(Counter)
+        print("[*] Translating DB overlap into tags_mining.py frequency format...")
+        valid_pairs = 0
+        sidecar_counts = Counter()
+        canonical_counts = Counter()
+        co_occurrences = defaultdict(Counter)
+        sidecar_overlap = defaultdict(Counter)
 
-    for _, pure_history, current_tags in tqdm.tqdm(rows, desc="Mapping Frequencies"):
-        if not pure_history or not current_tags:
-            continue
+        for _, pure_ref_history, pure_target_history, current_tags in tqdm.tqdm(rows, desc="Mapping Frequencies"):
+            if not current_tags:
+                continue
 
-        canonical = {t for t in pure_history.split() if not t.startswith(('booru:', 'tagai:'))}
-        current_set = {t for t in current_tags.split() if not t.startswith(('booru:', 'tagai:'))}
+            current_set = {t for t in current_tags.split() if not t.startswith(("booru:", "tagai:", "source:", "site:"))}
 
-        # CRITICAL JUMP: Isolate strictly the tags injected by the botched import.
-        # Pure tags like 'black_hair' are completely removed from the evaluation matrix.
-        botched_tags = current_set - canonical
+            if pure_ref_history:
+                # Case 1: Reference tag (gelbooru) was imported first, target (e621) merged second
+                canonical = {t for t in pure_ref_history.split() if not t.startswith(("booru:", "tagai:", "source:", "site:"))}
+                botched_tags = current_set - canonical
+            elif pure_target_history:
+                # Case 2: Target tag (e621) was imported first, reference (gelbooru) merged second
+                botched_tags = {t for t in pure_target_history.split() if not t.startswith(("booru:", "tagai:", "source:", "site:"))}
+                canonical = current_set - botched_tags
+            else:
+                continue
 
-        if not canonical or not botched_tags:
-            continue
+            if not canonical or not botched_tags:
+                continue
 
-        valid_pairs += 1
+            valid_pairs += 1
 
-        for s_tag in botched_tags:
-            sidecar_counts[s_tag] += 1
+            for s_tag in botched_tags:
+                sidecar_counts[s_tag] += 1
+                for c_tag in canonical:
+                    co_occurrences[s_tag][c_tag] += 1
+
             for c_tag in canonical:
-                co_occurrences[s_tag][c_tag] += 1
-                # sidecar_overlap remains safely empty to prevent the retroactive _DROP_ paradox
+                canonical_counts[c_tag] += 1
 
-        for c_tag in canonical:
-            canonical_counts[c_tag] += 1
+        print(
+            f"    -> Extracted {valid_pairs:,} valid tag-history diffs "
+            f"({len(sidecar_counts):,} unique target tags vs {len(canonical_counts):,} canonical tags)."
+        )
 
-    freqs = (valid_pairs, sidecar_counts, canonical_counts, co_occurrences, sidecar_overlap)
+        freqs = (valid_pairs, sidecar_counts, canonical_counts, co_occurrences, sidecar_overlap)
 
-    print("[*] Fetching mappings and global context to satisfy tags_mining.py...")
-    mappings = load_mappings()
-    global_ctx = _fetch_global_context(set(sidecar_counts.keys()) | set(canonical_counts.keys()), db_config)
+        print("[*] Fetching mappings and global context to satisfy tags_mining.py...")
+        mappings = load_mappings()
+        global_ctx = _fetch_global_context(set(sidecar_counts.keys()) | set(canonical_counts.keys()), db_config)
 
-    # Blinder restored to bypass the 500-count limit specifically for inflated typos
-    guard = TagCategoryGuard(mappings)
+        guard = TagCategoryGuard(mappings)
 
-    print("[*] Passing generated frequencies into tags_mining native equivalency calculator...")
-    calculated = calculate_equivalencies(freqs, global_ctx, guard, thresholds=(10, 0.50), mode="retro")
-    calculated.sort(key=lambda x: x["Sample_Size"], reverse=True)
+        print("[*] Pass 1: Calculating 1:1 synonym equivalencies from Rosetta Stones...")
+        calculated = calculate_equivalencies(freqs, global_ctx, guard, thresholds=(5, 0.50), mode="retro")
+
+        mapped_tags = {r["Sidecar_Tag"] for r in calculated} | {r["Canonical_Tag"] for r in calculated}
+        print(f"    -> Discovered {len(calculated):,} 1:1 synonym mappings.")
+
+        # =========================================================================
+        # Pass 2: Vocabulary Rejection & Overlap Non-Adoption (_DROP_)
+        # =========================================================================
+        print(f"[*] Pass 2: Hunting exclusive '{target_tag}' bloat with 0 non-Rosetta '{ref_tag}' usage...")
+        cur.execute("""
+            WITH target_tag_id AS (
+                SELECT id FROM tags WHERE tag = %s LIMIT 1
+            ),
+            ref_tag_id AS (
+                SELECT id FROM tags WHERE tag = %s LIMIT 1
+            ),
+            target_imgs AS MATERIALIZED (
+                SELECT image_id FROM image_tags WHERE tag_id = (SELECT id FROM target_tag_id)
+            ),
+            ref_imgs AS MATERIALIZED (
+                SELECT image_id FROM image_tags WHERE tag_id = (SELECT id FROM ref_tag_id)
+            ),
+            pure_ref_imgs AS MATERIALIZED (
+                SELECT r.image_id
+                FROM ref_imgs r
+                LEFT JOIN target_imgs t ON r.image_id = t.image_id
+                WHERE t.image_id IS NULL
+            ),
+            target_tag_counts AS (
+                SELECT it.tag_id, COUNT(*) AS target_cnt
+                FROM image_tags it
+                JOIN target_imgs ti ON it.image_id = ti.image_id
+                GROUP BY it.tag_id
+            ),
+            pure_ref_tag_counts AS (
+                SELECT it.tag_id, COUNT(*) AS pure_ref_cnt
+                FROM image_tags it
+                JOIN pure_ref_imgs pri ON it.image_id = pri.image_id
+                GROUP BY it.tag_id
+            )
+            SELECT
+                t.tag,
+                t.count AS global_cnt,
+                ttc.target_cnt,
+                COALESCE(prtc.pure_ref_cnt, 0) AS pure_ref_cnt
+            FROM target_tag_counts ttc
+            JOIN tags t ON t.id = ttc.tag_id
+            LEFT JOIN pure_ref_tag_counts prtc ON prtc.tag_id = ttc.tag_id
+            WHERE t.count > 0
+              AND COALESCE(prtc.pure_ref_cnt, 0) = 0;
+        """, (target_tag, ref_tag))
+
+        candidate_rows = cur.fetchall()
+
+    drop_results = []
+    skipped_protected = 0
+
+    for tag_name, global_cnt, target_cnt, pure_ref_cnt in candidate_rows:
+        tag_lower = tag_name.lower()
+
+        # 1. Hard namespace protection for core prefixes
+        if tag_lower.startswith(("artist:", "character:", "series:", "source:", "booru:", "tagai:", "site:")):
+            skipped_protected += 1
+            continue
+
+        # 2. Skip if already rescued by a 1:1 synonym mapping in Pass 1
+        if tag_name in mapped_tags:
+            continue
+
+        # 3. Handle prefixed tags (rating:, pixiv_*, page:, and any unknown prefixes)
+        if ":" in tag_name:
+            resolved_prefix_tag = resolve_prefixed_tag(tag_name)
+            if resolved_prefix_tag == "_DROP_":
+                drop_results.append({
+                    "Sidecar_Tag": tag_name,
+                    "Canonical_Tag": "_DROP_",
+                    "Confidence": 1.0,
+                    "Sample_Size": target_cnt
+                })
+            elif resolved_prefix_tag:
+                # e.g. rating:https://... -> source:https://... or pixiv_work:123 -> source:https://www.pixiv.net/en/artworks/123
+                calculated.append({
+                    "Sidecar_Tag": tag_name,
+                    "Canonical_Tag": resolved_prefix_tag,
+                    "Confidence": 1.0,
+                    "Sample_Size": target_cnt
+                })
+                mapped_tags.add(tag_name)
+            else:
+                # NEVER auto-_DROP_ any other unknown prefix (e.g., page:, studio:, etc.)
+                skipped_protected += 1
+            continue
+
+        # 4. Guard protection: never drop known unprefixed characters, artists, series, or tag_groups.json general tags
+        if guard.get_category(tag_name) in {"artist", "character", "series"} or tag_name in guard.known_general:
+            skipped_protected += 1
+            continue
+
+        # 5. Double-check pure_ref_cnt == 0 outside Rosetta AND 0 in pure Rosetta history
+        if pure_ref_cnt > 0 or canonical_counts.get(tag_name, 0) > 0:
+            continue
+
+        # 6. Rescue punctuation/hyphen variants (e.g., upside_down -> upside-down) via tag_groups.json
+        norm_key = re.sub(r"[_()-]", "", tag_lower)
+        if len(norm_key) >= 3 and norm_key in guard.norm_general_map:
+            canonical_match = guard.norm_general_map[norm_key]
+            if canonical_match != tag_name:
+                calculated.append({
+                    "Sidecar_Tag": tag_name,
+                    "Canonical_Tag": canonical_match,
+                    "Confidence": 1.0,
+                    "Sample_Size": target_cnt
+                })
+                mapped_tags.add(tag_name)
+                continue
+
+        exclusivity = target_cnt / global_cnt if global_cnt > 0 else 0.0
+        rosetta_s_cnt = sidecar_counts.get(tag_name, 0)
+
+        # Rule A: Global Vocabulary Rejection (0 on pure ref_tag, >= 95% exclusive to target_tag across entire DB)
+        # Rule B: Overlap Non-Adoption (>= 10 hits in Rosetta botched_tags, 0 in pure ref_tag, failed 1:1 mapping)
+        if exclusivity >= 0.95 or rosetta_s_cnt >= 10:
+            drop_results.append({
+                "Sidecar_Tag": tag_name,
+                "Canonical_Tag": "_DROP_",
+                "Confidence": round(max(exclusivity, 0.95 if rosetta_s_cnt >= 10 else exclusivity), 4),
+                "Sample_Size": target_cnt
+            })
+
+    print(
+        f"    -> Flagged {len(drop_results):,} unmapped '{target_tag}' tags for '_DROP_' "
+        f"(protected {skipped_protected:,} character/artist/series/canonical tags)."
+    )
+
+    all_results = calculated + drop_results
+    all_results.sort(key=lambda x: (x["Canonical_Tag"] == "_DROP_", -x["Sample_Size"]))
 
     print(f"[*] Writing {out_csv.name}...")
     with out_csv.open("w", encoding="utf-8", newline="") as f:
@@ -632,6 +897,267 @@ def generate_db_curation_map(args):
             f, fieldnames=["Sidecar_Tag", "Canonical_Tag", "Confidence", "Sample_Size"]
         )
         writer.writeheader()
-        writer.writerows(calculated)
+        writer.writerows(all_results)
 
-    print(f"\n[✓] Smart mapping complete! Extracted {len(calculated):,} highly confident mappings.")
+    print(
+        f"\n[✓] Smart mapping complete! Wrote {len(all_results):,} total rules "
+        f"({len(calculated):,} 1:1 equivalencies + {len(drop_results):,} _DROP_ tags)."
+    )
+
+
+# ==========================================
+# Tool 6: Low-Frequency Tag Dumper
+# ==========================================
+def _classify_namespace(tag_name):
+    """Returns the namespace bucket for a tag."""
+    if ":" not in tag_name:
+        return "general (unprefixed)"
+    prefix = tag_name.split(":", 1)[0].lower()
+    if prefix in {"artist", "character", "series", "source", "booru", "rating", "meta", "studio"}:
+        return f"{prefix}:"
+    return "other (prefixed)"
+
+
+def _parse_comma_list(raw_val):
+    """Parses a comma-separated CLI string into a clean lowercase tuple, ignoring spaces around commas."""
+    if not raw_val:
+        return ()
+    return tuple(item.strip().lower() for item in raw_val.split(",") if item.strip())
+
+
+def _write_tag_dump_log(cur, filtered_rows, dump_meta, log_path):
+    """Queries impact metrics for the filtered tag set and writes a diagnostic .log file."""
+    min_count, drop_threshold, exclude_prefixes, exclude_substrings, skipped_counts = dump_meta
+    print(f"[*] Generating impact report for {log_path.name}...")
+
+    ns_stats = defaultdict(lambda: {
+        "dumped_tags": 0, "drop_tags": 0, "review_tags": 0,
+        "dumped_links": 0, "drop_links": 0
+    })
+    top_drop_candidates = []
+    dumped_ids = []
+    drop_ids = []
+
+    for tag_id, tag_name, count in filtered_rows:
+        ns = _classify_namespace(tag_name)
+        ns_stats[ns]["dumped_tags"] += 1
+        ns_stats[ns]["dumped_links"] += count
+        dumped_ids.append(tag_id)
+
+        if count <= drop_threshold:
+            ns_stats[ns]["drop_tags"] += 1
+            ns_stats[ns]["drop_links"] += count
+            drop_ids.append(tag_id)
+            if len(top_drop_candidates) < 100:
+                top_drop_candidates.append((tag_name, count))
+        else:
+            ns_stats[ns]["review_tags"] += 1
+
+    # 2. Booru / Batch Tag Breakdown (booru:*) restricted to the filtered dumped_ids
+    booru_rows = []
+    if dumped_ids:
+        cur.execute("""
+            WITH target_dumped_tags AS (
+                SELECT id, count AS global_tag_count
+                FROM tags
+                WHERE id = ANY(%s)
+                  AND tag NOT LIKE 'booru:%%'
+            ),
+            booru_tags AS (
+                SELECT id, tag, count AS total_images
+                FROM tags
+                WHERE tag LIKE 'booru:%%' AND count > 0
+            ),
+            booru_tag_pairs AS (
+                SELECT
+                    bt.tag AS booru_tag,
+                    bt.total_images,
+                    dt.id AS dumped_tag_id,
+                    dt.global_tag_count,
+                    COUNT(it_dumped.image_id) AS booru_occurrences
+                FROM booru_tags bt
+                JOIN image_tags it_booru ON bt.id = it_booru.tag_id
+                JOIN image_tags it_dumped ON it_booru.image_id = it_dumped.image_id
+                JOIN target_dumped_tags dt ON it_dumped.tag_id = dt.id
+                GROUP BY bt.tag, bt.total_images, dt.id, dt.global_tag_count
+            )
+            SELECT
+                booru_tag,
+                total_images,
+                COUNT(dumped_tag_id) AS unique_dumped_tags,
+                COUNT(dumped_tag_id) FILTER (WHERE global_tag_count <= %s) AS unique_drop_tags,
+                COUNT(dumped_tag_id) FILTER (
+                    WHERE global_tag_count <= %s AND booru_occurrences = global_tag_count
+                ) AS exclusive_drop_tags,
+                COALESCE(SUM(booru_occurrences), 0) AS total_dumped_links,
+                COALESCE(SUM(booru_occurrences) FILTER (WHERE global_tag_count <= %s), 0) AS total_drop_links
+            FROM booru_tag_pairs
+            GROUP BY booru_tag, total_images
+            ORDER BY unique_drop_tags DESC, total_drop_links DESC;
+        """, (dumped_ids, drop_threshold, drop_threshold, drop_threshold))
+        booru_rows = cur.fetchall()
+
+    # 3. Top 100 Surviving Global Tags Most Impacted by _DROP_
+    global_impact_rows = []
+    if drop_ids:
+        cur.execute("""
+            WITH target_drop_tags AS (
+                SELECT id
+                FROM tags
+                WHERE id = ANY(%s)
+            ),
+            drop_per_image AS (
+                SELECT
+                    it.image_id,
+                    COUNT(*) AS drop_links
+                FROM image_tags it
+                JOIN target_drop_tags tdt ON it.tag_id = tdt.id
+                GROUP BY it.image_id
+            )
+            SELECT
+                t.tag,
+                t.count AS total_images,
+                COUNT(dpi.image_id) AS impacted_images,
+                SUM(dpi.drop_links) AS total_drop_links
+            FROM drop_per_image dpi
+            JOIN image_tags it ON dpi.image_id = it.image_id
+            JOIN tags t ON it.tag_id = t.id
+            WHERE t.count > %s
+              AND t.tag NOT LIKE 'tagai:%%'
+            GROUP BY t.id, t.tag, t.count
+            ORDER BY total_drop_links DESC, impacted_images DESC
+            LIMIT 100;
+        """, (drop_ids, drop_threshold))
+        global_impact_rows = cur.fetchall()
+
+    sorted_ns = sorted(ns_stats.items(), key=lambda x: x[1]["drop_tags"], reverse=True)
+
+    with log_path.open("w", encoding="utf-8") as f:
+        f.write("=== TAG DUMP SUMMARY & NAMESPACE BREAKDOWN ===\n")
+        f.write(f"Max Dump Threshold (--min): <= {min_count:,} uses\n")
+        f.write(f"Auto-_DROP_ Threshold:      <= {drop_threshold:,} uses\n")
+        f.write(f"Excluded Prefixes:          {', '.join(exclude_prefixes) if exclude_prefixes else 'None'} "
+                f"({skipped_counts[0]:,} tags skipped)\n")
+        f.write(f"Excluded Substrings:        {', '.join(exclude_substrings) if exclude_substrings else 'None'} "
+                f"({skipped_counts[1]:,} tags skipped)\n")
+        f.write(f"Total Dumped Unique Tags:   {len(filtered_rows):,}\n\n")
+
+        for ns, data in sorted_ns:
+            f.write(
+                f"  - {ns:<22} | "
+                f"Total: {data['dumped_tags']:>8,} tags ({data['dumped_links']:>10,} links) | "
+                f"_DROP_: {data['drop_tags']:>8,} tags ({data['drop_links']:>10,} links) | "
+                f"Review: {data['review_tags']:>7,} tags\n"
+            )
+
+        f.write("\n=== BOORU / SOURCE BATCH IMPACT (booru:*) ===\n")
+        f.write("(Shows which booru imports contain the dumped/_DROP_ tags after exclusions.)\n")
+        if booru_rows:
+            for (
+                b_tag, total_imgs, u_dumped, u_drop, excl_drop, l_dumped, l_drop
+            ) in booru_rows:
+                f.write(
+                    f"  - {b_tag} ({total_imgs:,} total images):\n"
+                    f"      Unique Dumped Tags: {u_dumped:,} ({l_dumped:,} tag links)\n"
+                    f"      Unique _DROP_ Tags: {u_drop:,} ({l_drop:,} tag links) "
+                    f"[{excl_drop:,} tags are 100% EXCLUSIVE to {b_tag}]\n"
+                )
+        else:
+            f.write("  No matching booru:* tag overlaps found.\n")
+
+        f.write("\n=== TOP 100 GLOBAL TAGS MOST IMPACTED BY _DROP_ ===\n")
+        f.write("(Surviving tags whose images will have the highest number of _DROP_ tags stripped.)\n")
+        for tag_name, total_imgs, impacted_imgs, drop_links in global_impact_rows:
+            pct = (impacted_imgs / total_imgs * 100.0) if total_imgs > 0 else 0.0
+            avg_stripped = (drop_links / impacted_imgs) if impacted_imgs > 0 else 0.0
+            f.write(
+                f"  - {tag_name}: {drop_links:,} _DROP_ links across {impacted_imgs:,}/{total_imgs:,} images "
+                f"({pct:.1f}% of tag's images affected, avg {avg_stripped:.1f} dropped/img)\n"
+            )
+
+        f.write(f"\n=== TOP 100 HIGHEST-COUNT TAGS ASSIGNED _DROP_ (<= {drop_threshold:,} USES) ===\n")
+        f.write("(Sanity check: highest-usage tags that will be deleted if not manually cleared.)\n")
+        for tag_name, count in top_drop_candidates:
+            f.write(f"  - {tag_name}: {count:,} uses\n")
+
+    print(f"[✓] Wrote diagnostic log to {log_path.resolve()}")
+
+
+def tag_dump(args):
+    """Dumps tags used <= --min times (excluding tagai:* and user exclusions) to a CSV and .log."""
+    db_config = get_shimmie_db_credentials(args.spath)
+    if not db_config:
+        print(f"[ERROR] Could not load DB credentials from {args.spath}")
+        return
+
+    min_count = args.min
+    dv_ratio = args.dv / 100.0 if args.dv > 1.0 else args.dv
+    drop_threshold = int(min_count * dv_ratio)
+    exclude_prefixes = _parse_comma_list(getattr(args, "exclude_prefix", ""))
+    exclude_substrings = _parse_comma_list(getattr(args, "exclude", ""))
+
+    out_path = Path(args.out)
+    log_path = out_path.with_suffix(".log")
+
+    print(f"[*] Querying tags with count <= {min_count:,} (auto-_DROP_ threshold: <= {drop_threshold:,})...")
+
+    with psycopg2.connect(**db_config) as conn:
+        conn.set_session(readonly=True)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, tag, count
+                FROM tags
+                WHERE count > 0
+                  AND count <= %s
+                  AND tag NOT LIKE 'tagai:%%'
+                ORDER BY count DESC, tag ASC
+            """, (min_count,))
+            raw_rows = cur.fetchall()
+
+            filtered_rows = []
+            skipped_prefix = 0
+            skipped_substr = 0
+
+            for tag_id, tag_name, count in raw_rows:
+                tag_lower = tag_name.lower()
+                if exclude_prefixes and tag_lower.startswith(exclude_prefixes):
+                    skipped_prefix += 1
+                    continue
+                if exclude_substrings and any(sub in tag_lower for sub in exclude_substrings):
+                    skipped_substr += 1
+                    continue
+                filtered_rows.append((tag_id, tag_name, count))
+
+            if not filtered_rows:
+                print(f"[✓] No tags matched criteria after exclusions (skipped {skipped_prefix:,} by prefix, {skipped_substr:,} by substring).")
+                return
+
+            drop_assigned = 0
+            manual_review = 0
+
+            with out_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Sidecar_Tag", "Canonical_Tag"])
+
+                for _, tag_name, count in filtered_rows:
+                    if count <= drop_threshold:
+                        writer.writerow([tag_name, "_DROP_"])
+                        drop_assigned += 1
+                    else:
+                        writer.writerow([tag_name, ""])
+                        manual_review += 1
+
+            print(f"[✓] Dumped {len(filtered_rows):,} tags to {out_path.resolve()}")
+            if skipped_prefix or skipped_substr:
+                print(f"    -> Excluded {skipped_prefix:,} tags via --exclude-prefix and {skipped_substr:,} via --exclude")
+            print(f"    -> {manual_review:,} tags left blank for manual review ({drop_threshold + 1:,} to {min_count:,} uses)")
+            print(f"    -> {drop_assigned:,} tags auto-assigned '_DROP_' (<= {drop_threshold:,} uses)")
+
+            dump_meta = (
+                min_count,
+                drop_threshold,
+                exclude_prefixes,
+                exclude_substrings,
+                (skipped_prefix, skipped_substr),
+            )
+            _write_tag_dump_log(cur, filtered_rows, dump_meta, log_path)

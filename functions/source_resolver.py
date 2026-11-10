@@ -84,3 +84,37 @@ def resolve_best_source(post_source, filename):
 
     candidates.sort(key=get_source_score)
     return candidates[0]
+
+def resolve_prefixed_tag(tag):
+    """Inspects prefixed tags (rating:, pixiv_*, etc.) and returns a canonical replacement,
+    '_DROP_' (only for redundant standard rating letters), or None to leave untouched."""
+    if ":" not in tag:
+        return None
+
+    prefix, val = tag.split(":", 1)
+    prefix_lower = prefix.lower()
+    val_clean = val.strip()
+
+    # 1. Pixiv tag variants -> canonical source: URL
+    if prefix_lower in {"pixiv_work", "pixiv_illust_id", "pixiv_id"} and val_clean.isdigit():
+        return f"source:https://www.pixiv.net/en/artworks/{val_clean}"
+    if prefix_lower in {"pixiv_profile", "pixiv_user", "pixiv_user_id"} and val_clean.isdigit():
+        return f"source:https://www.pixiv.net/en/users/{val_clean}"
+
+    # 2. Malformed rating: tags
+    if prefix_lower == "rating":
+        val_lower = val_clean.lower()
+        # Standard rating letters belong in Shimmie's rating column, not image_tags
+        if val_lower in {"s", "q", "e", "g", "safe", "questionable", "explicit", "general", "sensitive", "u", "unrated"}:
+            return "_DROP_"
+        # rating:http://... or rating:www.... -> source:...
+        if val_lower.startswith(("http://", "https://", "www.")):
+            raw_url = f"https://{val_clean}" if val_lower.startswith("www.") else val_clean
+            return f"source:{convert_cdn_url(raw_url)}"
+        # Check if the value inside rating: matches a filename/pixiv source pattern
+        if resolved_src := convert_filename_to_source(val_clean):
+            return f"source:{resolved_src}"
+        # Otherwise, do NOT drop unknown rating: values automatically
+        return None
+
+    return None

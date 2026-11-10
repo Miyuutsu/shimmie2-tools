@@ -26,6 +26,13 @@ class TagCategoryGuard:
                     self.series.add(val)
         self.strict = {'character', 'artist', 'series', 'studio', 'meta'}
         self.known_general = self._load_known_general()
+        self.norm_general_map = {
+            re.sub(r"[_()-]", "", t.lower()): t
+            for t in self.known_general
+            if re.fullmatch(r"[a-z0-9_()-]{3,}", t.lower())
+            and len(re.sub(r"[_()-]", "", t.lower())) >= 3
+        }
+
 
     @staticmethod
     def _load_known_general():
@@ -60,7 +67,8 @@ class TagCategoryGuard:
             return 'character'
         if tag in self.artists:
             return 'artist'
-        if tag in self.series:
+        clean_series = re.sub(r'_\(series\)$', '', tag)
+        if tag in self.series or clean_series in self.series:
             return 'series'
         return 'general'
 
@@ -71,6 +79,39 @@ class TagCategoryGuard:
         w1 = {w for w in re.findall(r'[a-z0-9]+', re.sub(r'\([^)]+\)', '', b1)) if len(w) > 2}
         w2 = {w for w in re.findall(r'[a-z0-9]+', re.sub(r'\([^)]+\)', '', b2)) if len(w) > 2}
         return bool(w1 & w2)
+
+    def is_normalized_alias(self, tag1, tag2):
+        """Returns True ONLY if tags have the same core tokens (e.g. upside_down vs upside-down,
+        fire_breathing vs breathing_fire) or differ only by a structural booru disambiguation token,
+        NOT a descriptive modifier like 'sleeves' vs 'short_sleeves' or 'breath_powers'."""
+        b1 = re.sub(r'_\([^)]+\)$', '', tag1.split(':', 1)[-1].lower())
+        b2 = re.sub(r'_\([^)]+\)$', '', tag2.split(':', 1)[-1].lower())
+
+        def _stem(word):
+            if len(word) > 5 and word.endswith("ing"):
+                return word[:-3]
+            if len(word) > 3 and word.endswith("s"):
+                return word[:-1]
+            return word
+
+        t1 = [_stem(w) for w in re.findall(r'[a-z0-9]+', b1)]
+        t2 = [_stem(w) for w in re.findall(r'[a-z0-9]+', b2)]
+
+        if not t1 or not t2:
+            return False
+
+        # Exact token match after stripping punctuation/plurals/gerunds (upside_down == upside-down, fire_breathing == breathing_fire)
+        if set(t1) == set(t2):
+            return True
+
+        # Allow compound words (e.g., pocketwatch -> pocket_watch, seatbelt -> seat_belt)
+        if "".join(t1) == "".join(t2):
+            return True
+
+        structural_tokens = {"language", "text", "artwork", "media", "version", "style", "theme"}
+        diff = set(t1) ^ set(t2)
+        return bool(diff and diff.issubset(structural_tokens) and (set(t1) & set(t2)))
+
 
     def check(self, s_tag, c_tag, s_count):
         """Returns True if the category mapping is structurally permitted."""
@@ -191,12 +232,16 @@ def _fetch_global_context(tags_set, db_conn):
 
 def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, db_cnt, guard, mode, freqs, thresholds):
     """Helper evaluating strict rules, segregated into Mining and Retro modes."""
+    # Reject numeric e621 pool/post IDs (e.g., 34764_(e621)) from mapping to canonical tags
+    if re.match(r"^\d+_\(e621\)$", s_tag):
+        return None
 
     # Namespace Firewall
     cat_s = guard.get_category(s_tag)
     cat_c = guard.get_category(best_match)
 
     shares_root = guard.shares_lexical_root(s_tag, best_match)
+    is_alias = guard.is_normalized_alias(s_tag, best_match)
 
     # 1. Strict Namespace Protection
     if cat_s in guard.strict and cat_c in guard.strict and cat_s != cat_c:
@@ -211,11 +256,25 @@ def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, db_cn
         if b_s != b_c:
             return None
 
-    # Calculate an effective score: Subsets get to use their inclusion score, others rely purely on Jaccard
-    effective_score = max(jaccard, inclusion) if shares_root else jaccard
+    # 2. Prevent Superclass -> Subclass Corruption & Small-Sample Comic Coincidences
+    if is_alias:
+        effective_score = max(jaccard, inclusion)
+        jaccard_threshold = 0.60
+    elif shares_root:
+        # Shared word with extra modifier(s) (e.g. breath_powers vs breathing_fire):
+        # require >= 15 sample size and strict 0.85 Jaccard
+        if s_count < 15:
+            return None
+        effective_score = jaccard
+        jaccard_threshold = 0.85
+    else:
+        # Non-lexical match: allow s_count >= 5 for strict categories (artist:, character:, series:),
+        # but require s_count >= 15 for unprefixed general tags so 5-image comic sets don't false-match!
+        if cat_s == "general" and cat_c == "general" and s_count < 15:
+            return None
+        effective_score = jaccard
+        jaccard_threshold = 0.80 if (cat_s == "general" and cat_c == "general") else 0.75
 
-    # 2. Lexical / Jaccard Threshold Guard
-    jaccard_threshold = 0.60 if shares_root else 0.75
     if effective_score < jaccard_threshold:
         return None
 
@@ -224,8 +283,7 @@ def _evaluate_match_guards(s_tag, best_match, s_count, inclusion, jaccard, db_cn
         return None
 
     # 4. The Absolute Panic Limit (Revised)
-    # We relax the strict Jaccard requirement if it is a proven alias/subset
-    is_proven_subset = shares_root and inclusion >= 0.85
+    is_proven_subset = is_alias and inclusion >= 0.80
 
     if (db_cnt > 500 or db_cnt > (s_count * 0.5)) and not is_proven_subset and jaccard < 0.95:
         return None
@@ -242,6 +300,8 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
     """Calculates pure Jaccard similarity scores to map tags accurately."""
     results = []
     for s_tag, s_count in freqs[1].items():
+        if s_tag in guard.known_general or s_count < thresholds[0]:
+            continue
         if s_count < thresholds[0]:
             continue
 
@@ -253,9 +313,11 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
             if c_tag == s_tag:
                 continue
 
-            # Ensure global_c_count is never smaller than the local sample count (prevents >1.0 Jaccard when SQLite > Postgres)
-            global_c_count = max(global_ctx[0].get(c_tag, 0), freqs[2].get(c_tag, 0))
-            union = s_count + global_c_count - shared
+            # In retro mode, both s_count and c_count must be measured strictly within
+            # the overlapping Rosetta Stone sample space, NOT the 650k+ global DB.
+            c_count = freqs[2].get(c_tag, 0) if mode == "retro" else max(global_ctx[0].get(c_tag, 0), freqs[2].get(c_tag, 0))
+
+            union = s_count + c_count - shared
             jaccard = shared / union if union > 0 else 0
 
             if jaccard > best_jaccard:
@@ -264,10 +326,7 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                 best_inclusion = shared / s_count
 
         if best_match:
-            raw_db_cnt = global_ctx[0].get(s_tag, freqs[2].get(s_tag, 0))
-
-            # Database counts must only be artificially adjusted during retro-curation
-            adjusted_db_cnt = max(0, raw_db_cnt - s_count) if mode == "retro" else raw_db_cnt
+            adjusted_db_cnt = freqs[2].get(s_tag, 0) if mode == "retro" else global_ctx[0].get(s_tag, freqs[2].get(s_tag, 0))
 
             final_match = _evaluate_match_guards(
                 s_tag, best_match, s_count, best_inclusion, best_jaccard, adjusted_db_cnt, guard, mode, freqs, thresholds
@@ -277,7 +336,7 @@ def calculate_equivalencies(freqs, global_ctx, guard, thresholds, mode="mining")
                 out_s = s_tag
                 out_c = final_match
                 # Use max() to ensure subsets like 'japanese_language' output high confidence (~0.95)
-                confidence = max(best_jaccard, best_inclusion)
+                confidence = max(best_jaccard, best_inclusion) if guard.is_normalized_alias(s_tag, final_match) else best_jaccard
 
                 if mode == "retro":
                     s_parts = s_tag.split(':', 1)
