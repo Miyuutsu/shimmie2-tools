@@ -104,7 +104,30 @@ def apply_tag_curation(tags, dynamic_mappings=None):
             continue
         step4_tags.append(tag)
 
-    tags[:] = [t for t in step4_tags if t not in ("tagme", "_DROP_")]
+    # Collect all real base tags on the image to strip redundant tagai:* tags
+    real_bases = set()
+    for tag in step4_tags:
+        if not tag.startswith(("tagai:", "booru:", "source:", "rating:")):
+            real_bases.add(tag)
+            if ":" in tag:
+                real_bases.add(tag.split(":", 1)[1])
+
+    final_tags = []
+    for tag in step4_tags:
+        if tag in ("tagme", "_DROP_"):
+            continue
+        if tag.startswith("tagai:"):
+            ai_base = tag.split(":", 1)[1]
+            ai_mapped = (
+                dynamic_mappings.get(ai_base, MASTER_MERGE_LIST.get(ai_base, ai_base))
+                if dynamic_mappings
+                else MASTER_MERGE_LIST.get(ai_base, ai_base)
+            )
+            if ai_base in real_bases or ai_mapped in real_bases:
+                continue
+        final_tags.append(tag)
+
+    tags[:] = final_tags
 
 def get_sidecar_tags(image_path):
     """Scans for .txt files associated with the image and parses tags."""

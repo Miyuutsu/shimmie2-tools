@@ -443,6 +443,25 @@ def _collect_trigger_tag_ids(tag_id_map, merged_map):
     return list(trigger_ids)
 
 
+def _collect_tagai_overlap_pairs(tag_id_map, merged_map):
+    """Finds (tagai_id, real_tag_id) pairs where both exist in the tags table."""
+    pairs = set()
+    prefixes = ("", "character:", "artist:", "series:")
+
+    for tag_name, ai_id in tag_id_map.items():
+        if not tag_name.startswith("tagai:"):
+            continue
+        ai_base = tag_name.split(":", 1)[1]
+        ai_mapped = merged_map.get(ai_base, ai_base)
+        for base in {ai_base, ai_mapped}:
+            for p in prefixes:
+                real_id = tag_id_map.get(f"{p}{base}")
+                if real_id is not None:
+                    pairs.add((ai_id, real_id))
+
+    return list(pairs)
+
+
 def curate_existing_tags(args):
     """Applies hardcoded and dynamic curation rules to images already in Postgres."""
     merged_map = dict(MASTER_MERGE_LIST)
@@ -480,25 +499,47 @@ def curate_existing_tags(args):
             images_data = cur.fetchall()
         else:
             trigger_tag_ids = _collect_trigger_tag_ids(tag_id_map, merged_map)
-            if not trigger_tag_ids:
-                print("\n[✓] No matching trigger tags exist in the database. No changes needed.")
+            tagai_pairs = _collect_tagai_overlap_pairs(tag_id_map, merged_map)
+            if not trigger_tag_ids and not tagai_pairs:
+                print("\n[✓] No matching trigger tags or redundant tagai: tags exist. No changes needed.")
                 return
 
-            print(f"Filtering database for images containing any of {len(trigger_tag_ids):,} targetable tags...")
-            cur.execute("CREATE TEMP TABLE tmp_trigger_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
-            psycopg2.extras.execute_values(
-                cur,
-                "INSERT INTO tmp_trigger_tags (tag_id) VALUES %s",
-                [(tid,) for tid in trigger_tag_ids],
-                page_size=10000
+            print(
+                f"Filtering database for images matching {len(trigger_tag_ids):,} trigger tags "
+                f"or {len(tagai_pairs):,} redundant tagai: pairs..."
             )
+            cur.execute("CREATE TEMP TABLE tmp_trigger_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
+            if trigger_tag_ids:
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO tmp_trigger_tags (tag_id) VALUES %s",
+                    [(tid,) for tid in trigger_tag_ids],
+                    page_size=10000
+                )
             cur.execute("ANALYZE tmp_trigger_tags")
+
+            cur.execute("CREATE TEMP TABLE tmp_tagai_pairs (ai_id INT, real_id INT) ON COMMIT DROP")
+            if tagai_pairs:
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO tmp_tagai_pairs (ai_id, real_id) VALUES %s",
+                    tagai_pairs,
+                    page_size=10000
+                )
+            cur.execute("CREATE INDEX idx_tmp_tagai_ai ON tmp_tagai_pairs (ai_id)")
+            cur.execute("ANALYZE tmp_tagai_pairs")
 
             cur.execute("""
                 WITH candidate_images AS (
-                    SELECT DISTINCT it.image_id
+                    SELECT it.image_id
                     FROM image_tags it
                     JOIN tmp_trigger_tags tt ON it.tag_id = tt.tag_id
+                    UNION
+                    SELECT it_ai.image_id
+                    FROM tmp_tagai_pairs tp
+                    JOIN image_tags it_ai ON it_ai.tag_id = tp.ai_id
+                    JOIN image_tags it_real ON it_real.image_id = it_ai.image_id
+                                           AND it_real.tag_id = tp.real_id
                 )
                 SELECT i.id, i.source, i.rating, array_agg(t.tag)
                 FROM candidate_images ci
