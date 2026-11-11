@@ -420,21 +420,24 @@ def purge_images(args):
 
 
 # ==========================================
-# Tool 4: Retroactive Database Tag Curator
+# Tool 4: Retroactive Database Tag Curator (Helper)
 # ==========================================
-def _collect_Trigger_tag_ids(tag_id_map, merged_map):
+def _collect_trigger_tag_ids(tag_id_map, merged_map):
     """Finds all tag IDs that could trigger a curation change on an image."""
     trigger_ids = set()
     prefixes = ("artist:", "character:", "series:", "source:")
 
     for tag_name, tag_id in tag_id_map.items():
-        if tag_name in merged_map or tag_name.endswith("_(cosplay)"):
+        if (
+            tag_name in merged_map
+            or tag_name.endswith("_(cosplay)")
+            or resolve_prefixed_tag(tag_name) is not None
+        ):
             trigger_ids.add(tag_id)
             continue
         if tag_name.startswith(prefixes):
             base_tag = tag_name.split(":", 1)[1]
             if base_tag in tag_id_map:
-                # Add the rarer of the pair so SQL pre-filtering stays selective
                 trigger_ids.add(tag_id_map[base_tag])
 
     return list(trigger_ids)
@@ -463,7 +466,7 @@ def curate_existing_tags(args):
         if getattr(args, "target_tag", None):
             print(f"Fetching image tags from Postgres strictly for batch '{args.target_tag}'...")
             cur.execute("""
-                SELECT i.id, i.source, array_agg(t.tag)
+                SELECT i.id, i.source, i.rating, array_agg(t.tag)
                 FROM images i
                 JOIN image_tags it ON i.id = it.image_id
                 JOIN tags t ON it.tag_id = t.id
@@ -472,11 +475,11 @@ def curate_existing_tags(args):
                     JOIN tags t2 ON it2.tag_id = t2.id
                     WHERE t2.tag = %s
                 )
-                GROUP BY i.id, i.source
+                GROUP BY i.id, i.source, i.rating
             """, (args.target_tag,))
             images_data = cur.fetchall()
         else:
-            trigger_tag_ids = _collect_Trigger_tag_ids(tag_id_map, merged_map)
+            trigger_tag_ids = _collect_trigger_tag_ids(tag_id_map, merged_map)
             if not trigger_tag_ids:
                 print("\n[✓] No matching trigger tags exist in the database. No changes needed.")
                 return
@@ -497,12 +500,12 @@ def curate_existing_tags(args):
                     FROM image_tags it
                     JOIN tmp_trigger_tags tt ON it.tag_id = tt.tag_id
                 )
-                SELECT i.id, i.source, array_agg(t.tag)
+                SELECT i.id, i.source, i.rating, array_agg(t.tag)
                 FROM candidate_images ci
                 JOIN images i ON ci.image_id = i.id
                 JOIN image_tags it ON i.id = it.image_id
                 JOIN tags t ON it.tag_id = t.id
-                GROUP BY i.id, i.source
+                GROUP BY i.id, i.source, i.rating
             """)
             images_data = cur.fetchall()
 
@@ -515,15 +518,30 @@ def curate_existing_tags(args):
         tags_to_add = []
         tags_to_remove = []
         source_updates = []
+        rating_updates = []
         new_unique_tags = set()
+        rating_priority = {"e": 3, "q": 2, "s": 1}
+        canonical_rating_tags = {"rating:e", "rating:q", "rating:s"}
 
-        for img_id, current_source, raw_tags in tqdm.tqdm(images_data, desc="Curating Tags"):
+        for img_id, current_source, current_rating, raw_tags in tqdm.tqdm(images_data, desc="Curating Tags"):
             current_tags = list(raw_tags)
             curated_tags = list(current_tags)
 
             apply_tag_curation(curated_tags, merged_map)
 
-            # Promote the best source:... tag into images.source ONLY when images.source is empty/null
+            # 1. Promote rating:e/q/s into images.rating ONLY when images.rating is NULL/empty, then strip the tag
+            extracted_ratings = [
+                t.split(":", 1)[1].lower()
+                for t in curated_tags
+                if t.lower() in canonical_rating_tags
+            ]
+            if extracted_ratings:
+                if not (current_rating and current_rating.strip()):
+                    best_rating = max(extracted_ratings, key=lambda r: rating_priority.get(r, 0))
+                    rating_updates.append((img_id, best_rating))
+                curated_tags = [t for t in curated_tags if t.lower() not in canonical_rating_tags]
+
+            # 2. Promote the best source:... tag into images.source ONLY when images.source is NULL/empty
             if not (current_source and current_source.strip()):
                 source_tags = sorted(
                     {t for t in curated_tags if t.lower().startswith("source:") and len(t) > 7},
@@ -534,7 +552,6 @@ def curate_existing_tags(args):
                     best_url = best_src_tag.split(":", 1)[1].strip()
                     if best_url:
                         source_updates.append((img_id, best_url))
-                        # Strip only the promoted source tag; any remaining source: tags stay attached as tags
                         curated_tags = [t for t in curated_tags if t != best_src_tag]
 
             if "tagme" in current_tags and len(curated_tags) < 15:
@@ -554,17 +571,18 @@ def curate_existing_tags(args):
             for t in removed:
                 tags_to_remove.append((img_id, tag_id_map[t]))
 
-        if not tags_to_add and not tags_to_remove and not source_updates:
+        if not tags_to_add and not tags_to_remove and not source_updates and not rating_updates:
             print("\n[✓] All tags are already clean. No changes needed.")
             return
 
         print(
             f"\n[INFO] Found {len(tags_to_add):,} missing links to add, "
-            f"{len(tags_to_remove):,} junk links to drop, and "
-            f"{len(source_updates):,} empty image sources to populate."
+            f"{len(tags_to_remove):,} junk links to drop, "
+            f"{len(source_updates):,} empty image sources to populate, and "
+            f"{len(rating_updates):,} null image ratings to populate."
         )
 
-        # 1. Populate empty images.source columns
+        # 1a. Populate empty images.source columns
         if source_updates:
             print("Populating empty image source fields...")
             psycopg2.extras.execute_values(
@@ -577,6 +595,22 @@ def curate_existing_tags(args):
                   AND (i.source IS NULL OR BTRIM(i.source) = '')
                 """,
                 source_updates,
+                page_size=10000
+            )
+
+        # 1b. Populate null/empty images.rating columns
+        if rating_updates:
+            print("Populating null image rating fields...")
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                UPDATE images AS i
+                SET rating = v.new_rating
+                FROM (VALUES %s) AS v(id, new_rating)
+                WHERE i.id = v.id
+                  AND (i.rating IS NULL OR BTRIM(i.rating) = '')
+                """,
+                rating_updates,
                 page_size=10000
             )
 
@@ -644,12 +678,11 @@ def curate_existing_tags(args):
         conn.commit()
         print("\n[✓] Retroactive curation complete.")
 
-
 # ==========================================
 # Tool 5: Retroactive Database Mapper
 # ==========================================
 def generate_db_curation_map(args):
-    """Generates a curation CSV by piping DB overlap natively into tags_mining.py."""
+    """Generates a curation CSV using live DB tags, canonical dictionaries, and prefix normalization."""
     db_config = get_shimmie_db_credentials(args.spath)
     if not db_config:
         print(f"[ERROR] Could not load DB credentials from {args.spath}")
@@ -657,112 +690,25 @@ def generate_db_curation_map(args):
 
     target_tag = args.target_tag
     ref_tag = args.reference_tag
+    is_booru_batch = target_tag.lower().startswith("booru:") and ref_tag.lower().startswith("booru:")
     out_csv = Path("botched_map.csv")
+
+    existing_map = {}
+    if getattr(args, "use_map_csv", None):
+        existing_map = load_dynamic_mappings(args.use_map_csv)
+        print(f"[INFO] Loaded {len(existing_map):,} existing mappings to respect.")
+
+    print("[*] Loading canonical dictionaries (tag_groups.json, characters, artists, ratings)...")
+    mappings = load_mappings()
+    guard = TagCategoryGuard(mappings)
+    known_valid_general = set(guard.known_general) | set(mappings.rating.keys())
+    if not is_booru_batch:
+        known_valid_general.discard(target_tag)
 
     with psycopg2.connect(**db_config) as conn:
         cur = conn.cursor()
 
-        print(f"[*] Locating Rosetta Stones (Images with both '{target_tag}' and '{ref_tag}')...")
-
-        cur.execute("""
-            WITH rosetta_images AS (
-                SELECT it1.image_id
-                FROM image_tags it1
-                JOIN tags t1 ON it1.tag_id = t1.id
-                JOIN image_tags it2 ON it1.image_id = it2.image_id
-                JOIN tags t2 ON it2.tag_id = t2.id
-                WHERE t1.tag = %s AND t2.tag = %s
-            )
-            SELECT
-                r.image_id,
-                (
-                    SELECT th.tags
-                    FROM tag_histories th
-                    WHERE th.image_id = r.image_id
-                      AND %s = ANY(string_to_array(th.tags, ' '))
-                      AND NOT (%s = ANY(string_to_array(th.tags, ' ')))
-                    ORDER BY th.id DESC LIMIT 1
-                ) as pure_ref_history,
-                (
-                    SELECT th.tags
-                    FROM tag_histories th
-                    WHERE th.image_id = r.image_id
-                      AND %s = ANY(string_to_array(th.tags, ' '))
-                      AND NOT (%s = ANY(string_to_array(th.tags, ' ')))
-                    ORDER BY th.id DESC LIMIT 1
-                ) as pure_target_history,
-                (
-                    SELECT string_agg(t.tag, ' ')
-                    FROM image_tags it
-                    JOIN tags t ON it.tag_id = t.id
-                    WHERE it.image_id = r.image_id
-                ) as current_tags
-            FROM rosetta_images r;
-        """, (target_tag, ref_tag, ref_tag, target_tag, target_tag, ref_tag))
-
-        rows = cur.fetchall()
-        print(f"    -> Found {len(rows):,} overlapping images to analyze.")
-
-        print("[*] Translating DB overlap into tags_mining.py frequency format...")
-        valid_pairs = 0
-        sidecar_counts = Counter()
-        canonical_counts = Counter()
-        co_occurrences = defaultdict(Counter)
-        sidecar_overlap = defaultdict(Counter)
-
-        for _, pure_ref_history, pure_target_history, current_tags in tqdm.tqdm(rows, desc="Mapping Frequencies"):
-            if not current_tags:
-                continue
-
-            current_set = {t for t in current_tags.split() if not t.startswith(("booru:", "tagai:", "source:", "site:"))}
-
-            if pure_ref_history:
-                # Case 1: Reference tag (gelbooru) was imported first, target (e621) merged second
-                canonical = {t for t in pure_ref_history.split() if not t.startswith(("booru:", "tagai:", "source:", "site:"))}
-                botched_tags = current_set - canonical
-            elif pure_target_history:
-                # Case 2: Target tag (e621) was imported first, reference (gelbooru) merged second
-                botched_tags = {t for t in pure_target_history.split() if not t.startswith(("booru:", "tagai:", "source:", "site:"))}
-                canonical = current_set - botched_tags
-            else:
-                continue
-
-            if not canonical or not botched_tags:
-                continue
-
-            valid_pairs += 1
-
-            for s_tag in botched_tags:
-                sidecar_counts[s_tag] += 1
-                for c_tag in canonical:
-                    co_occurrences[s_tag][c_tag] += 1
-
-            for c_tag in canonical:
-                canonical_counts[c_tag] += 1
-
-        print(
-            f"    -> Extracted {valid_pairs:,} valid tag-history diffs "
-            f"({len(sidecar_counts):,} unique target tags vs {len(canonical_counts):,} canonical tags)."
-        )
-
-        freqs = (valid_pairs, sidecar_counts, canonical_counts, co_occurrences, sidecar_overlap)
-
-        print("[*] Fetching mappings and global context to satisfy tags_mining.py...")
-        mappings = load_mappings()
-        global_ctx = _fetch_global_context(set(sidecar_counts.keys()) | set(canonical_counts.keys()), db_config)
-
-        guard = TagCategoryGuard(mappings)
-
-        print("[*] Pass 1: Calculating 1:1 synonym equivalencies from Rosetta Stones...")
-        calculated = calculate_equivalencies(freqs, global_ctx, guard, thresholds=(5, 0.50), mode="retro")
-
-        mapped_tags = {r["Sidecar_Tag"] for r in calculated} | {r["Canonical_Tag"] for r in calculated}
-        print(f"    -> Discovered {len(calculated):,} 1:1 synonym mappings.")
-
-        # =========================================================================
-        # Pass 2: Vocabulary Rejection & Overlap Non-Adoption (_DROP_)
-        # =========================================================================
-        print(f"[*] Pass 2: Hunting exclusive '{target_tag}' bloat with 0 non-Rosetta '{ref_tag}' usage...")
+        print(f"[*] Auditing tag distribution across '{target_tag}' vs pure '{ref_tag}'...")
         cur.execute("""
             WITH target_tag_id AS (
                 SELECT id FROM tags WHERE tag = %s LIMIT 1
@@ -802,58 +748,195 @@ def generate_db_curation_map(args):
             FROM target_tag_counts ttc
             JOIN tags t ON t.id = ttc.tag_id
             LEFT JOIN pure_ref_tag_counts prtc ON prtc.tag_id = ttc.tag_id
-            WHERE t.count > 0
-              AND COALESCE(prtc.pure_ref_cnt, 0) = 0;
+            WHERE t.count > 0;
         """, (target_tag, ref_tag))
+        all_target_tag_rows = cur.fetchall()
 
-        candidate_rows = cur.fetchall()
+        # Build live canonical vocabulary so we don't depend on corrupted tag_histories
+        established_canonical = set(known_valid_general)
+        for t_name, _, _, pure_ref_cnt in all_target_tag_rows:
+            if not is_booru_batch and t_name == target_tag:
+                continue
+            if resolve_prefixed_tag(t_name) is not None:
+                continue
+            if pure_ref_cnt >= 5 or guard.get_category(t_name) in {"artist", "character", "series"}:
+                established_canonical.add(t_name)
 
+        print(f"[*] Locating Rosetta Stones (Images with both '{target_tag}' and '{ref_tag}')...")
+        cur.execute("""
+            WITH rosetta_images AS (
+                SELECT it1.image_id
+                FROM image_tags it1
+                JOIN tags t1 ON it1.tag_id = t1.id
+                JOIN image_tags it2 ON it1.image_id = it2.image_id
+                JOIN tags t2 ON it2.tag_id = t2.id
+                WHERE t1.tag = %s AND t2.tag = %s
+            )
+            SELECT
+                r.image_id,
+                (
+                    SELECT th.tags
+                    FROM tag_histories th
+                    WHERE th.image_id = r.image_id
+                      AND %s = ANY(string_to_array(th.tags, ' '))
+                      AND NOT (%s = ANY(string_to_array(th.tags, ' ')))
+                    ORDER BY th.id DESC LIMIT 1
+                ) as pure_ref_history,
+                (
+                    SELECT string_agg(t.tag, ' ')
+                    FROM image_tags it
+                    JOIN tags t ON it.tag_id = t.id
+                    WHERE it.image_id = r.image_id
+                ) as current_tags
+            FROM rosetta_images r;
+        """, (target_tag, ref_tag, ref_tag, target_tag))
+
+        rows = cur.fetchall()
+        print(f"    -> Found {len(rows):,} overlapping images to analyze.")
+
+    print("[*] Translating DB overlap into tags_mining.py frequency format...")
+    valid_pairs = 0
+    sidecar_counts = Counter()
+    canonical_counts = Counter()
+    co_occurrences = defaultdict(Counter)
+    sidecar_overlap = defaultdict(Counter)
+    ignored_meta = ("booru:", "tagai:", "source:", "site:")
+
+    for _, pure_ref_history, current_tags in tqdm.tqdm(rows, desc="Mapping Frequencies"):
+        if not current_tags:
+            continue
+
+        current_set = {t for t in current_tags.split() if not t.startswith(ignored_meta)}
+
+        if pure_ref_history:
+            ref_hist_set = {t for t in pure_ref_history.split() if not t.startswith(ignored_meta)}
+            canonical = (ref_hist_set | (current_set & established_canonical))
+            if not is_booru_batch:
+                canonical.discard(target_tag)
+            botched_tags = current_set - canonical
+        else:
+            # Live fallback independent of corrupted/edited tag_histories
+            canonical = {t for t in current_set if t in established_canonical}
+            botched_tags = current_set - canonical
+
+        if not canonical or not botched_tags:
+            continue
+
+        valid_pairs += 1
+
+        for s_tag in botched_tags:
+            sidecar_counts[s_tag] += 1
+            for c_tag in canonical:
+                co_occurrences[s_tag][c_tag] += 1
+
+        for c_tag in canonical:
+            canonical_counts[c_tag] += 1
+
+    print(
+        f"    -> Extracted {valid_pairs:,} valid tag diffs "
+        f"({len(sidecar_counts):,} unique suspect tags vs {len(canonical_counts):,} canonical tags)."
+    )
+
+    freqs = (valid_pairs, sidecar_counts, canonical_counts, co_occurrences, sidecar_overlap)
+    global_ctx = _fetch_global_context(set(sidecar_counts.keys()) | set(canonical_counts.keys()), db_config)
+
+    print("[*] Pass 1: Calculating 1:1 synonym equivalencies from Rosetta Stones...")
+    calculated = calculate_equivalencies(freqs, global_ctx, guard, thresholds=(5, 0.50), mode="retro")
+
+    mapped_tags = {r["Sidecar_Tag"] for r in calculated} | {r["Canonical_Tag"] for r in calculated}
+    print(f"    -> Discovered {len(calculated):,} 1:1 synonym mappings.")
+
+    # =========================================================================
+    # Pass 2: Prefix Normalization, Variant Rescue & Known-Junk-Only _DROP_
+    # =========================================================================
+    print(f"[*] Pass 2: Normalizing foreign prefixes and filtering known junk on '{target_tag}'...")
     drop_results = []
     skipped_protected = 0
 
-    for tag_name, global_cnt, target_cnt, pure_ref_cnt in candidate_rows:
+    for tag_name, _, target_cnt, pure_ref_cnt in all_target_tag_rows:
         tag_lower = tag_name.lower()
 
-        # 1. Hard namespace protection for core prefixes
-        if tag_lower.startswith(("artist:", "character:", "series:", "source:", "booru:", "tagai:", "site:")):
-            skipped_protected += 1
+        # 0. Respect existing user map (no 1000-count cap)
+        if tag_name in existing_map:
+            if tag_name not in mapped_tags:
+                target_val = existing_map[tag_name]
+                if target_val == "_DROP_":
+                    drop_results.append({
+                        "Sidecar_Tag": tag_name,
+                        "Canonical_Tag": "_DROP_",
+                        "Confidence": 1.0,
+                        "Sample_Size": target_cnt,
+                    })
+                else:
+                    calculated.append({
+                        "Sidecar_Tag": tag_name,
+                        "Canonical_Tag": target_val,
+                        "Confidence": 1.0,
+                        "Sample_Size": target_cnt,
+                    })
+                mapped_tags.add(tag_name)
             continue
 
-        # 2. Skip if already rescued by a 1:1 synonym mapping in Pass 1
+        # 1. If comparing non-booru content tags (e.g., spats vs bike_shorts), map target_tag -> ref_tag
+        if tag_name == target_tag and not is_booru_batch and target_tag != ref_tag:
+            if tag_name not in mapped_tags:
+                calculated.append({
+                    "Sidecar_Tag": target_tag,
+                    "Canonical_Tag": ref_tag,
+                    "Confidence": 1.0,
+                    "Sample_Size": target_cnt,
+                })
+                mapped_tags.add(tag_name)
+            continue
+
+        # 2. Skip if already mapped in Pass 1
         if tag_name in mapped_tags:
             continue
 
-        # 3. Handle prefixed tags (rating:, pixiv_*, page:, and any unknown prefixes)
-        if ":" in tag_name:
-            resolved_prefix_tag = resolve_prefixed_tag(tag_name)
-            if resolved_prefix_tag == "_DROP_":
-                drop_results.append({
-                    "Sidecar_Tag": tag_name,
-                    "Canonical_Tag": "_DROP_",
-                    "Confidence": 1.0,
-                    "Sample_Size": target_cnt
-                })
-            elif resolved_prefix_tag:
-                # e.g. rating:https://... -> source:https://... or pixiv_work:123 -> source:https://www.pixiv.net/en/artworks/123
+        # 3. Resolve structured & foreign prefixed tags (female:, male:, copyright:, parody:, rating:, pixiv_*, *_(artist))
+        resolved_prefix_tag = resolve_prefixed_tag(tag_name)
+        if resolved_prefix_tag == "_DROP_":
+            drop_results.append({
+                "Sidecar_Tag": tag_name,
+                "Canonical_Tag": "_DROP_",
+                "Confidence": 1.0,
+                "Sample_Size": target_cnt,
+            })
+            mapped_tags.add(tag_name)
+            continue
+        if resolved_prefix_tag:
+            # Snap stripped tag to existing_map, MASTER_MERGE_LIST, or tag_groups.json punctuation if applicable
+            final_target = existing_map.get(
+                resolved_prefix_tag,
+                MASTER_MERGE_LIST.get(resolved_prefix_tag, resolved_prefix_tag),
+            )
+            if ":" not in final_target:
+                norm_res = re.sub(r"[_()-]", "", final_target.lower())
+                if len(norm_res) >= 3 and norm_res in guard.norm_general_map:
+                    final_target = guard.norm_general_map[norm_res]
+
+            if final_target != tag_name:
                 calculated.append({
                     "Sidecar_Tag": tag_name,
-                    "Canonical_Tag": resolved_prefix_tag,
+                    "Canonical_Tag": final_target,
                     "Confidence": 1.0,
-                    "Sample_Size": target_cnt
+                    "Sample_Size": target_cnt,
                 })
                 mapped_tags.add(tag_name)
-            else:
-                # NEVER auto-_DROP_ any other unknown prefix (e.g., page:, studio:, etc.)
-                skipped_protected += 1
             continue
 
-        # 4. Guard protection: never drop known unprefixed characters, artists, series, or tag_groups.json general tags
-        if guard.get_category(tag_name) in {"artist", "character", "series"} or tag_name in guard.known_general:
+        # 4. Protect core and unknown prefixes
+        if ":" in tag_name:
             skipped_protected += 1
             continue
 
-        # 5. Double-check pure_ref_cnt == 0 outside Rosetta AND 0 in pure Rosetta history
-        if pure_ref_cnt > 0 or canonical_counts.get(tag_name, 0) > 0:
+        # 5. Protect known characters, artists, series, tag_groups.json, and tag_rating_dominant.db tags
+        if (
+            guard.get_category(tag_name) in {"artist", "character", "series"}
+            or tag_name in known_valid_general
+            or pure_ref_cnt > 0
+        ):
+            skipped_protected += 1
             continue
 
         # 6. Rescue punctuation/hyphen variants (e.g., upside_down -> upside-down) via tag_groups.json
@@ -865,27 +948,15 @@ def generate_db_curation_map(args):
                     "Sidecar_Tag": tag_name,
                     "Canonical_Tag": canonical_match,
                     "Confidence": 1.0,
-                    "Sample_Size": target_cnt
+                    "Sample_Size": target_cnt,
                 })
                 mapped_tags.add(tag_name)
                 continue
 
-        exclusivity = target_cnt / global_cnt if global_cnt > 0 else 0.0
-        rosetta_s_cnt = sidecar_counts.get(tag_name, 0)
-
-        # Rule A: Global Vocabulary Rejection (0 on pure ref_tag, >= 95% exclusive to target_tag across entire DB)
-        # Rule B: Overlap Non-Adoption (>= 10 hits in Rosetta botched_tags, 0 in pure ref_tag, failed 1:1 mapping)
-        if exclusivity >= 0.95 or rosetta_s_cnt >= 10:
-            drop_results.append({
-                "Sidecar_Tag": tag_name,
-                "Canonical_Tag": "_DROP_",
-                "Confidence": round(max(exclusivity, 0.95 if rosetta_s_cnt >= 10 else exclusivity), 4),
-                "Sample_Size": target_cnt
-            })
-
     print(
-        f"    -> Flagged {len(drop_results):,} unmapped '{target_tag}' tags for '_DROP_' "
-        f"(protected {skipped_protected:,} character/artist/series/canonical tags)."
+        f"    -> Total 1:1 mappings & prefix rescues: {len(calculated):,} | "
+        f"Known junk flagged for '_DROP_': {len(drop_results):,} "
+        f"(protected {skipped_protected:,} valid tags)."
     )
 
     all_results = calculated + drop_results
@@ -906,14 +977,14 @@ def generate_db_curation_map(args):
 
 
 # ==========================================
-# Tool 6: Low-Frequency Tag Dumper
+# Tool 6: Low-Frequency Tag Dumper (Helper)
 # ==========================================
 def _classify_namespace(tag_name):
-    """Returns the namespace bucket for a tag."""
+    """Returns the exact namespace prefix bucket for a tag so all foreign prefixes are visible in .log."""
     if ":" not in tag_name:
         return "general (unprefixed)"
     prefix = tag_name.split(":", 1)[0].lower()
-    if prefix in {"artist", "character", "series", "source", "booru", "rating", "meta", "studio"}:
+    if re.fullmatch(r"[a-z0-9_-]{1,20}", prefix):
         return f"{prefix}:"
     return "other (prefixed)"
 

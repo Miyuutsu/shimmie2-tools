@@ -148,17 +148,19 @@ def enrich_tags(initial_tags, mappings):
     return [t for t in final_tags if t not in mappings.artist]
 
 def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
-    """Determines rating based on tag weights or fallback to database if available"""
+    """Determines rating based on tag weights or fallback to database/sidecar rating if available."""
     total_score = 0
     real_tag_count = 0
+    sidecar_ratings = []
+
     for tag in tags:
-        # 1. Real tags only
         if tag.startswith(("tagai:", "booru:")):
+            continue
+        if tag.lower() in {"rating:e", "rating:q", "rating:s"}:
+            sidecar_ratings.append(tag.split(":", 1)[1].lower())
             continue
 
         real_tag_count += 1
-
-        # 2. Strip namespace
         base_tag = tag.split(":", 1)[-1] if ":" in tag else tag
 
         weight = rating_map.get(base_tag, 0)
@@ -173,7 +175,7 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
     elif total_score > 0:
         calc_rating = rating_from_score(total_score, smax, qmax)
 
-    # Resolve the original source rating
+    # Resolve the original source rating (or sidecar rating:* tag if post rating is unset)
     r_str = str(post_rating_list).lower()
     if r_str in ["e", "explicit"]:
         fallback_rating = "e"
@@ -181,17 +183,22 @@ def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
         fallback_rating = "q"
     elif r_str in ["s", "g", "general", "safe"]:
         fallback_rating = "s"
+    elif sidecar_ratings:
+        hierarchy = {"s": 0, "q": 1, "e": 2}
+        fallback_rating = max(sidecar_ratings, key=lambda r: hierarchy.get(r, 0))
     else:
         fallback_rating = "?"
 
     # 3. The AI Auditor Hierarchy Rule
     if real_tag_count >= 10:
-        # Local tag math overrules source metadata completely
         final_rating = calc_rating
     else:
-        # Too few tags: apply the AI Auditor Hierarchy rule (only upgrade)
-        hierarchy = {'s': 0, 'q': 1, 'e': 2}
-        final_rating = calc_rating if hierarchy.get(calc_rating, 0) > hierarchy.get(fallback_rating, 0) else fallback_rating
+        hierarchy = {"s": 0, "q": 1, "e": 2}
+        final_rating = (
+            calc_rating
+            if hierarchy.get(calc_rating, 0) > hierarchy.get(fallback_rating, 0)
+            else fallback_rating
+        )
 
     return "s" if final_rating == "g" else final_rating
 
@@ -256,6 +263,7 @@ def compile_metadata(image, post, mappings, args, dynamic_mappings=None):
     if len(tags) < 15:
         tags.append("tagme")
     rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
+    tags = [t for t in tags if t.lower() not in {"rating:e", "rating:q", "rating:s"}]
     if not any(tag.startswith("artist:") for tag in tags):
         tags.append("artist:tagme")
     if not any(tag.startswith("character:") for tag in tags):

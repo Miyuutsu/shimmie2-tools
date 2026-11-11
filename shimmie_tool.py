@@ -92,6 +92,7 @@ def _add_generate_map_parser(subparsers):
     parser.add_argument("--spath", required=True, help="Path to Shimmie root")
     parser.add_argument("--target-tag", required=True, help="The tag identifying the botched batch (e.g., booru:bad_import)")
     parser.add_argument("--reference-tag", required=True, help="The pure historical tag (e.g., booru:gelbooru)")
+    parser.add_argument("--use-map", dest="use_map_csv", help="Load existing CSV map")
 
 
 def _add_purge_parser(subparsers):

@@ -1,8 +1,10 @@
 """Functions for parsing, sorting, formatting, and reading text tags."""
 import csv
 import html
-import re
 from pathlib import Path
+import re
+
+from functions.source_resolver import resolve_prefixed_tag
 
 def rating_from_score(total_score: int, safe_max: int, questionable_max: int) -> str:
     """Map a numeric total to the rating letter."""
@@ -52,6 +54,16 @@ MASTER_MERGE_LIST = {
 }
 
 
+def _normalize_structural_tag(tag, lookup_map=None):
+    """Normalizes foreign prefixes (female:, copyright:, rating:, *_(artist), etc.)
+    and re-checks lookup_map if the normalized form maps to a canonical tag."""
+    resolved = resolve_prefixed_tag(tag)
+    norm_tag = resolved if resolved is not None else tag
+    if lookup_map and norm_tag != tag:
+        return lookup_map.get(norm_tag, MASTER_MERGE_LIST.get(norm_tag, norm_tag))
+    return norm_tag
+
+
 def apply_tag_curation(tags, dynamic_mappings=None):
     """In-place fixing of tags without copying dynamic_mappings per call."""
     prefixes = ("artist:", "character:", "series:", "source:")
@@ -63,11 +75,20 @@ def apply_tag_curation(tags, dynamic_mappings=None):
 
     if dynamic_mappings:
         step2_tags = [
-            dynamic_mappings.get(tag, MASTER_MERGE_LIST.get(tag, tag))
+            _normalize_structural_tag(
+                dynamic_mappings.get(tag, MASTER_MERGE_LIST.get(tag, tag)),
+                dynamic_mappings,
+            )
             for tag in step1_tags
         ]
     else:
-        step2_tags = [MASTER_MERGE_LIST.get(tag, tag) for tag in step1_tags]
+        step2_tags = [
+            _normalize_structural_tag(
+                MASTER_MERGE_LIST.get(tag, tag),
+                MASTER_MERGE_LIST,
+            )
+            for tag in step1_tags
+        ]
 
     merged_set = set(step2_tags)
     step3_tags = [
