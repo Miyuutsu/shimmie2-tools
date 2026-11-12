@@ -10,6 +10,7 @@ import tqdm
 
 from functions.db_cache import resolve_post, get_shimmie_db_credentials
 from functions.media import extract_video_frames, video_exts
+from functions.tags_curation import load_tag_groups_metadata
 
 SUBMODULE_PATH = Path(__file__).parent.parent / "SD-Tag-Editor"
 DB_DIR = Path(__file__).parent.parent / "database"
@@ -34,50 +35,9 @@ def _load_rating_weights() -> dict[str, int]:
 
 
 def _load_verbose_group_parents() -> tuple[dict[str, set[str]], set[str]]:
-    """
-    Parses tag_groups.json to build:
-      1. child_to_bases: maps specific modifier/type/base tags to their canonical parent base tag(s)
-         so verbose tagging is preserved without pruning away base tags.
-      2. sex_group_tags: all tags under the 'sex' category to reinforce Q/E rating detection.
-    """
-    child_to_bases = defaultdict(set)
-    sex_group_tags = set()
-
-    candidates = [TAG_GROUPS_PATH, Path(__file__).parent.parent / "tag_groups.json"]
-    group_file = next((p for p in candidates if p.is_file()), None)
-    if not group_file:
-        return child_to_bases, sex_group_tags
-
-    with group_file.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    for category, subgroups in data.items():
-        if not isinstance(subgroups, dict):
-            continue
-        for group_name, content in subgroups.items():
-            if group_name == "other" and isinstance(content, list):
-                if category == "sex":
-                    sex_group_tags.update(content)
-                continue
-
-            if not isinstance(content, dict):
-                continue
-
-            bases = content.get("base", [])
-            # Canonical parent is the group name if it exists in `base`, otherwise single-item `base`
-            canonical_bases = {group_name} if group_name in bases else (set(bases) if len(bases) == 1 else set())
-
-            for sub_list in content.values():
-                if not isinstance(sub_list, list):
-                    continue
-                for tag in sub_list:
-                    if category == "sex":
-                        sex_group_tags.add(tag)
-                    for b_tag in canonical_bases:
-                        if tag != b_tag:
-                            child_to_bases[tag].add(b_tag)
-
-    return child_to_bases, sex_group_tags
+    """Loads shared parent expansion rules and sex category tags from tag_groups.json."""
+    child_to_parents, _, _, sex_group_tags = load_tag_groups_metadata()
+    return child_to_parents, sex_group_tags
 
 
 def _collect_missing_sidecars(target_dir: Path, allowed_extensions: set[str]) -> list[Path]:

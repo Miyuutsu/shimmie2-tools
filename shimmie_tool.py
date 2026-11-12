@@ -85,6 +85,18 @@ def _add_curate_db_parser(subparsers):
     parser.add_argument("--use-map", dest="use_map_csv", help="Load an existing CSV map for dynamic curation")
     parser.add_argument("--target-tag", help="Only curate images containing this specific tag")
 
+def _add_fix_map_parser(subparsers):
+    """Adds the fix-map command."""
+    parser = subparsers.add_parser(
+        "fix-map",
+        help="Audit and repair a curation CSV map (purges poisoned rules, rescues series/characters/artists, and optionally reverts bad DB merges)"
+    )
+    parser.add_argument("--csv", required=True, help="Path to input CSV map (e.g., tagmap.csv)")
+    parser.add_argument("-o", "--out", help="Output CSV path (Defaults to overwriting --csv after saving a .bak backup)")
+    parser.add_argument("--spath", help="Optional path to Shimmie2 root to cross-check live DB tags and revert poisoned artist:mizumizuni links")
+    parser.add_argument("--revert-mizumizuni", \
+        action="store_true", help="Revert poisoned 'artist:mizumizuni' back to 'eyes' in Postgres using tag_histories")
+
 
 def _add_generate_map_parser(subparsers):
     """Adds the generate-db-map command."""
@@ -152,6 +164,7 @@ def setup_parser():
     _add_auto_tag_parser(subparsers)
     _add_csv2sqlite_parser(subparsers)
     _add_curate_db_parser(subparsers)
+    _add_fix_map_parser(subparsers)
     _add_generate_map_parser(subparsers)
     _add_purge_parser(subparsers)
     _add_tag_dump_parser(subparsers)
@@ -198,6 +211,7 @@ def main():
         "auto-tag": auto_tagger.run_auto_tagger,
         "csv2sqlite": db.csv_to_sqlite,
         "curate-db": db.curate_existing_tags,
+        "fix-map": db.fix_curation_map,
         "generate-db-map": db.generate_db_curation_map,
         "purge": db.purge_images,
         "tag-dump": db.tag_dump,

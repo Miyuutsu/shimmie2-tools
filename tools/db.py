@@ -15,6 +15,7 @@ from functions.source_resolver import get_source_score, resolve_prefixed_tag
 from functions.tags_curation import (
     MASTER_MERGE_LIST,
     apply_tag_curation,
+    get_curation_context,
     load_dynamic_mappings,
     rating_from_score,
 )
@@ -463,7 +464,8 @@ def _collect_tagai_overlap_pairs(tag_id_map, merged_map):
 
 
 def curate_existing_tags(args):
-    """Applies hardcoded and dynamic curation rules to images already in Postgres."""
+    """Applies dynamic mappings, prefix normalization, character/artist/series enrichment,
+    tag_groups.json parent expansion, and tagme/source/rating rules to images in Postgres."""
     merged_map = dict(MASTER_MERGE_LIST)
     if getattr(args, "use_map_csv", None):
         dynamic_mappings = load_dynamic_mappings(args.use_map_csv)
@@ -475,12 +477,24 @@ def curate_existing_tags(args):
         print(f"[ERROR] Could not load DB credentials from {args.spath}")
         return
 
+    mappings = load_mappings()
+    ctx = get_curation_context(mappings)
+    single_tag_cache = {}
+
     with psycopg2.connect(**db_config) as conn:
         cur = conn.cursor()
 
         print("Fetching global tag map...")
-        cur.execute("SELECT tag, id FROM tags")
-        tag_id_map = dict(cur.fetchall())
+        cur.execute("SELECT tag, id, count FROM tags")
+        tag_rows = cur.fetchall()
+        tag_id_map = {t: tid for t, tid, _ in tag_rows}
+        tag_counts = {t: (cnt or 0) for t, _, cnt in tag_rows}
+
+        ctx.register_db_vocabulary(tag_id_map.keys(), tag_counts=tag_counts)
+
+        print(f"Pre-computing tag expansion cache across {len(tag_id_map):,} unique DB tags...")
+        for tag_name in tag_id_map:
+            single_tag_cache[tag_name] = ctx.expand_single_tag(tag_name, merged_map)
 
         if getattr(args, "target_tag", None):
             print(f"Fetching image tags from Postgres strictly for batch '{args.target_tag}'...")
@@ -496,65 +510,22 @@ def curate_existing_tags(args):
                 )
                 GROUP BY i.id, i.source, i.rating
             """, (args.target_tag,))
-            images_data = cur.fetchall()
         else:
-            trigger_tag_ids = _collect_trigger_tag_ids(tag_id_map, merged_map)
-            tagai_pairs = _collect_tagai_overlap_pairs(tag_id_map, merged_map)
-            if not trigger_tag_ids and not tagai_pairs:
-                print("\n[✓] No matching trigger tags or redundant tagai: tags exist. No changes needed.")
-                return
-
-            print(
-                f"Filtering database for images matching {len(trigger_tag_ids):,} trigger tags "
-                f"or {len(tagai_pairs):,} redundant tagai: pairs..."
-            )
-            cur.execute("CREATE TEMP TABLE tmp_trigger_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
-            if trigger_tag_ids:
-                psycopg2.extras.execute_values(
-                    cur,
-                    "INSERT INTO tmp_trigger_tags (tag_id) VALUES %s",
-                    [(tid,) for tid in trigger_tag_ids],
-                    page_size=10000
-                )
-            cur.execute("ANALYZE tmp_trigger_tags")
-
-            cur.execute("CREATE TEMP TABLE tmp_tagai_pairs (ai_id INT, real_id INT) ON COMMIT DROP")
-            if tagai_pairs:
-                psycopg2.extras.execute_values(
-                    cur,
-                    "INSERT INTO tmp_tagai_pairs (ai_id, real_id) VALUES %s",
-                    tagai_pairs,
-                    page_size=10000
-                )
-            cur.execute("CREATE INDEX idx_tmp_tagai_ai ON tmp_tagai_pairs (ai_id)")
-            cur.execute("ANALYZE tmp_tagai_pairs")
-
+            print("Fetching all images and tags from Postgres...")
             cur.execute("""
-                WITH candidate_images AS (
-                    SELECT it.image_id
-                    FROM image_tags it
-                    JOIN tmp_trigger_tags tt ON it.tag_id = tt.tag_id
-                    UNION
-                    SELECT it_ai.image_id
-                    FROM tmp_tagai_pairs tp
-                    JOIN image_tags it_ai ON it_ai.tag_id = tp.ai_id
-                    JOIN image_tags it_real ON it_real.image_id = it_ai.image_id
-                                           AND it_real.tag_id = tp.real_id
-                )
                 SELECT i.id, i.source, i.rating, array_agg(t.tag)
-                FROM candidate_images ci
-                JOIN images i ON ci.image_id = i.id
-                JOIN image_tags it ON i.id = it.image_id
-                JOIN tags t ON it.tag_id = t.id
+                FROM images i
+                LEFT JOIN image_tags it ON i.id = it.image_id
+                LEFT JOIN tags t ON it.tag_id = t.id
                 GROUP BY i.id, i.source, i.rating
             """)
-            images_data = cur.fetchall()
 
+        images_data = cur.fetchall()
         if not images_data:
-            print("\n[✓] No candidate images matched for curation.")
+            print("\n[✓] No images matched for curation.")
             return
 
-        print(f"Evaluating {len(images_data):,} candidate images...")
+        print(f"Evaluating {len(images_data):,} images...")
 
         tags_to_add = []
         tags_to_remove = []
@@ -565,10 +536,15 @@ def curate_existing_tags(args):
         canonical_rating_tags = {"rating:e", "rating:q", "rating:s"}
 
         for img_id, current_source, current_rating, raw_tags in tqdm.tqdm(images_data, desc="Curating Tags"):
-            current_tags = list(raw_tags)
+            current_tags = [t for t in (raw_tags or ()) if t is not None]
             curated_tags = list(current_tags)
 
-            apply_tag_curation(curated_tags, merged_map)
+            apply_tag_curation(
+                curated_tags,
+                dynamic_mappings=merged_map,
+                context=ctx,
+                single_tag_cache=single_tag_cache,
+            )
 
             # 1. Promote rating:e/q/s into images.rating ONLY when images.rating is NULL/empty, then strip the tag
             extracted_ratings = [
@@ -595,8 +571,15 @@ def curate_existing_tags(args):
                         source_updates.append((img_id, best_url))
                         curated_tags = [t for t in curated_tags if t != best_src_tag]
 
-            if "tagme" in current_tags and len(curated_tags) < 15:
+            # 3. Enforce tagme, artist:tagme, character:tagme, and series:tagme
+            if len(curated_tags) < 15:
                 curated_tags.append("tagme")
+            if not any(t.startswith("artist:") for t in curated_tags):
+                curated_tags.append("artist:tagme")
+            if not any(t.startswith("character:") for t in curated_tags):
+                curated_tags.append("character:tagme")
+            if not any(t.startswith("series:") for t in curated_tags):
+                curated_tags.append("series:tagme")
 
             curr_set = set(current_tags)
             cur_set = set(curated_tags)
@@ -717,6 +700,14 @@ def curate_existing_tags(args):
         cur.execute("DELETE FROM tags WHERE count <= 0")
 
         conn.commit()
+        print("Running VACUUM ANALYZE on tags, image_tags, and images to rebuild visibility maps...")
+        vac_conn = psycopg2.connect(**db_config)
+        try:
+            vac_conn.autocommit = True
+            with vac_conn.cursor() as vac_cur:
+                vac_cur.execute("VACUUM ANALYZE tags, image_tags, images;")
+        finally:
+            vac_conn.close()
         print("\n[✓] Retroactive curation complete.")
 
 # ==========================================
@@ -1273,3 +1264,195 @@ def tag_dump(args):
                 (skipped_prefix, skipped_substr),
             )
             _write_tag_dump_log(cur, filtered_rows, dump_meta, log_path)
+
+
+# ==========================================
+# Tool 7: Curation Map Fixer & DB Reverter
+# ==========================================
+def _revert_poisoned_mizumizuni(db_config):
+    """Reverts 'artist:mizumizuni' back to 'eyes' on images whose tag_histories had 'eyes' and never 'mizumizuni'."""
+    print("\n[*] Auditing 'artist:mizumizuni' in PostgreSQL against tag_histories...")
+    with psycopg2.connect(**db_config) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM tags WHERE tag = 'artist:mizumizuni'")
+        row = cur.fetchone()
+        if not row:
+            print("[✓] Tag 'artist:mizumizuni' not found in database.")
+            return
+        mizu_id = row[0]
+
+        cur.execute("INSERT INTO tags (tag, count) VALUES ('eyes', 0) ON CONFLICT (tag) DO NOTHING")
+        cur.execute("SELECT id FROM tags WHERE tag = 'eyes'")
+        eyes_id = cur.fetchone()[0]
+
+        cur.execute("INSERT INTO tags (tag, count) VALUES ('artist:tagme', 0) ON CONFLICT (tag) DO NOTHING")
+        cur.execute("SELECT id FROM tags WHERE tag = 'artist:tagme'")
+        artist_tagme_id = cur.fetchone()[0]
+
+        # Find all images currently tagged artist:mizumizuni where tag_histories never had mizumizuni
+        cur.execute("""
+            WITH mizu_images AS (
+                SELECT image_id FROM image_tags WHERE tag_id = %s
+            ),
+            real_mizu AS (
+                SELECT DISTINCT th.image_id
+                FROM tag_histories th
+                JOIN mizu_images mi ON th.image_id = mi.image_id
+                WHERE th.tags ILIKE '%%mizumizuni%%'
+                  AND th.tags ILIKE '%%eyes%%'
+            )
+            SELECT mi.image_id
+            FROM mizu_images mi
+            LEFT JOIN real_mizu rm ON mi.image_id = rm.image_id
+            WHERE rm.image_id IS NULL;
+        """, (mizu_id,))
+        poisoned_img_ids = [r[0] for r in cur.fetchall()]
+
+        if not poisoned_img_ids:
+            print("[✓] No poisoned 'artist:mizumizuni' images found.")
+            return
+
+        print(f"    -> Reverting {len(poisoned_img_ids):,} poisoned 'artist:mizumizuni' images back to 'eyes'...")
+        cur.execute("CREATE TEMP TABLE tmp_mizu_fix (img_id INT PRIMARY KEY) ON COMMIT DROP")
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO tmp_mizu_fix (img_id) VALUES %s",
+            [(iid,) for iid in poisoned_img_ids],
+            page_size=10000,
+        )
+
+        # 1. Remove bogus artist:mizumizuni links
+        cur.execute("""
+            DELETE FROM image_tags it
+            USING tmp_mizu_fix tmf
+            WHERE it.image_id = tmf.img_id AND it.tag_id = %s
+        """, (mizu_id,))
+
+        # 2. Restore 'eyes' tag link
+        cur.execute("""
+            INSERT INTO image_tags (image_id, tag_id)
+            SELECT img_id, %s FROM tmp_mizu_fix
+            ON CONFLICT DO NOTHING
+        """, (eyes_id,))
+
+        # 3. Restore 'artist:tagme' on any reverted image that has no other artist:* tag
+        cur.execute("""
+            INSERT INTO image_tags (image_id, tag_id)
+            SELECT tmf.img_id, %s
+            FROM tmp_mizu_fix tmf
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM image_tags it
+                JOIN tags t ON it.tag_id = t.id
+                WHERE it.image_id = tmf.img_id AND t.tag LIKE 'artist:%%'
+            )
+            ON CONFLICT DO NOTHING
+        """, (artist_tagme_id,))
+
+        # 4. Sync counts for artist:mizumizuni, eyes, and artist:tagme
+        for tid in (mizu_id, eyes_id, artist_tagme_id):
+            cur.execute("""
+                UPDATE tags
+                SET count = (SELECT COUNT(image_id) FROM image_tags WHERE tag_id = %s)
+                WHERE id = %s
+            """, (tid, tid))
+        cur.execute("DELETE FROM tags WHERE id = %s AND count <= 0", (mizu_id,))
+        conn.commit()
+        print(f"[✓] Successfully restored 'eyes' on {len(poisoned_img_ids):,} images!")
+
+
+def fix_curation_map(args):
+    """Audits and repairs an existing CSV map, removing poisoned rules and rescuing false _DROP_ entries."""
+    in_path = Path(args.csv)
+    if not in_path.is_file():
+        print(f"[ERROR] CSV file not found: {in_path}")
+        return
+
+    out_path = Path(args.out) if getattr(args, "out", None) else in_path
+    log_path = out_path.with_suffix(".fix.log")
+
+    mappings = load_mappings()
+    ctx = get_curation_context(mappings)
+
+    db_config = get_shimmie_db_credentials(args.spath) if getattr(args, "spath", None) else None
+    if db_config:
+        with psycopg2.connect(**db_config) as conn, conn.cursor() as cur:
+            cur.execute("SELECT tag FROM tags WHERE count > 0")
+            ctx.register_db_vocabulary(r[0] for r in cur.fetchall())
+
+    with in_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or ["Sidecar_Tag", "Canonical_Tag"]
+        raw_rows = list(reader)
+
+    cleaned_rows = []
+    purged_poison = []
+    rescued_mappings = []
+
+    for row in raw_rows:
+        s_tag = (row.get("Sidecar_Tag") or "").strip()
+        c_tag = (row.get("Canonical_Tag") or "").strip()
+        if not s_tag:
+            continue
+
+        # 1. Check for poisoned cross-category mappings (e.g., eyes -> mizumizuni)
+        if c_tag and c_tag != "_DROP_" and not ctx.is_safe_mapping(s_tag, c_tag):
+            purged_poison.append((s_tag, c_tag, "Poisoned general -> artist/character/series rule"))
+            continue
+
+        # 2. Audit _DROP_ or blank rows for concrete canonical/prefix rescues
+        if c_tag in ("_DROP_", ""):
+            expanded = ctx.expand_single_tag(s_tag, {})
+            # Only rescue if s_tag transforms into a prefixed/canonical tag (or multi-tag)
+            if expanded and (len(expanded) > 1 or expanded[0] != s_tag):
+                new_target = " ".join(expanded)
+                row["Canonical_Tag"] = new_target
+                rescued_mappings.append((s_tag, c_tag or "<BLANK>", new_target))
+                cleaned_rows.append(row)
+                continue
+
+            # Rescue punctuation/hyphen variants in tag_groups.json (e.g. upside_down -> upside-down)
+            norm_key = re.sub(r"[_()-]", "", s_tag.lower())
+            if len(norm_key) >= 3 and norm_key in ctx.norm_general_map:
+                canonical_match = ctx.norm_general_map[norm_key]
+                if canonical_match != s_tag:
+                    row["Canonical_Tag"] = canonical_match
+                    rescued_mappings.append((s_tag, c_tag or "<BLANK>", canonical_match))
+                    cleaned_rows.append(row)
+                    continue
+
+        cleaned_rows.append(row)
+
+    if out_path.resolve() == in_path.resolve():
+        bak_path = in_path.with_suffix(in_path.suffix + ".bak")
+        in_path.replace(bak_path)
+        print(f"[INFO] Backed up original CSV to {bak_path.resolve()}")
+
+    with out_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(cleaned_rows)
+
+    with log_path.open("w", encoding="utf-8") as f:
+        f.write("=== CURATION MAP AUDIT & REPAIR LOG ===\n")
+        f.write(f"Input Rows:               {len(raw_rows):,}\n")
+        f.write(f"Output Rows:              {len(cleaned_rows):,}\n")
+        f.write(f"Purged Poisoned Rules:    {len(purged_poison):,}\n")
+        f.write(f"Rescued to Real Mappings: {len(rescued_mappings):,}\n\n")
+
+        f.write("=== 1. PURGED POISONED RULES ===\n")
+        for s_t, c_t, reason in purged_poison:
+            f.write(f"  - {s_t} -> {c_t} ({reason})\n")
+
+        f.write("\n=== 2. RESCUED MAPPINGS (FROM _DROP_ / BLANK) ===\n")
+        for s_t, old_c, new_c in rescued_mappings:
+            f.write(f"  - {s_t}: '{old_c}' -> '{new_c}'\n")
+
+    print(f"[✓] Fixed map written to {out_path.resolve()} (Log: {log_path.resolve()})")
+    print(f"    -> Purged {len(purged_poison):,} poisoned rules")
+    print(f"    -> Rescued {len(rescued_mappings):,} tags into canonical/prefixed mappings")
+
+    if getattr(args, "revert_mizumizuni", False):
+        if not db_config:
+            print("[ERROR] --spath is required with --revert-mizumizuni.")
+        else:
+            _revert_poisoned_mizumizuni(db_config)

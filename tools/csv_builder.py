@@ -4,7 +4,6 @@ from collections import defaultdict, namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import csv
-import re
 import sqlite3
 import warnings
 import tqdm
@@ -16,7 +15,11 @@ from functions.db_cache import (
 )
 from functions.media import process_webp, get_video_resolution, get_image_resolution
 from functions.tags_curation import (
-    rating_from_score, apply_tag_curation, get_sidecar_tags, load_dynamic_mappings
+    apply_tag_curation,
+    get_curation_context,
+    get_sidecar_tags,
+    load_dynamic_mappings,
+    rating_from_score,
 )
 from functions.tags_mining import mine_tag_equivalencies
 
@@ -113,39 +116,11 @@ def load_mappings():
     return Mappings(char_map, artist_map, rating_map)
 
 def enrich_tags(initial_tags, mappings):
-    """Adds prefixes (series:, character:, artist:) based on mappings."""
-    temp_tags = []
-    for tag in initial_tags:
-        temp_tags.append(tag)
-
-        # Extract the base word if Danbooru or a sidecar already prefixed it
-        base_tag = tag.split(":", 1)[1] if tag.startswith(("character:", "artist:")) else tag
-
-        if base_tag in mappings.char:
-            inferred = mappings.char[base_tag]
-
-            # Only append the character prefix if the user passed it in raw
-            if f"character:{base_tag}" not in temp_tags:
-                temp_tags.append(f"character:{base_tag}")
-
-            if isinstance(inferred, (list, tuple, set)):
-                temp_tags.extend(f"series:{t}" for t in inferred)
-            else:
-                temp_tags.append(f"series:{inferred}")
-
-    # Drop the raw, unprefixed character tags
-    stage_1 = [t for t in temp_tags if t not in mappings.char]
-
-    final_tags = []
-    for tag in stage_1:
-        final_tags.append(tag)
-        base_tag = tag.split(":", 1)[1] if tag.startswith(("character:", "artist:")) else tag
-
-        if base_tag in mappings.artist and  f"artist:{base_tag}" not in final_tags:
-            final_tags.append(f"artist:{base_tag}")
-
-    # Drop the raw, unprefixed artist tags
-    return [t for t in final_tags if t not in mappings.artist]
+    """Adds prefixes (series:, character:, artist:, language:, meta:) and expands tag_groups.json parents."""
+    ctx = get_curation_context(mappings)
+    tags = list(initial_tags)
+    apply_tag_curation(tags, context=ctx)
+    return tags
 
 def calculate_rating(tags, post_rating_list, rating_map, smax, qmax):
     """Determines rating based on tag weights or fallback to database/sidecar rating if available."""
@@ -248,22 +223,20 @@ def compile_metadata(image, post, mappings, args, dynamic_mappings=None):
     sidecar_tags = get_sidecar_tags(image)
     tags.extend(sidecar_tags)
 
-    tags = enrich_tags(tags, mappings)
     tags = clean_resolution_tags(tags, image)
 
     best_source = resolve_best_source(post.get("source"), image)
     if best_source:
         tags.append(f"source:{best_source}")
 
-    tags = [re.sub(r'\s+', '_', tag.strip()) for tag in tags]
-    tags = [re.sub(r'_series\)$', ')', tag.strip()) for tag in tags]
+    ctx = get_curation_context(mappings)
+    apply_tag_curation(tags, dynamic_mappings, context=ctx)
 
-    apply_tag_curation(tags, dynamic_mappings)
+    rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
+    tags = [t for t in tags if t.lower() not in {"rating:e", "rating:q", "rating:s"}]
 
     if len(tags) < 15:
         tags.append("tagme")
-    rating = calculate_rating(tags, post.get("rating", []), mappings.rating, args.smax, args.qmax)
-    tags = [t for t in tags if t.lower() not in {"rating:e", "rating:q", "rating:s"}]
     if not any(tag.startswith("artist:") for tag in tags):
         tags.append("artist:tagme")
     if not any(tag.startswith("character:") for tag in tags):
