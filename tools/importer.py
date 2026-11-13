@@ -485,7 +485,7 @@ def import_items_to_shimmie(
                     and inc_src_clean != curr_src_clean
                     and (not curr_src_clean or get_source_score(inc_src_clean) < get_source_score(curr_src_clean))
                 ):
-                    upgraded_src = inc_src_clean
+					upgraded_src = inc_src_clean
 
 				# Upgrade '?' rating if incoming has a concrete s/q/e rating
 				upgraded_rating: str | None = None
