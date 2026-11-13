@@ -4,7 +4,9 @@
 
 import argparse
 import os
+from pathlib import Path
 import re
+import subprocess
 import sys
 
 RESET = '\033[0m'
@@ -466,8 +468,31 @@ def _dispatch(args, parser_csv) -> None:
 		update_ratings.update_ratings(args)
 
 
+def _ensure_venv() -> None:
+	"""Ensures the local ./venv exists, activates it to install requirements, and re-execs inside it."""
+	root_dir = Path(__file__).resolve().parent
+	venv_dir = root_dir / 'venv'
+	venv_python = venv_dir / 'bin' / 'python'
+
+	if Path(sys.prefix).resolve() == venv_dir.resolve():
+		return
+
+	if not venv_python.is_file():
+		print('[INFO] Virtual environment not found. Creating venv and installing requirements via uv...')
+		subprocess.run(
+			['bash', '-c', 'uv venv venv && source venv/bin/activate && uv pip install -r requirements.txt'],
+			cwd=root_dir,
+			check=True,
+		)
+
+	os.environ['VIRTUAL_ENV'] = str(venv_dir)
+	os.environ['PATH'] = f"{venv_dir / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+	os.execv(str(venv_python), [str(venv_python), *sys.argv])
+
+
 def main() -> None:
 	"""Main CLI router."""
+	_ensure_venv()
 	parser, parser_csv, subparsers = setup_parser()
 
 	if '--help-all' in sys.argv:
