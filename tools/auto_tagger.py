@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import tempfile
 
+from PIL import Image
 import tqdm
 
 from functions.common import (
@@ -28,6 +29,7 @@ from functions.media import extract_video_frames
 from functions.tags_curation import load_tag_groups_metadata
 
 SMIN_QUESTIONABLE = 51  # Scores > 50 (smax default) fall under questionable/explicit
+TAGGER_NATIVE_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff'}
 
 
 def _load_rating_weights() -> dict[str, int]:
@@ -63,15 +65,26 @@ def _collect_missing_sidecars(target_dir: Path, allowed_extensions: set[str]) ->
 
 
 def _stage_media_files(media_list: list[Path], stage_dir: Path) -> dict[int, dict[str, Path | int | list[str]]]:
-	"""Stages symlinks for static images and extracts up to 5 frames for videos/GIFs."""
+	"""Stages symlinks for native static images, converts .avif/.jxl to .jpg, and extracts up to 5 frames for videos/GIFs."""
 	registry: dict[int, dict[str, Path | int | list[str]]] = {}
 	for idx, media_path in enumerate(tqdm.tqdm(media_list, desc=f'Staging {stage_dir.name}', leave=False)):
-		is_video = media_path.suffix.lower() in VIDEO_EXTS
+		suffix_lower = media_path.suffix.lower()
+		is_video = suffix_lower in VIDEO_EXTS
+
 		if not is_video:
 			stem = f'item_{idx}_f0'
-			sym_path = stage_dir / f'{stem}{media_path.suffix}'
-			os.symlink(media_path.resolve(), sym_path)
-			registry[idx] = {'source': media_path, 'frames': 1, 'stems': [stem]}
+			if suffix_lower in TAGGER_NATIVE_IMAGE_EXTS:
+				sym_path = stage_dir / f'{stem}{suffix_lower}'
+				os.symlink(media_path.resolve(), sym_path)
+				registry[idx] = {'source': media_path, 'frames': 1, 'stems': [stem]}
+			else:
+				try:
+					with Image.open(media_path) as im:
+						rgb_img = im.convert('RGB') if im.mode != 'RGB' else im
+						rgb_img.save(stage_dir / f'{stem}.jpg', 'JPEG', quality=95)
+					registry[idx] = {'source': media_path, 'frames': 1, 'stems': [stem]}
+				except Exception as e:
+					print(f'\n[WARNING] Could not convert {media_path} for tagger: {e}')
 			continue
 
 		try:
@@ -176,31 +189,57 @@ def _consolidate_and_write_sidecars(
 	return written_count
 
 
+def _build_tagger_cmd(venv_python: Path, target_dir: Path, args) -> list[str]:
+	"""Constructs the SD-Tag-Editor CLI command with the positional path first and explicit boolean flag."""
+	return [
+		str(venv_python),
+		'-u',
+		str(SUBMODULE_PATH / 'run.py'),
+		str(target_dir),
+		f'--model={args.model}',
+		f'--batch_size={args.batch}',
+		f'--gen_threshold={args.gen_threshold}',
+		f'--char_threshold={args.char_threshold}',
+		'--output_json',
+		'True',
+	]
+
+
 def run_auto_tagger(args) -> None:
 	"""Main CLI entry point for auto-tag."""
+	if getattr(args, 'path', None):
+		args.images = args.images or args.path
+		args.videos = args.videos or args.path
+
 	if not getattr(args, 'images', None) and not getattr(args, 'videos', None):
-		print('[ERROR] You must provide at least one target path: --images or --videos')
+		print('[ERROR] You must provide at least one target path: --path, --images, or --videos')
 		return
 
 	venv_python = SUBMODULE_PATH / 'venv' / 'bin' / 'python'
 	if not venv_python.exists():
-		print('[ERROR] SD-Tag-Editor venv not found.')
-		return
+		print('[INFO] SD-Tag-Editor venv not found. Running install.sh...')
+		subprocess.run(['bash', 'install.sh'], cwd=SUBMODULE_PATH, check=True)
+
+	img_dir = Path(args.images).resolve() if getattr(args, 'images', None) else None
+	vid_dir = Path(args.videos).resolve() if getattr(args, 'videos', None) else None
 
 	missing_sidecars: list[Path] = []
-	if getattr(args, 'images', None):
-		img_dir = Path(args.images)
+	if img_dir and vid_dir and img_dir == vid_dir:
 		if not img_dir.is_dir():
-			print(f'[ERROR] Invalid image directory: {img_dir}')
+			print(f'[ERROR] Invalid media directory: {img_dir}')
 			return
-		missing_sidecars.extend(_collect_missing_sidecars(img_dir, IMAGE_EXTS))
-
-	if getattr(args, 'videos', None):
-		vid_dir = Path(args.videos)
-		if not vid_dir.is_dir():
-			print(f'[ERROR] Invalid video directory: {vid_dir}')
-			return
-		missing_sidecars.extend(_collect_missing_sidecars(vid_dir, VIDEO_EXTS))
+		missing_sidecars.extend(_collect_missing_sidecars(img_dir, IMAGE_EXTS | VIDEO_EXTS))
+	else:
+		if img_dir:
+			if not img_dir.is_dir():
+				print(f'[ERROR] Invalid image directory: {img_dir}')
+				return
+			missing_sidecars.extend(_collect_missing_sidecars(img_dir, IMAGE_EXTS))
+		if vid_dir:
+			if not vid_dir.is_dir():
+				print(f'[ERROR] Invalid video directory: {vid_dir}')
+				return
+			missing_sidecars.extend(_collect_missing_sidecars(vid_dir, VIDEO_EXTS))
 
 	if not missing_sidecars:
 		print('[✓] All target files already have sidecars. No action needed.')
@@ -238,14 +277,6 @@ def run_auto_tagger(args) -> None:
 
 	rating_weights = _load_rating_weights()
 	group_info = _load_verbose_group_parents()
-
-	base_cmd = [
-		str(venv_python), '-u', str(SUBMODULE_PATH / 'run.py'),
-		f'--model={args.model}', f'--batch_size={args.batch}',
-		f'--gen_threshold={args.gen_threshold}', f'--char_threshold={args.char_threshold}',
-		'--output_json',
-	]
-
 	total_created = 0
 
 	with tempfile.TemporaryDirectory(prefix='auto_tag_') as tmpdir:
@@ -258,7 +289,7 @@ def run_auto_tagger(args) -> None:
 		if known_files:
 			print('=== Processing Known Files ===')
 			if known_reg := _stage_media_files(known_files, known_dir):
-				subprocess.run([*base_cmd, str(known_dir)], check=True)
+				subprocess.run(_build_tagger_cmd(venv_python, known_dir, args), cwd=SUBMODULE_PATH, check=True)
 				total_created += _consolidate_and_write_sidecars(
 					known_dir, known_reg, 'tagai:', args.dir_as_artist, rating_weights, group_info
 				)
@@ -266,7 +297,7 @@ def run_auto_tagger(args) -> None:
 		if unknown_files:
 			print('\n=== Processing Unknown Files ===')
 			if unknown_reg := _stage_media_files(unknown_files, unknown_dir):
-				subprocess.run([*base_cmd, str(unknown_dir)], check=True)
+				subprocess.run(_build_tagger_cmd(venv_python, unknown_dir, args), cwd=SUBMODULE_PATH, check=True)
 				total_created += _consolidate_and_write_sidecars(
 					unknown_dir, unknown_reg, '', args.dir_as_artist, rating_weights, group_info
 				)

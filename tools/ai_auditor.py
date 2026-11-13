@@ -120,15 +120,21 @@ def _run_audit_pipeline(args, pg_conn, pg_cur, q_conn: sqlite3.Connection, q_cur
 				continue
 
 			cmd = [
-				str(venv_python), '-u', str(tagger_script),
-				f'--model={args.model}', f'--batch_size={args.batch}',
-				f'--gen_threshold={args.gen_threshold}', f'--char_threshold={args.char_threshold}',
-				'--output_json', str(staging_dir),
+				str(venv_python),
+				'-u',
+				str(tagger_script),
+				str(staging_dir),
+				f'--model={args.model}',
+				f'--batch_size={args.batch}',
+				f'--gen_threshold={args.gen_threshold}',
+				f'--char_threshold={args.char_threshold}',
+				'--output_json',
+				'True',
 			]
 
 			print('[INFO] Launching Inference...')
 			try:
-				subprocess.run(cmd, check=True)
+				subprocess.run(cmd, cwd=SUBMODULE_PATH, check=True)
 			except subprocess.CalledProcessError as e:
 				print(f'[ERROR] Tagger submodule failed: {e}')
 				return
