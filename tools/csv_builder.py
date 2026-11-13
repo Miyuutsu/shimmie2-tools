@@ -1,4 +1,4 @@
-"""Batch CSV and thumbnail generator for importing media into Shimmie2."""
+"""Batch CSV generator, thumbnailer, and direct importer for Shimmie2."""
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +40,7 @@ from functions.tags_curation import (
 	get_sidecar_tags,
 )
 from functions.tags_mining import mine_tag_equivalencies
+from tools.importer import ImportItem, import_items_to_shimmie
 
 Image.MAX_IMAGE_PIXELS = None
 warnings.simplefilter('ignore', Image.DecompressionBombWarning)
@@ -58,18 +59,24 @@ def collect_files(
 ) -> tuple[list[Path], list[list[Path]]]:
 	"""Finds all valid media files from provided paths, resolves stem duplicates, and chunks them."""
 	files: list[Path] = []
+	img_dir = Path(image_path).resolve() if image_path else None
+	vid_dir = Path(video_path).resolve() if video_path else None
 
-	if image_path:
-		img_dir = Path(image_path)
+	# Single-pass scan if --path was used or --images and --videos point to the same directory
+	if img_dir and vid_dir and img_dir == vid_dir:
 		if img_dir.is_dir():
+			combined_exts = IMAGE_EXTS | VIDEO_EXTS
+			files.extend(
+				f for f in img_dir.rglob('*')
+				if f.is_file() and f.suffix.lower() in combined_exts and f.stat().st_size > 0
+			)
+	else:
+		if img_dir and img_dir.is_dir():
 			files.extend(
 				f for f in img_dir.rglob('*')
 				if f.is_file() and f.suffix.lower() in IMAGE_EXTS and f.stat().st_size > 0
 			)
-
-	if video_path:
-		vid_dir = Path(video_path)
-		if vid_dir.is_dir():
+		if vid_dir and vid_dir.is_dir():
 			files.extend(
 				f for f in vid_dir.rglob('*')
 				if f.is_file() and f.suffix.lower() in VIDEO_EXTS and f.stat().st_size > 0
@@ -174,14 +181,21 @@ def compile_metadata(
 	if not any(tag.startswith('series:') for tag in tags):
 		tags.append('series:tagme')
 
-	return ', '.join(sorted(set(tags))), rating, tags, best_source
+	sorted_unique = sorted(set(tags))
+	return ', '.join(sorted_unique), rating, sorted_unique, best_source
+
+
+def _get_base_dir(img: Path, args) -> Path:
+	"""Returns the matching root input directory for a media file."""
+	if args.image_path and img.is_relative_to(Path(args.image_path).resolve()):
+		return Path(args.image_path).resolve()
+	return Path(args.video_path).resolve()
 
 
 def _get_thumbnail_path(img: Path, args) -> Path:
 	"""Determines the output thumbnail path for a given media file."""
-	if args.image_path and img.is_relative_to(args.image_path):
-		return Path(args.image_path) / 'thumbnails' / img.relative_to(args.image_path)
-	return Path(args.video_path) / 'thumbnails' / img.relative_to(args.video_path)
+	base_dir = _get_base_dir(img, args)
+	return base_dir / 'thumbnails' / img.resolve().relative_to(base_dir)
 
 
 def _matches_blacklist(tag_list: list[str], blacklist_cfg: BlacklistConfig | None) -> list[str]:
@@ -211,23 +225,20 @@ def process_image_result(
 	mappings: Mappings,
 	dynamic_mappings: dict[str, str],
 	blacklist_cfg: BlacklistConfig | None,
-) -> tuple[list[str] | None, str | None, tuple[str, str] | None]:
-	"""Processes a single resolved media file into a CSV row, thumbnail key, or skip log entry."""
+) -> tuple[list[str] | None, ImportItem | None, str | None, tuple[str, str] | None]:
+	"""Processes a single resolved media file into a CSV row, ImportItem, thumbnail key, or skip log entry."""
 	if res_data.exists == 'error':
 		print(f'\n{image} skipped due to error!')
-		return None, None, ('corrupt or unreadable', image.name)
+		return None, None, None, ('corrupt or unreadable', image.name)
 
-	base_path = (
-		Path(args.image_path)
-		if args.image_path and image.is_relative_to(args.image_path)
-		else Path(args.video_path)
-	)
-	rel_path = image.relative_to(base_path)
+	base_path = _get_base_dir(image, args)
+	rel_path = image.resolve().relative_to(base_path)
 	thumb_path = Path(args.prefix) / 'thumbnails' / rel_path if args.thumbnail else ''
+	local_thumb = _get_thumbnail_path(image, args)
 
-	if res_data.exists:
-		thumb_file = _get_thumbnail_path(image, args)
-		return None, str(thumb_file) if args.thumbnail else None, None
+	# Only skip completely if --skip-existing was explicitly passed
+	if res_data.exists and args.skip_existing:
+		return None, None, str(local_thumb), None
 
 	tag_str, rating, tag_list, best_source = compile_metadata(
 		image, res_data.post, mappings, args, dynamic_mappings
@@ -235,10 +246,13 @@ def process_image_result(
 
 	if matched_rules := _matches_blacklist(tag_list, blacklist_cfg):
 		skip_entry = f"{image.name} | {' | '.join(matched_rules)}"
-		return None, None, ('blacklist', skip_entry)
+		return None, None, None, ('blacklist', skip_entry)
 
 	if args.update_cache:
 		save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
+
+	# If the image already exists in Shimmie2, mark its thumbnail as already existing so we don't generate one
+	thumb_skip_key = str(local_thumb) if res_data.exists else None
 
 	row = [
 		f'{args.prefix}/{rel_path}',
@@ -247,20 +261,32 @@ def process_image_result(
 		rating,
 		str(thumb_path) if args.thumbnail else '',
 	]
-	return row, None, None
+	import_item = ImportItem(
+		file_path=image.resolve(),
+		tags=tag_list,
+		source=best_source or '',
+		rating=rating,
+		thumb_path=local_thumb if args.thumbnail else None,
+		md5=res_data.md5,
+	)
+	return row, import_item, thumb_skip_key, None
 
 
 def _print_summary(args) -> None:
 	"""Prints the active make-csv configuration."""
 	map_target = args.use_map_csv if getattr(args, 'use_map_csv', None) else TAGMAP_DB_PATH
 	print('=== Tagger Run Summary ===')
-	if args.image_path:
-		print(f'📁  Images:          {args.image_path}')
-	if args.video_path:
-		print(f'🎞️  Videos:          {args.video_path}')
+	if args.image_path and args.image_path == args.video_path:
+		print(f'📁  Media Path:      {args.image_path}')
+	else:
+		if args.image_path:
+			print(f'📁  Images:          {args.image_path}')
+		if args.video_path:
+			print(f'🎞️  Videos:          {args.video_path}')
 	print(f'📥  Input Cache:     {CACHE_PATH}')
 	print(f'🗺️  Tagmap Source:   {map_target}')
 	print(f'🗄️  Update Cache:    {args.update_cache}')
+	print(f'🚀  Direct Import:   {getattr(args, "direct_import", False)}')
 	print(f'📦  Batch Size:      {args.batch}')
 	print(f'🧵  Threads:         {args.threads}')
 	print(f'📂  Prefix:          {args.prefix}\n')
@@ -343,6 +369,10 @@ def _generate_thumbnails(tasks: list[tuple[Path, Path]], threads: int) -> None:
 def run(args) -> None:
 	"""Main execution flow for make-csv."""
 	init_posts_cache(CACHE_PATH)
+	if getattr(args, 'path', None):
+		args.image_path = args.image_path or args.path
+		args.video_path = args.video_path or args.path
+
 	if args.image_path and not Path(args.image_path).is_dir():
 		raise FileNotFoundError(f'Image path not found: {args.image_path}')
 	if args.video_path and not Path(args.video_path).is_dir():
@@ -377,7 +407,7 @@ def run(args) -> None:
 
 	md5_by_file: dict[Path, str] = {}
 	existing_hashes: set[str] = set()
-	if getattr(args, 'skip_existing', False) and getattr(args, 'spath', None):
+	if getattr(args, 'spath', None):
 		print('[INFO] Extracting MD5 hashes to check against Shimmie PostgreSQL database...')
 		md5_by_file = {
 			f: extract_or_compute_md5(f)
@@ -385,12 +415,14 @@ def run(args) -> None:
 		}
 		db_config = get_shimmie_db_credentials(args.spath)
 		existing_hashes = get_existing_shimmie_hashes(md5_by_file.values(), db_config)
-		print(f'[INFO] Found {len(existing_hashes):,} existing files in Shimmie to skip.')
+		action_label = 'skip' if args.skip_existing else 'tag-merge (skipping thumb generation)'
+		print(f'[INFO] Found {len(existing_hashes):,} existing files in Shimmie to {action_label}.')
 
 	dynamic_mappings = load_tagmap(getattr(args, 'use_map_csv', None))
 	print(f'[INFO] Loaded {len(dynamic_mappings):,} dynamic tag mappings.')
 
 	csv_rows: list[list[str]] = []
+	import_items: list[ImportItem] = []
 	existing_thumbs: set[str] = set()
 	all_skips: list[tuple[str, str]] = []
 
@@ -399,27 +431,38 @@ def run(args) -> None:
 		thumb_tasks: list[tuple[Path, Path]] = []
 
 		for img, res_data in zip(batch, results, strict=True):
-			row, thumb_key, skip_info = process_image_result(
+			row, import_item, thumb_key, skip_info = process_image_result(
 				img, res_data, args, mappings, dynamic_mappings, blacklist_cfg
 			)
 			if skip_info:
 				all_skips.append(skip_info)
 			if thumb_key:
 				existing_thumbs.add(thumb_key)
-			if row:
+			if row and import_item:
 				csv_rows.append(row)
-				if args.thumbnail:
+				import_items.append(import_item)
+				if args.thumbnail and not getattr(args, 'direct_import', False):
 					t_src = _get_thumbnail_path(img, args)
 					if str(t_src) not in existing_thumbs and not t_src.is_file():
 						thumb_tasks.append((img, t_src))
 
-		_generate_thumbnails(thumb_tasks, args.threads)
+		if thumb_tasks:
+			_generate_thumbnails(thumb_tasks, args.threads)
 
-	csv_rows.sort()
 	out_dir = args.image_path or args.video_path
-	write_output(out_dir, csv_rows, args.chunk_size)
-
 	if all_skips:
 		write_skips_log(out_dir, all_skips)
+
+	if getattr(args, 'direct_import', False):
+		import_items_to_shimmie(
+			import_items,
+			spath=args.spath,
+			username=getattr(args, 'user', None),
+			threads=args.threads,
+			skip_existing=args.skip_existing,
+		)
+	else:
+		csv_rows.sort()
+		write_output(out_dir, csv_rows, args.chunk_size)
 
 	print(f'\n[✓] Processed {len(files):,} file(s) across {len(batches):,} batch(es).')
