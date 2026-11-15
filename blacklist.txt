@@ -219,7 +219,6 @@ chinacup
 cirima
 citizen_k_(pngj5475)
 color-it-in
-comic tagme -artist:tagme -character:tagme -series:tagme
 cookie_run_witch's_castle
 cote
 crash_bandicoot_(series)
@@ -620,6 +619,7 @@ takaneru
 tarokana
 tater_ramirez_humphrey
 team_pervy
+teenage_mutant_ninja_turtles
 teenx
 ten'ou_haruka
 tetsu_kuma

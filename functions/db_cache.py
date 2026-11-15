@@ -256,7 +256,12 @@ def resolve_post(
 
 			if post is None:
 				cur.execute('SELECT * FROM posts WHERE pixel_hash = ?', (px_hash,))
-				post = row_to_post_dict(row) if (row := cur.fetchone()) else add_post_to_cache(md5, px_hash, cache_path)
+				row = cur.fetchone()
+				post = (
+					row_to_post_dict(row)
+					if row
+					else row_to_post_dict((md5, px_hash, '?', '', '', '', '', ''))
+				)
 
 		except Exception as e:
 			print(f'\n[ERROR] Skipping corrupt or unreadable file: {image}')

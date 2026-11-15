@@ -102,6 +102,7 @@ def collect_files(
 		else:
 			print(f'[WARNING] Skipping {stem}.* - Ambiguous multiple formats without unique sidecar.')
 
+	batch_size = max(1, batch_size)
 	batches = [final_files[i : i + batch_size] for i in range(0, len(final_files), batch_size)]
 	return final_files, batches
 

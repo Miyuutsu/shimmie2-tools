@@ -289,6 +289,57 @@ def _add_tag_dump_parser(subparsers) -> None:
 	parser.add_argument('-o', '--out', default='tag_dump.csv', help='Output .csv or .db path (Default: tag_dump.csv)')
 
 
+def _add_triage_parser(subparsers) -> None:
+	"""Adds the triage command."""
+	parser = subparsers.add_parser(
+		'triage',
+		help='Classify media into keep, <path>-comic, and <path>-fluff with diagnostic sidecars',
+		formatter_class=ColorHelpFormatter,
+	)
+	parser.add_argument('--path', required=True, help='Path to target media directory (e.g., /path/to/twitter)')
+	parser.add_argument('--fluff-dir', help='Override output fluff directory (Defaults to <path>-fluff)')
+	parser.add_argument('--comic-dir', help='Override output comic directory (Defaults to <path>-comic)')
+	parser.add_argument('--spath', help='Path to Shimmie root (optional, for Postgres MD5 whitelist checking)')
+	parser.add_argument(
+		'--dir-as-artist',
+		action='store_true',
+		help='Prepend parent directory name as an artist:<name> tag in generated sidecars',
+	)
+	parser.add_argument(
+		'--reso-fluff',
+		default='',
+		help='Comma-separated WxH resolutions to flag as fluff in Stage 2 (e.g., "640x360,900x506,640x826")',
+	)
+	parser.add_argument(
+		'--model',
+		choices=['vit', 'vit-large', 'swinv2', 'convnext', 'eva02'],
+		default='eva02',
+		help='SmilingWolf model to use for tag generation (Default: eva02)',
+	)
+	parser.add_argument('--batch', type=int, default=16, help='Batch size for GPU inference (Default: 16)')
+	parser.add_argument('--min-size', type=int, default=250, help='Minimum shortest side in pixels (Default: 250)')
+	parser.add_argument('--max-ratio', type=float, default=6.0, help='Maximum aspect ratio before flagging (Default: 6.0)')
+	parser.add_argument('--gen-threshold', type=float, default=0.35, help='General tag confidence threshold (Default: 0.35)')
+	parser.add_argument('--char-threshold', type=float, default=0.75, help='Character tag confidence threshold (Default: 0.75)')
+	parser.add_argument(
+		'--threads',
+		type=int,
+		default=max(1, (os.cpu_count() or 1) // 2),
+		help='Thread count for Stage 1 & 2 pre-filtering',
+	)
+	parser.add_argument('--dry-run', action='store_true', help='Write triage_dry_run.log without moving files or writing sidecars')
+	parser.add_argument(
+		'--reset',
+		action='store_true',
+		help='Restore files from -fluff/-comic and delete only triage (# Verdict:) sidecars, then exit',
+	)
+	parser.add_argument(
+		'--retriage',
+		action='store_true',
+		help='Restore files from -fluff/-comic, clear triage (# Verdict:) sidecars, and re-run triage',
+	)
+
+
 def _add_update_ratings_parser(subparsers) -> None:
 	"""Adds the update-ratings command."""
 	parser = subparsers.add_parser(
@@ -395,6 +446,7 @@ def setup_parser():
 	_add_generate_map_parser(subparsers)
 	_add_purge_parser(subparsers)
 	_add_tag_dump_parser(subparsers)
+	_add_triage_parser(subparsers)
 	_add_update_ratings_parser(subparsers)
 
 	try:
@@ -462,6 +514,10 @@ def _dispatch(args, parser_csv) -> None:
 		from tools import tag_dump
 
 		tag_dump.tag_dump(args)
+	elif args.command == 'triage':
+		from tools import triage
+
+		triage.run_triage(args)
 	elif args.command == 'update-ratings':
 		from tools import update_ratings
 
