@@ -451,6 +451,7 @@ def setup_parser():
 
 	try:
 		import argcomplete  # type: ignore[import-untyped]
+
 		argcomplete.autocomplete(parser)
 	except ImportError:
 		pass
@@ -542,7 +543,7 @@ def _ensure_venv() -> None:
 		)
 
 	os.environ['VIRTUAL_ENV'] = str(venv_dir)
-	os.environ['PATH'] = f"{venv_dir / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+	os.environ['PATH'] = f'{venv_dir / "bin"}{os.pathsep}{os.environ.get("PATH", "")}'
 	os.execv(str(venv_python), [str(venv_python), *sys.argv])
 
 

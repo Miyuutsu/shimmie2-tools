@@ -200,8 +200,7 @@ def _resolve_user_id(cur, username: str | None) -> int:
 	"""Resolves the Shimmie2 user_id from public.users, raising RuntimeError if missing."""
 	if not username or not username.strip():
 		raise RuntimeError(
-			'No username found in shimmie.conf.php or --user argument. '
-			'Pass --user <shimmie_username> or verify your Shimmie2 configuration.'
+			'No username found in shimmie.conf.php or --user argument. Pass --user <shimmie_username> or verify your Shimmie2 configuration.'
 		)
 
 	cur.execute('SELECT id FROM users WHERE LOWER(name) = LOWER(%s) LIMIT 1', (username.strip(),))
@@ -246,7 +245,10 @@ def _stage_new_file_and_thumb(
 def _clean_merged_tags(existing_tags: set[str], incoming_tags: list[str]) -> list[str]:
 	"""Merges incoming tags with existing DB tags, removing resolved tagme and redundant tagai:/unprefixed tags."""
 	combined = (existing_tags | set(incoming_tags)) - {
-		'tagme', 'artist:tagme', 'character:tagme', 'series:tagme',
+		'tagme',
+		'artist:tagme',
+		'character:tagme',
+		'series:tagme',
 	}
 
 	prefixes = ('artist:', 'character:', 'series:', 'source:', 'language:', 'meta:')
@@ -265,9 +267,9 @@ def _clean_merged_tags(existing_tags: set[str], incoming_tags: list[str]) -> lis
 					prefixed_bases.add(base_val)
 
 	cleaned = [
-		t for t in combined
-		if not (not is_recognized_prefix(t) and t in prefixed_bases)
-		and not (t.startswith('tagai:') and t.split(':', 1)[1] in real_bases)
+		t
+		for t in combined
+		if not (not is_recognized_prefix(t) and t in prefixed_bases) and not (t.startswith('tagai:') and t.split(':', 1)[1] in real_bases)
 	]
 
 	if len(cleaned) < 15:
@@ -370,10 +372,7 @@ def import_items_to_shimmie(
 		new_candidates = [it for h, it in by_md5.items() if h not in existing_rows]
 		existing_candidates = [] if skip_existing else [it for h, it in by_md5.items() if h in existing_rows]
 
-		print(
-			f'[INFO] Batch breakdown: {len(new_candidates):,} new files to import, '
-			f'{len(existing_candidates):,} existing posts to merge.'
-		)
+		print(f'[INFO] Batch breakdown: {len(new_candidates):,} new files to import, {len(existing_candidates):,} existing posts to merge.')
 
 		affected_tag_ids: set[int] = set()
 		inserted_count = 0
@@ -491,10 +490,10 @@ def import_items_to_shimmie(
 				inc_src_clean = (it.source or '').strip()[:255]
 				upgraded_src: str | None = None
 				if (
-                    inc_src_clean
-                    and inc_src_clean != curr_src_clean
-                    and (not curr_src_clean or get_source_score(inc_src_clean) < get_source_score(curr_src_clean))
-                ):
+					inc_src_clean
+					and inc_src_clean != curr_src_clean
+					and (not curr_src_clean or get_source_score(inc_src_clean) < get_source_score(curr_src_clean))
+				):
 					upgraded_src = inc_src_clean
 
 				# Upgrade '?' rating if incoming has a concrete s/q/e rating
@@ -672,13 +671,15 @@ def run_import_csv(args) -> None:
 				thumb_str = row[4].strip() if len(row) > 4 else ''
 				thumb_path = _resolve_csv_item_path(thumb_str, csv_dir, shimmie_root) if thumb_str else None
 
-				items.append(ImportItem(
-					file_path=img_path,
-					tags=tags,
-					source=source,
-					rating=rating,
-					thumb_path=thumb_path,
-				))
+				items.append(
+					ImportItem(
+						file_path=img_path,
+						tags=tags,
+						source=source,
+						rating=rating,
+						thumb_path=thumb_path,
+					)
+				)
 
 	print(f'[INFO] Loaded {len(items):,} rows from {len(csv_files):,} CSV file(s).')
 	import_items_to_shimmie(

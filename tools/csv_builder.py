@@ -47,8 +47,12 @@ warnings.simplefilter('ignore', Image.DecompressionBombWarning)
 warnings.filterwarnings('ignore', '(?s).*Corrupt EXIF data.*', category=UserWarning)
 
 RESOLUTION_TAGS = {
-	'lowres', 'highres', 'absurdres',
-	'incredibly_absurdres', 'wide_image', 'tall_image',
+	'lowres',
+	'highres',
+	'absurdres',
+	'incredibly_absurdres',
+	'wide_image',
+	'tall_image',
 }
 
 
@@ -66,21 +70,12 @@ def collect_files(
 	if img_dir and vid_dir and img_dir == vid_dir:
 		if img_dir.is_dir():
 			combined_exts = IMAGE_EXTS | VIDEO_EXTS
-			files.extend(
-				f for f in img_dir.rglob('*')
-				if f.is_file() and f.suffix.lower() in combined_exts and f.stat().st_size > 0
-			)
+			files.extend(f for f in img_dir.rglob('*') if f.is_file() and f.suffix.lower() in combined_exts and f.stat().st_size > 0)
 	else:
 		if img_dir and img_dir.is_dir():
-			files.extend(
-				f for f in img_dir.rglob('*')
-				if f.is_file() and f.suffix.lower() in IMAGE_EXTS and f.stat().st_size > 0
-			)
+			files.extend(f for f in img_dir.rglob('*') if f.is_file() and f.suffix.lower() in IMAGE_EXTS and f.stat().st_size > 0)
 		if vid_dir and vid_dir.is_dir():
-			files.extend(
-				f for f in vid_dir.rglob('*')
-				if f.is_file() and f.suffix.lower() in VIDEO_EXTS and f.stat().st_size > 0
-			)
+			files.extend(f for f in vid_dir.rglob('*') if f.is_file() and f.suffix.lower() in VIDEO_EXTS and f.stat().st_size > 0)
 
 	grouped_files: dict[Path, list[Path]] = defaultdict(list)
 	for f in files:
@@ -93,10 +88,7 @@ def collect_files(
 			final_files.append(group[0])
 			continue
 
-		with_sidecars = [
-			f for f in group
-			if f.with_suffix('.txt').is_file() or f.with_name(f'{f.name}.txt').is_file()
-		]
+		with_sidecars = [f for f in group if f.with_suffix('.txt').is_file() or f.with_name(f'{f.name}.txt').is_file()]
 		if len(with_sidecars) == 1:
 			final_files.append(with_sidecars[0])
 		else:
@@ -111,11 +103,7 @@ def clean_resolution_tags(tags: list[str], media_path: Path) -> list[str]:
 	"""Strips stale resolution tags and appends accurate ones based on dimensions and aspect ratio."""
 	res_tags = [t for t in tags if t not in RESOLUTION_TAGS]
 
-	width, height = (
-		get_video_resolution(media_path)
-		if media_path.suffix.lower() in VIDEO_EXTS
-		else get_image_resolution(media_path)
-	)
+	width, height = get_video_resolution(media_path) if media_path.suffix.lower() in VIDEO_EXTS else get_image_resolution(media_path)
 	if not width or not height:
 		return res_tags
 
@@ -161,11 +149,7 @@ def compile_metadata(
 	ctx = get_curation_context(mappings)
 	apply_tag_curation(tags, dynamic_mappings, context=ctx)
 
-	rescued_sources = [
-		t.split(':', 1)[1].strip()
-		for t in tags
-		if t.startswith('source:') and len(t) > 7
-	]
+	rescued_sources = [t.split(':', 1)[1].strip() for t in tags if t.startswith('source:') and len(t) > 7]
 	best_source = resolve_best_source(post.get('source'), image, extra_sources=rescued_sources)
 	if best_source and f'source:{best_source}' not in tags:
 		tags.append(f'source:{best_source}')
@@ -241,12 +225,10 @@ def process_image_result(
 	if res_data.exists and args.skip_existing:
 		return None, None, str(local_thumb), None
 
-	tag_str, rating, tag_list, best_source = compile_metadata(
-		image, res_data.post, mappings, args, dynamic_mappings
-	)
+	tag_str, rating, tag_list, best_source = compile_metadata(image, res_data.post, mappings, args, dynamic_mappings)
 
 	if matched_rules := _matches_blacklist(tag_list, blacklist_cfg):
-		skip_entry = f"{image.name} | {' | '.join(matched_rules)}"
+		skip_entry = f'{image.name} | {" | ".join(matched_rules)}'
 		return None, None, None, ('blacklist', skip_entry)
 
 	if args.update_cache:
@@ -386,10 +368,7 @@ def run(args) -> None:
 		blacklist_path = Path(args.blacklist)
 		if blacklist_path.is_file() or args.blacklist != 'blacklist.txt':
 			blacklist_cfg = load_blacklist(blacklist_path)
-			print(
-				f'[INFO] Loaded {len(blacklist_cfg.rules):,} blacklist rules and '
-				f'{len(blacklist_cfg.preserve_tags):,} whitelist tags.'
-			)
+			print(f'[INFO] Loaded {len(blacklist_cfg.rules):,} blacklist rules and {len(blacklist_cfg.preserve_tags):,} whitelist tags.')
 
 	mappings = load_mappings()
 	files, batches = collect_files(args.image_path, args.video_path, args.batch)
@@ -410,10 +389,7 @@ def run(args) -> None:
 	existing_hashes: set[str] = set()
 	if getattr(args, 'spath', None):
 		print('[INFO] Extracting MD5 hashes to check against Shimmie PostgreSQL database...')
-		md5_by_file = {
-			f: extract_or_compute_md5(f)
-			for f in tqdm.tqdm(files, desc='Hashing Files', leave=False)
-		}
+		md5_by_file = {f: extract_or_compute_md5(f) for f in tqdm.tqdm(files, desc='Hashing Files', leave=False)}
 		db_config = get_shimmie_db_credentials(args.spath)
 		existing_hashes = get_existing_shimmie_hashes(md5_by_file.values(), db_config)
 		action_label = 'skip' if args.skip_existing else 'tag-merge (skipping thumb generation)'
@@ -432,9 +408,7 @@ def run(args) -> None:
 		thumb_tasks: list[tuple[Path, Path]] = []
 
 		for img, res_data in zip(batch, results, strict=True):
-			row, import_item, thumb_key, skip_info = process_image_result(
-				img, res_data, args, mappings, dynamic_mappings, blacklist_cfg
-			)
+			row, import_item, thumb_key, skip_info = process_image_result(img, res_data, args, mappings, dynamic_mappings, blacklist_cfg)
 			if skip_info:
 				all_skips.append(skip_info)
 			if thumb_key:

@@ -104,10 +104,7 @@ def _evaluate_suspects(
 				breakdown_counts[r] += 1
 			trash_images.append((img_id, hsh, tag_string, unique_triggered))
 
-	sorted_breakdown = [
-		item for item in sorted(breakdown_counts.items(), key=lambda x: x[1], reverse=True)
-		if item[1] > 0
-	]
+	sorted_breakdown = [item for item in sorted(breakdown_counts.items(), key=lambda x: x[1], reverse=True) if item[1] > 0]
 	return trash_images, sorted_breakdown
 
 
@@ -156,13 +153,15 @@ def _write_dry_run_report(
 		rules_dict = tag_data['rules']  # type: ignore[assignment]
 		top_rule, top_rule_count = max(rules_dict.items(), key=lambda item: item[1])
 
-		final_top_100.append({
-			'tag_name': tag_name,
-			'purge_count': purge_count,
-			'remaining': remaining,
-			'top_rule': top_rule,
-			'top_rule_count': top_rule_count,
-		})
+		final_top_100.append(
+			{
+				'tag_name': tag_name,
+				'purge_count': purge_count,
+				'remaining': remaining,
+				'top_rule': top_rule,
+				'top_rule_count': top_rule_count,
+			}
+		)
 
 	final_top_100.sort(key=lambda x: (int(x['remaining']), -int(x['purge_count'])))
 
@@ -175,19 +174,16 @@ def _write_dry_run_report(
 		f.write('(Sorted by lowest remaining count. Shows tags heavily impacted by the crossfire.)\n')
 		for item in final_top_100:
 			f.write(
-				f"  - {item['tag_name']}: {item['remaining']:,} remaining images "
-				f"({item['purge_count']:,} purging) "
+				f'  - {item["tag_name"]}: {item["remaining"]:,} remaining images '
+				f'({item["purge_count"]:,} purging) '
 				f"(Primary Offender: '{item['top_rule']}' with {item['top_rule_count']:,} hits)\n"
 			)
 
 		f.write('\n=== IMAGES FLAGGED FOR DELETION ===\n')
 		for img_id, hsh, tag_string, triggered_rules in trash_images:
-			f.write(f"ID: {img_id} | Hash: {hsh} | Triggered By: [{', '.join(triggered_rules)}] | Tags: {tag_string}\n")
+			f.write(f'ID: {img_id} | Hash: {hsh} | Triggered By: [{", ".join(triggered_rules)}] | Tags: {tag_string}\n')
 
-	print(
-		f'[ℹ️ DRY RUN] Safe abort. Wrote full breakdown, collateral tags, '
-		f'and {len(trash_images):,} targets to {report_path.resolve()}'
-	)
+	print(f'[ℹ️ DRY RUN] Safe abort. Wrote full breakdown, collateral tags, and {len(trash_images):,} targets to {report_path.resolve()}')
 
 
 def _execute_purge(
@@ -280,10 +276,7 @@ def purge_images(args) -> None:
 		print(f'[ERROR] {e}')
 		return
 
-	print(
-		f'[INFO] Loaded {len(blacklist_cfg.rules):,} rules and '
-		f'{len(blacklist_cfg.preserve_tags):,} global preservation tags. Hunting...'
-	)
+	print(f'[INFO] Loaded {len(blacklist_cfg.rules):,} rules and {len(blacklist_cfg.preserve_tags):,} global preservation tags. Hunting...')
 
 	db_config = get_shimmie_db_credentials(args.spath)
 	if not db_config:
@@ -298,9 +291,7 @@ def purge_images(args) -> None:
 			print('[✓] Database is clean. No images found matching the blacklist.')
 			return
 
-		trash_images, sorted_breakdown = _evaluate_suspects(
-			suspects, blacklist_cfg.rules, rules_by_anchor, blacklist_cfg.preserve_tags
-		)
+		trash_images, sorted_breakdown = _evaluate_suspects(suspects, blacklist_cfg.rules, rules_by_anchor, blacklist_cfg.preserve_tags)
 		if not trash_images:
 			print('[✓] Database is clean. No images found matching the blacklist.')
 			return

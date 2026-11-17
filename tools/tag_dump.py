@@ -166,11 +166,11 @@ def _write_tag_dump_log(
 		f.write(f'Max Dump Threshold (--min): <= {meta.min_count:,} uses\n')
 		f.write(f'Auto-_DROP_ Threshold:      <= {meta.drop_threshold:,} uses\n')
 		f.write(
-			f"Excluded Prefixes:          {', '.join(meta.exclude_prefixes) if meta.exclude_prefixes else 'None'} "
+			f'Excluded Prefixes:          {", ".join(meta.exclude_prefixes) if meta.exclude_prefixes else "None"} '
 			f'({meta.skipped_counts[0]:,} tags skipped)\n'
 		)
 		f.write(
-			f"Excluded Substrings:        {', '.join(meta.exclude_substrings) if meta.exclude_substrings else 'None'} "
+			f'Excluded Substrings:        {", ".join(meta.exclude_substrings) if meta.exclude_substrings else "None"} '
 			f'({meta.skipped_counts[1]:,} tags skipped)\n'
 		)
 		f.write(f'Total Dumped Unique Tags:   {len(filtered_rows):,}\n\n')
@@ -178,9 +178,9 @@ def _write_tag_dump_log(
 		for ns, data in sorted_ns:
 			f.write(
 				f'  - {ns:<22} | '
-				f"Total: {data['dumped_tags']:>8,} tags ({data['dumped_links']:>10,} links) | "
-				f"_DROP_: {data['drop_tags']:>8,} tags ({data['drop_links']:>10,} links) | "
-				f"Review: {data['review_tags']:>7,} tags\n"
+				f'Total: {data["dumped_tags"]:>8,} tags ({data["dumped_links"]:>10,} links) | '
+				f'_DROP_: {data["drop_tags"]:>8,} tags ({data["drop_links"]:>10,} links) | '
+				f'Review: {data["review_tags"]:>7,} tags\n'
 			)
 
 		f.write('\n=== BOORU / SOURCE BATCH IMPACT (booru:*) ===\n')
@@ -203,7 +203,7 @@ def _write_tag_dump_log(
 			avg_stripped = (drop_links / impacted_imgs) if impacted_imgs > 0 else 0.0
 			f.write(
 				f'  - {tag_name}: {drop_links:,} _DROP_ links across {impacted_imgs:,}/{total_imgs:,} images '
-				f'({pct:.1f}% of tag\'s images affected, avg {avg_stripped:.1f} dropped/img)\n'
+				f"({pct:.1f}% of tag's images affected, avg {avg_stripped:.1f} dropped/img)\n"
 			)
 
 		f.write(f'\n=== TOP 100 HIGHEST-COUNT TAGS ASSIGNED _DROP_ (<= {meta.drop_threshold:,} USES) ===\n')
@@ -263,21 +263,14 @@ def tag_dump(args) -> None:
 				filtered_rows.append((tag_id, tag_name, count))
 
 			if not filtered_rows:
-				print(
-					f'[✓] No tags matched criteria after exclusions '
-					f'(skipped {skipped_prefix:,} by prefix, {skipped_substr:,} by substring).'
-				)
+				print(f'[✓] No tags matched criteria after exclusions (skipped {skipped_prefix:,} by prefix, {skipped_substr:,} by substring).')
 				return
 
 			drop_assigned = 0
 			manual_review = 0
 
 			if out_path.suffix.lower() == '.db':
-				db_entries = [
-					(tag_name, '_DROP_', 1.0, count)
-					for _, tag_name, count in filtered_rows
-					if count <= drop_threshold
-				]
+				db_entries = [(tag_name, '_DROP_', 1.0, count) for _, tag_name, count in filtered_rows if count <= drop_threshold]
 				drop_assigned = save_tagmap_entries(db_entries, out_path)
 				manual_review = len(filtered_rows) - drop_assigned
 				print(f'[✓] Upserted {drop_assigned:,} auto-_DROP_ tags into {out_path.resolve()}')

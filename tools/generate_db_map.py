@@ -175,23 +175,27 @@ def _run_pass2_rescues(
 			if tag_name not in mapped_tags:
 				target_val = existing_map[tag_name]
 				bucket = drop_results if target_val == '_DROP_' else calculated
-				bucket.append({
-					'Sidecar_Tag': tag_name,
-					'Canonical_Tag': target_val,
-					'Confidence': 1.0,
-					'Sample_Size': target_cnt,
-				})
+				bucket.append(
+					{
+						'Sidecar_Tag': tag_name,
+						'Canonical_Tag': target_val,
+						'Confidence': 1.0,
+						'Sample_Size': target_cnt,
+					}
+				)
 				mapped_tags.add(tag_name)
 			continue
 
 		if tag_name == target_tag and not is_booru_batch and target_tag != ref_tag:
 			if tag_name not in mapped_tags:
-				calculated.append({
-					'Sidecar_Tag': target_tag,
-					'Canonical_Tag': ref_tag,
-					'Confidence': 1.0,
-					'Sample_Size': target_cnt,
-				})
+				calculated.append(
+					{
+						'Sidecar_Tag': target_tag,
+						'Canonical_Tag': ref_tag,
+						'Confidence': 1.0,
+						'Sample_Size': target_cnt,
+					}
+				)
 				mapped_tags.add(tag_name)
 			continue
 
@@ -200,12 +204,14 @@ def _run_pass2_rescues(
 
 		resolved_prefix_tag = resolve_prefixed_tag(tag_name)
 		if resolved_prefix_tag == '_DROP_':
-			drop_results.append({
-				'Sidecar_Tag': tag_name,
-				'Canonical_Tag': '_DROP_',
-				'Confidence': 1.0,
-				'Sample_Size': target_cnt,
-			})
+			drop_results.append(
+				{
+					'Sidecar_Tag': tag_name,
+					'Canonical_Tag': '_DROP_',
+					'Confidence': 1.0,
+					'Sample_Size': target_cnt,
+				}
+			)
 			mapped_tags.add(tag_name)
 			continue
 
@@ -217,12 +223,14 @@ def _run_pass2_rescues(
 					final_target = guard.norm_general_map[norm_res]
 
 			if final_target != tag_name:
-				calculated.append({
-					'Sidecar_Tag': tag_name,
-					'Canonical_Tag': final_target,
-					'Confidence': 1.0,
-					'Sample_Size': target_cnt,
-				})
+				calculated.append(
+					{
+						'Sidecar_Tag': tag_name,
+						'Canonical_Tag': final_target,
+						'Confidence': 1.0,
+						'Sample_Size': target_cnt,
+					}
+				)
 				mapped_tags.add(tag_name)
 			continue
 
@@ -239,12 +247,14 @@ def _run_pass2_rescues(
 		if len(norm_key) >= 3 and norm_key in guard.norm_general_map:
 			canonical_match = guard.norm_general_map[norm_key]
 			if canonical_match != tag_name:
-				calculated.append({
-					'Sidecar_Tag': tag_name,
-					'Canonical_Tag': canonical_match,
-					'Confidence': 1.0,
-					'Sample_Size': target_cnt,
-				})
+				calculated.append(
+					{
+						'Sidecar_Tag': tag_name,
+						'Canonical_Tag': canonical_match,
+						'Confidence': 1.0,
+						'Sample_Size': target_cnt,
+					}
+				)
 				mapped_tags.add(tag_name)
 
 	return drop_results, skipped_protected
@@ -300,8 +310,14 @@ def generate_db_curation_map(args) -> None:
 
 	print(f"[*] Pass 2: Normalizing foreign prefixes and filtering known junk on '{target_tag}'...")
 	drop_results, skipped_protected = _run_pass2_rescues(
-		all_target_tag_rows, calculated, existing_map, guard,
-		known_valid_general, target_tag, ref_tag, is_booru_batch,
+		all_target_tag_rows,
+		calculated,
+		existing_map,
+		guard,
+		known_valid_general,
+		target_tag,
+		ref_tag,
+		is_booru_batch,
 	)
 
 	print(

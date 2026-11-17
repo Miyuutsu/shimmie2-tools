@@ -91,11 +91,13 @@ def load_blacklist(blacklist_path: Path) -> BlacklistConfig:
 		if not pos_tags:
 			raise ValueError(f"Invalid blacklist rule '{clean_line}': must include at least one positive tag.")
 
-		config.rules.append({
-			'pos': pos_tags,
-			'neg': neg_tags,
-			'raw': clean_line,
-		})
+		config.rules.append(
+			{
+				'pos': pos_tags,
+				'neg': neg_tags,
+				'raw': clean_line,
+			}
+		)
 
 	return config
 

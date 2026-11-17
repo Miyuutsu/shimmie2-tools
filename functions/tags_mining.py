@@ -54,8 +54,7 @@ class TagCategoryGuard:
 		self.norm_general_map = {
 			re.sub(r'[_()-]', '', t.lower()): t
 			for t in self.known_general
-			if re.fullmatch(r'[a-z0-9_()-]{3,}', t.lower())
-			and len(re.sub(r'[_()-]', '', t.lower())) >= 3
+			if re.fullmatch(r'[a-z0-9_()-]{3,}', t.lower()) and len(re.sub(r'[_()-]', '', t.lower())) >= 3
 		}
 
 	def get_category(self, tag: str) -> str:
@@ -75,8 +74,8 @@ class TagCategoryGuard:
 		"""Returns True if two tags share at least one 3+ character alphanumeric word outside parentheses."""
 		b1 = tag1.split(':', 1)[-1]
 		b2 = tag2.split(':', 1)[-1]
-		w1 = {w for w in WORD_TOKEN_RE.findall( re.sub(r'\([^)]+\)', '', b1)) if len(w) > 2}
-		w2 = {w for w in WORD_TOKEN_RE.findall( re.sub(r'\([^)]+\)', '', b2)) if len(w) > 2}
+		w1 = {w for w in WORD_TOKEN_RE.findall(re.sub(r'\([^)]+\)', '', b1)) if len(w) > 2}
+		w2 = {w for w in WORD_TOKEN_RE.findall(re.sub(r'\([^)]+\)', '', b2)) if len(w) > 2}
 		return bool(w1 & w2)
 
 	def is_normalized_alias(self, tag1: str, tag2: str) -> bool:
@@ -234,10 +233,7 @@ def _evaluate_match_guards(
 	cat_s = guard.get_category(s_tag)
 	cat_c = guard.get_category(best_match)
 
-	if (
-		(cat_s in guard.strict and cat_c in guard.strict and cat_s != cat_c)
-		or (':' in s_tag and ':' not in best_match and mode != 'retro')
-	):
+	if (cat_s in guard.strict and cat_c in guard.strict and cat_s != cat_c) or (':' in s_tag and ':' not in best_match and mode != 'retro'):
 		return None
 
 	if cat_s != cat_c:
@@ -299,9 +295,7 @@ def calculate_equivalencies(
 				continue
 
 			c_count = (
-				freqs.canonical_counts.get(c_tag, 0)
-				if mode == 'retro'
-				else max(global_counts.get(c_tag, 0), freqs.canonical_counts.get(c_tag, 0))
+				freqs.canonical_counts.get(c_tag, 0) if mode == 'retro' else max(global_counts.get(c_tag, 0), freqs.canonical_counts.get(c_tag, 0))
 			)
 
 			union = s_count + c_count - shared
@@ -315,26 +309,26 @@ def calculate_equivalencies(
 		if not best_match:
 			continue
 
-		adjusted_db_cnt = (
-			freqs.canonical_counts.get(s_tag, 0)
-			if mode == 'retro'
-			else global_counts.get(s_tag, freqs.canonical_counts.get(s_tag, 0))
-		)
+		adjusted_db_cnt = freqs.canonical_counts.get(s_tag, 0) if mode == 'retro' else global_counts.get(s_tag, freqs.canonical_counts.get(s_tag, 0))
 
 		final_match = _evaluate_match_guards(
-			s_tag, best_match, s_count, best_inclusion, best_jaccard,
-			adjusted_db_cnt, guard, mode, freqs, thresholds,
+			s_tag,
+			best_match,
+			s_count,
+			best_inclusion,
+			best_jaccard,
+			adjusted_db_cnt,
+			guard,
+			mode,
+			freqs,
+			thresholds,
 		)
 		if not final_match:
 			continue
 
 		out_s = s_tag
 		out_c = final_match
-		confidence = (
-			max(best_jaccard, best_inclusion)
-			if guard.is_normalized_alias(s_tag, final_match)
-			else best_jaccard
-		)
+		confidence = max(best_jaccard, best_inclusion) if guard.is_normalized_alias(s_tag, final_match) else best_jaccard
 
 		if mode == 'retro':
 			s_parts = s_tag.split(':', 1)
@@ -349,23 +343,24 @@ def calculate_equivalencies(
 		elif final_match == '_DROP_':
 			confidence = 1.0
 
-		results.append({
-			'Sidecar_Tag': out_s,
-			'Canonical_Tag': out_c,
-			'Confidence': round(confidence, 4),
-			'Sample_Size': s_count,
-		})
+		results.append(
+			{
+				'Sidecar_Tag': out_s,
+				'Canonical_Tag': out_c,
+				'Confidence': round(confidence, 4),
+				'Sample_Size': s_count,
+			}
+		)
 
 	non_root_targets = Counter(
 		str(r['Canonical_Tag'])
 		for r in results
-		if r['Canonical_Tag'] != '_DROP_'
-		and not guard.shares_lexical_root(str(r['Sidecar_Tag']), str(r['Canonical_Tag']))
+		if r['Canonical_Tag'] != '_DROP_' and not guard.shares_lexical_root(str(r['Sidecar_Tag']), str(r['Canonical_Tag']))
 	)
 	return [
-		r for r in results
-		if non_root_targets[str(r['Canonical_Tag'])] <= 2
-		or guard.shares_lexical_root(str(r['Sidecar_Tag']), str(r['Canonical_Tag']))
+		r
+		for r in results
+		if non_root_targets[str(r['Canonical_Tag'])] <= 2 or guard.shares_lexical_root(str(r['Sidecar_Tag']), str(r['Canonical_Tag']))
 	]
 
 

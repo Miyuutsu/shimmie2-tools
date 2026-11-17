@@ -26,12 +26,7 @@ class CurationChangeset:
 
 	def is_empty(self) -> bool:
 		"""Returns True if no database modifications are required."""
-		return not (
-			self.tags_to_add
-			or self.tags_to_remove
-			or self.source_updates
-			or self.rating_updates
-		)
+		return not (self.tags_to_add or self.tags_to_remove or self.source_updates or self.rating_updates)
 
 
 def _fetch_target_images(cur, target_tag: str | None):
@@ -97,11 +92,7 @@ def _evaluate_curation_changes(
 				single_tag_cache=single_tag_cache,
 			)
 
-			extracted_ratings = [
-				t.split(':', 1)[1].lower()
-				for t in curated_tags
-				if t.lower() in CANONICAL_RATING_TAGS
-			]
+			extracted_ratings = [t.split(':', 1)[1].lower() for t in curated_tags if t.lower() in CANONICAL_RATING_TAGS]
 			if extracted_ratings:
 				if not (current_rating and current_rating.strip()):
 					best_rating = max(extracted_ratings, key=lambda r: RATING_PRIORITY.get(r, 0))
@@ -110,9 +101,7 @@ def _evaluate_curation_changes(
 
 			clean_curr_src = current_source.strip() if current_source else ''
 			candidate_urls = {
-				t.split(':', 1)[1].strip()
-				for t in curated_tags
-				if t.lower().startswith('source:') and len(t) > 7 and t.split(':', 1)[1].strip()
+				t.split(':', 1)[1].strip() for t in curated_tags if t.lower().startswith('source:') and len(t) > 7 and t.split(':', 1)[1].strip()
 			}
 			if clean_curr_src:
 				candidate_urls.add(clean_curr_src)
@@ -197,9 +186,7 @@ def _apply_curation_updates(
 	if changeset.tags_to_remove:
 		print('Purging old tag links...')
 		cur.execute('CREATE TEMP TABLE tmp_del (img_id INT, tag_id INT) ON COMMIT DROP')
-		psycopg2.extras.execute_values(
-			cur, 'INSERT INTO tmp_del VALUES %s', changeset.tags_to_remove, page_size=10000
-		)
+		psycopg2.extras.execute_values(cur, 'INSERT INTO tmp_del VALUES %s', changeset.tags_to_remove, page_size=10000)
 		cur.execute("""
 			DELETE FROM image_tags
 			USING tmp_del
@@ -216,10 +203,7 @@ def _apply_curation_updates(
 			page_size=10000,
 		)
 
-	affected_tag_ids = list(
-		{tag_id_map[t] for _, t in changeset.tags_to_add}
-		| {tid for _, tid in changeset.tags_to_remove}
-	)
+	affected_tag_ids = list({tag_id_map[t] for _, t in changeset.tags_to_add} | {tid for _, tid in changeset.tags_to_remove})
 	if affected_tag_ids:
 		print(f'Recalculating UI tag counts for {len(affected_tag_ids):,} affected tags...')
 		cur.execute('CREATE TEMP TABLE tmp_affected_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP')
@@ -283,9 +267,7 @@ def curate_existing_tags(args) -> None:
 		for tag_name in tag_id_map:
 			single_tag_cache[tag_name] = ctx.expand_single_tag(tag_name, merged_map)
 
-		changeset = _evaluate_curation_changes(
-			cur, merged_map, ctx, single_tag_cache, tag_id_map
-		)
+		changeset = _evaluate_curation_changes(cur, merged_map, ctx, single_tag_cache, tag_id_map)
 
 		if changeset.is_empty():
 			print('\n[✓] All tags are already clean. No changes needed.')

@@ -62,58 +62,146 @@ EXIF_CAMERA_PARAMS = {33434, 33437, 34855, 37386, 42036}
 IGNORED_EXIF_MODELS = {'scanner', 'virtual', 'canon canoscan', 'epson', 'hp scanjet'}
 
 CORE_SUBJECT_TAGS = {
-	'1girl', '2girls', '3girls', '4girls', '5girls', '6+girls', 'multiple_girls',
-	'1boy', '2boys', '3boys', '4boys', '5boys', '6+boys', 'multiple_boys',
-	'1other', '2others', 'multiple_others', 'furry', 'anthro', 'kemonomimi_mode',
-	'monster_girl', 'monster_boy', 'pokemon_(creature)', 'digimon_(creature)',
+	'1girl',
+	'2girls',
+	'3girls',
+	'4girls',
+	'5girls',
+	'6+girls',
+	'multiple_girls',
+	'1boy',
+	'2boys',
+	'3boys',
+	'4boys',
+	'5boys',
+	'6+boys',
+	'multiple_boys',
+	'1other',
+	'2others',
+	'multiple_others',
+	'furry',
+	'anthro',
+	'kemonomimi_mode',
+	'monster_girl',
+	'monster_boy',
+	'pokemon_(creature)',
+	'digimon_(creature)',
 }
 
 VISIBLE_EYE_COLOR_TAGS = {
-	'blue_eyes', 'red_eyes', 'brown_eyes', 'green_eyes', 'purple_eyes',
-	'yellow_eyes', 'pink_eyes', 'aqua_eyes', 'orange_eyes', 'black_eyes',
-	'grey_eyes', 'silver_eyes', 'white_eyes', 'multicolored_eyes',
-	'heterochromia', 'gradient_eyes', 'two-tone_eyes',
+	'blue_eyes',
+	'red_eyes',
+	'brown_eyes',
+	'green_eyes',
+	'purple_eyes',
+	'yellow_eyes',
+	'pink_eyes',
+	'aqua_eyes',
+	'orange_eyes',
+	'black_eyes',
+	'grey_eyes',
+	'silver_eyes',
+	'white_eyes',
+	'multicolored_eyes',
+	'heterochromia',
+	'gradient_eyes',
+	'two-tone_eyes',
 }
 
 VISIBLE_FACE_ANCHOR_TAGS = VISIBLE_EYE_COLOR_TAGS | {
-	'closed_eyes', 'one_eye_closed', 'wink', 'half-closed_eyes', 'empty_eyes',
+	'closed_eyes',
+	'one_eye_closed',
+	'wink',
+	'half-closed_eyes',
+	'empty_eyes',
 }
 
 HEAVY_CROP_TAGS = {
-	'head_out_of_frame', 'cropped_torso', 'cropped_legs',
-	'cropped_arms', 'cropped_shoulders', 'eyes_out_of_frame',
+	'head_out_of_frame',
+	'cropped_torso',
+	'cropped_legs',
+	'cropped_arms',
+	'cropped_shoulders',
+	'eyes_out_of_frame',
 }
 
 CLOSEUP_FOCUS_TAGS = {
-	'close-up', 'breast_focus', 'ass_focus', 'thigh_focus',
-	'foot_focus', 'hand_focus', 'hip_focus', 'navel_focus',
-	'groin', 'crotch_focus',
+	'close-up',
+	'breast_focus',
+	'ass_focus',
+	'thigh_focus',
+	'foot_focus',
+	'hand_focus',
+	'hip_focus',
+	'navel_focus',
+	'groin',
+	'crotch_focus',
 }
 
 EVA_HARD_FLUFF_TAGS = {
-	'real_life', 'real_life_insert', 'photo_(medium)', 'screenshot',
-	'interface', 'website', 'text_focus', 'calendar', 'chart',
-	'figure', 'action_figure', 'merchandise', 'acrylic_stand',
-	'tin_badge', 'dakimakura_(object)', 'chat_log', 'fake_screenshot',
-	'fake_phone_screenshot', 'dialogue_box', 'gameplay_mechanics',
-	'health_bar', 'card_(medium)', 'copyright_notice', 'timestamp',
-	'text_messaging', 'ad', 'logo', 'emblem', 'logo_parody',
-	'brand_name_imitation', 'identity_censor', 'before_and_after',
+	'real_life',
+	'real_life_insert',
+	'photo_(medium)',
+	'screenshot',
+	'interface',
+	'website',
+	'text_focus',
+	'calendar',
+	'chart',
+	'figure',
+	'action_figure',
+	'merchandise',
+	'acrylic_stand',
+	'tin_badge',
+	'dakimakura_(object)',
+	'chat_log',
+	'fake_screenshot',
+	'fake_phone_screenshot',
+	'dialogue_box',
+	'gameplay_mechanics',
+	'health_bar',
+	'card_(medium)',
+	'copyright_notice',
+	'timestamp',
+	'text_messaging',
+	'ad',
+	'logo',
+	'emblem',
+	'logo_parody',
+	'brand_name_imitation',
+	'identity_censor',
+	'before_and_after',
 }
 
 COMIC_BLOCKER_TAGS = {
-	'chat_log', 'fake_screenshot', 'fake_phone_screenshot',
-	'gameplay_mechanics', 'interface', 'screenshot', 'website',
-	'card_(medium)', 'calendar', 'chart',
+	'chat_log',
+	'fake_screenshot',
+	'fake_phone_screenshot',
+	'gameplay_mechanics',
+	'interface',
+	'screenshot',
+	'website',
+	'card_(medium)',
+	'calendar',
+	'chart',
 }
 
 COMIC_DANBOORU_TAGS = {
-	'comic', '4koma', '2koma', '3koma', '5koma', 'manga',
-	'silent_comic', 'multiple_pages',
+	'comic',
+	'4koma',
+	'2koma',
+	'3koma',
+	'5koma',
+	'manga',
+	'silent_comic',
+	'multiple_pages',
 }
 
 TEXT_LANG_TAGS = {
-	'english_text', 'japanese_text', 'chinese_text', 'korean_text',
+	'english_text',
+	'japanese_text',
+	'chinese_text',
+	'korean_text',
 }
 
 # ==========================================
@@ -342,9 +430,7 @@ def _evaluate_stage2_file(
 		return TriageVerdict(file_path, 'FLUFF', 'Stage 2 (Geometry)', 'corrupt_or_unreadable')
 
 	if (width, height) in reso_fluff:
-		return TriageVerdict(
-			file_path, 'FLUFF', 'Stage 2 (Resolution)', f'matched_reso_fluff ({width}x{height})'
-		)
+		return TriageVerdict(file_path, 'FLUFF', 'Stage 2 (Resolution)', f'matched_reso_fluff ({width}x{height})')
 
 	shortest = min(width, height)
 	longest = max(width, height)
@@ -413,10 +499,7 @@ def _decode_and_prep_siglip(
 		except Exception:
 			return media_path, [], []
 
-	siglip_arrays = [
-		np.asarray(f.resize((SIGLIP_SIZE, SIGLIP_SIZE), Image.Resampling.BILINEAR), dtype=np.uint8)
-		for f in frames
-	]
+	siglip_arrays = [np.asarray(f.resize((SIGLIP_SIZE, SIGLIP_SIZE), Image.Resampling.BILINEAR), dtype=np.uint8) for f in frames]
 	return media_path, frames, siglip_arrays
 
 
@@ -487,12 +570,7 @@ class DualTriageEngine:
 		for i in range(0, len(uint8_frames), sig_batch_size):
 			chunk = np.stack(uint8_frames[i : i + sig_batch_size], axis=0)
 			with torch.inference_mode():
-				s_batch = (
-					torch.from_numpy(chunk)
-					.to(self.device)
-					.permute(0, 3, 1, 2)
-					.to(self.dtype)
-				)
+				s_batch = torch.from_numpy(chunk).to(self.device).permute(0, 3, 1, 2).to(self.dtype)
 				s_batch = s_batch.div_(127.5).sub_(1.0)
 
 				img_feat = F.normalize(self.siglip.encode_image(s_batch), dim=-1)
@@ -504,9 +582,7 @@ class DualTriageEngine:
 
 				s_probs = torch.softmax(logits.float(), dim=-1).cpu().numpy()
 				for row in s_probs:
-					all_siglip_dicts.append(
-						{k: float(v) for k, v in zip(self.prompt_keys, row, strict=True)}
-					)
+					all_siglip_dicts.append({k: float(v) for k, v in zip(self.prompt_keys, row, strict=True)})
 
 		return all_siglip_dicts
 
@@ -519,13 +595,7 @@ class DualTriageEngine:
 		for i in range(0, len(uint8_frames), batch_size):
 			chunk = np.stack(uint8_frames[i : i + batch_size], axis=0)
 			with torch.inference_mode():
-				t_batch = (
-					torch.from_numpy(chunk)
-					.to(self.device)
-					.permute(0, 3, 1, 2)
-					.flip(1)
-					.to(self.dtype)
-				)
+				t_batch = torch.from_numpy(chunk).to(self.device).permute(0, 3, 1, 2).flip(1).to(self.dtype)
 				t_batch = t_batch.div_(127.5).sub_(1.0)
 				t_logits = self.tagger(t_batch)
 				t_probs = torch.sigmoid(t_logits).float().cpu().numpy()
@@ -551,10 +621,7 @@ def _check_stage3a_siglip_fluff(
 	siglip_frames: list[dict[str, float]],
 ) -> tuple[TriageVerdict | None, dict[str, float]]:
 	"""Short-circuits obvious non-art in Stage 3A only when SigLIP fluff confidence is decisive (>= 0.65)."""
-	avg_siglip = {
-		k: sum(f[k] for f in siglip_frames) / len(siglip_frames)
-		for k in siglip_frames[0]
-	}
+	avg_siglip = {k: sum(f[k] for f in siglip_frames) / len(siglip_frames) for k in siglip_frames[0]}
 	sorted_siglip = dict(sorted(avg_siglip.items(), key=lambda kv: kv[1], reverse=True))
 
 	best_keep_key = max(SIGLIP_KEEP_PROMPTS, key=lambda k: avg_siglip[k])
@@ -570,11 +637,7 @@ def _check_stage3a_siglip_fluff(
 
 	# Only short-circuit in Stage 3A when fluff probability mass is high (>= 0.65) and beats keep & comic;
 	# borderline cases advance to Stage 3B so EVA02 can inspect exact tags.
-	if (
-		fluff_sum >= 0.65
-		and best_fluff_val > best_keep_val
-		and best_fluff_val > best_comic_val
-	):
+	if fluff_sum >= 0.65 and best_fluff_val > best_keep_val and best_fluff_val > best_comic_val:
 		return (
 			TriageVerdict(
 				src_path,
@@ -608,10 +671,7 @@ def _build_import_tags_and_raw_maps(
 	max_probs = probs_2d.max(axis=0)
 
 	# 1. Ratings
-	raw_ratings = {
-		names[idx]: float(max_probs[idx])
-		for idx in engine.rating_idx
-	}
+	raw_ratings = {names[idx]: float(max_probs[idx]) for idx in engine.rating_idx}
 	sorted_ratings = dict(sorted(raw_ratings.items(), key=lambda kv: kv[1], reverse=True))
 
 	# 2. Characters (vectorized filter)
@@ -695,22 +755,23 @@ def _classify_stage3b_verdict(
 	is_ref_sheet = raw_gens.get('reference_sheet', 0.0) >= 0.35 or sorted_siglip.get('reference_sheet', 0.0) >= 0.35
 	if is_ref_sheet and sorted_siglip.get('promo_or_price_sheet', 0.0) < 0.30:
 		return TriageVerdict(
-			src_path, 'KEEP', 'Stage 3B (RefSheet)',
-			f"reference_sheet (siglip={sorted_siglip.get('reference_sheet', 0.0):.2f}, eva={raw_gens.get('reference_sheet', 0.0):.2f})",
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			src_path,
+			'KEEP',
+			'Stage 3B (RefSheet)',
+			f'reference_sheet (siglip={sorted_siglip.get("reference_sheet", 0.0):.2f}, eva={raw_gens.get("reference_sheet", 0.0):.2f})',
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	# 2. Comic / 4koma / Manga Routing (Evaluated BEFORE text_focus / crop rules so comics aren't lost to fluff)
 	danbooru_comic_conf = max((raw_gens.get(t, 0.0) for t in COMIC_DANBOORU_TAGS), default=0.0)
 	comic_blocker_conf = max((raw_gens.get(t, 0.0) for t in COMIC_BLOCKER_TAGS), default=0.0)
-	has_dialogue = (
-		raw_gens.get('speech_bubble', 0.0) >= 0.28
-		or raw_gens.get('thought_bubble', 0.0) >= 0.28
-	)
+	has_dialogue = raw_gens.get('speech_bubble', 0.0) >= 0.28 or raw_gens.get('thought_bubble', 0.0) >= 0.28
 	has_comic_layout = (
-		raw_gens.get('multiple_views', 0.0) >= 0.25
-		or raw_gens.get('monochrome', 0.0) >= 0.35
-		or raw_gens.get('greyscale', 0.0) >= 0.35
+		raw_gens.get('multiple_views', 0.0) >= 0.25 or raw_gens.get('monochrome', 0.0) >= 0.35 or raw_gens.get('greyscale', 0.0) >= 0.35
 	)
 	if comic_blocker_conf < 0.22 and (
 		danbooru_comic_conf >= 0.30
@@ -718,9 +779,15 @@ def _classify_stage3b_verdict(
 		or (has_dialogue and (danbooru_comic_conf >= 0.15 or has_comic_layout))
 	):
 		return TriageVerdict(
-			src_path, 'COMIC', 'Stage 3B (Comic)',
+			src_path,
+			'COMIC',
+			'Stage 3B (Comic)',
 			f'comic_or_manga (eva_comic={danbooru_comic_conf:.2f}, siglip_comic={best_comic_val:.2f})',
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	# 3. EVA02 Hard Fluff Tags (UI, Fake Screenshots, Cards, Logos, Chat Logs, Merch, IRL Photos)
@@ -728,46 +795,71 @@ def _classify_stage3b_verdict(
 	if hard_fluff_hits:
 		fluff_tag, fluff_conf = max(hard_fluff_hits, key=lambda kv: kv[1])
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (EVA02)',
+			src_path,
+			'FLUFF',
+			'Stage 3B (EVA02)',
 			f'eva_fluff_tag ({fluff_tag}={fluff_conf:.2f})',
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	# 4. Schedule Banners, Roster Grids, Diagram Arrows & Silhouette Memes
 	max_text_lang = max((raw_gens.get(t, 0.0) for t in TEXT_LANG_TAGS), default=0.0)
 	if sorted_siglip.get('promo_or_price_sheet', 0.0) >= 0.12 and max_text_lang >= 0.70:
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (Schedule/Promo)',
-			f"schedule_or_promo_banner (promo={sorted_siglip.get('promo_or_price_sheet', 0.0):.2f}, text={max_text_lang:.2f})",
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			src_path,
+			'FLUFF',
+			'Stage 3B (Schedule/Promo)',
+			f'schedule_or_promo_banner (promo={sorted_siglip.get("promo_or_price_sheet", 0.0):.2f}, text={max_text_lang:.2f})',
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
-	if (
-		(raw_gens.get('6+girls', 0.0) >= 0.50 and raw_gens.get('6+boys', 0.0) >= 0.50)
-		or (raw_gens.get('4girls', 0.0) >= 0.85 and raw_gens.get('character_name', 0.0) >= 0.35 and raw_gens.get('upper_body', 0.0) < 0.30)
+	if (raw_gens.get('6+girls', 0.0) >= 0.50 and raw_gens.get('6+boys', 0.0) >= 0.50) or (
+		raw_gens.get('4girls', 0.0) >= 0.85 and raw_gens.get('character_name', 0.0) >= 0.35 and raw_gens.get('upper_body', 0.0) < 0.30
 	):
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (RosterGrid)',
-			f"character_roster_or_icon_grid (4girls={raw_gens.get('4girls', 0.0):.2f}, 6+girls={raw_gens.get('6+girls', 0.0):.2f})",
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			src_path,
+			'FLUFF',
+			'Stage 3B (RosterGrid)',
+			f'character_roster_or_icon_grid (4girls={raw_gens.get("4girls", 0.0):.2f}, 6+girls={raw_gens.get("6+girls", 0.0):.2f})',
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	if raw_gens.get('arrow_(symbol)', 0.0) >= 0.50 and raw_gens.get('simple_background', 0.0) >= 0.40:
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (Diagram)',
-			f"diagram_or_comparison_arrows (arrow={raw_gens.get('arrow_(symbol)', 0.0):.2f})",
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			src_path,
+			'FLUFF',
+			'Stage 3B (Diagram)',
+			f'diagram_or_comparison_arrows (arrow={raw_gens.get("arrow_(symbol)", 0.0):.2f})',
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
-	if (
-		raw_gens.get('silhouette', 0.0) >= 0.65
-		and raw_gens.get('simple_background', 0.0) >= 0.50
-		and raw_gens.get('blank_eyes', 0.0) >= 0.30
-	):
+	if raw_gens.get('silhouette', 0.0) >= 0.65 and raw_gens.get('simple_background', 0.0) >= 0.50 and raw_gens.get('blank_eyes', 0.0) >= 0.30:
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (Silhouette)',
-			f"silhouette_doodle (silhouette={raw_gens.get('silhouette', 0.0):.2f}, blank_eyes={raw_gens.get('blank_eyes', 0.0):.2f})",
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			src_path,
+			'FLUFF',
+			'Stage 3B (Silhouette)',
+			f'silhouette_doodle (silhouette={raw_gens.get("silhouette", 0.0):.2f}, blank_eyes={raw_gens.get("blank_eyes", 0.0):.2f})',
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	# 5. Disembodied Crop / Torso-Only / PNG Grid Head-Cutout Rules
@@ -779,14 +871,17 @@ def _classify_stage3b_verdict(
 	closeup_hits = [(t, raw_gens[t]) for t in CLOSEUP_FOCUS_TAGS if raw_gens.get(t, 0.0) >= 0.30]
 	best_closeup_tag, best_closeup_conf = max(closeup_hits, key=lambda kv: kv[1], default=('', 0.0))
 
-	if not has_eye_color and (
-		best_crop_conf >= 0.25
-		or (best_closeup_conf >= 0.30 and not has_face_anchor)
-	):
+	if not has_eye_color and (best_crop_conf >= 0.25 or (best_closeup_conf >= 0.30 and not has_face_anchor)):
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (Crop)',
+			src_path,
+			'FLUFF',
+			'Stage 3B (Crop)',
 			f'disembodied_crop ({best_crop_tag or best_closeup_tag}={max(best_crop_conf, best_closeup_conf):.2f}, no_eye_color)',
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	body_framing_conf = max(
@@ -795,26 +890,31 @@ def _classify_stage3b_verdict(
 		raw_gens.get('cowboy_shot', 0.0),
 		raw_gens.get('lower_body', 0.0),
 	)
-	if (
-		raw_gens.get('checkered_background', 0.0) >= 0.60
-		and raw_gens.get('portrait', 0.0) >= 0.50
-		and body_framing_conf < 0.20
-	):
+	if raw_gens.get('checkered_background', 0.0) >= 0.60 and raw_gens.get('portrait', 0.0) >= 0.50 and body_framing_conf < 0.20:
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (Crop)',
-			f"png_grid_head_crop (checkered_bg={raw_gens.get('checkered_background', 0.0):.2f}, portrait={raw_gens.get('portrait', 0.0):.2f})",
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			src_path,
+			'FLUFF',
+			'Stage 3B (Crop)',
+			f'png_grid_head_crop (checkered_bg={raw_gens.get("checkered_background", 0.0):.2f}, portrait={raw_gens.get("portrait", 0.0):.2f})',
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	# 6. SigLIP Combined Fluff vs Keep Balance (for borderline cases that passed Stage 3A)
-	if (
-		(fluff_sum >= keep_sum * 0.85 or best_fluff_val > best_keep_val)
-		and best_fluff_key != 'doll_or_figurine'
-	):
+	if (fluff_sum >= keep_sum * 0.85 or best_fluff_val > best_keep_val) and best_fluff_key != 'doll_or_figurine':
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (SigLIP)',
+			src_path,
+			'FLUFF',
+			'Stage 3B (SigLIP)',
 			f'{best_fluff_key} ({best_fluff_key}={best_fluff_val:.2f}, fluff_sum={fluff_sum:.2f} vs keep_sum={keep_sum:.2f})',
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	# 7. Strict Minimum Booru Subject & Feature Density Gate
@@ -828,15 +928,27 @@ def _classify_stage3b_verdict(
 		or (no_humans_conf >= 0.35 and raw_gens.get('furry', 0.0) < 0.35 and raw_gens.get('pokemon_(creature)', 0.0) < 0.35)
 	):
 		return TriageVerdict(
-			src_path, 'FLUFF', 'Stage 3B (Density)',
+			src_path,
+			'FLUFF',
+			'Stage 3B (Density)',
 			f'weak_booru_subject (subj={subject_conf:.2f}, tags={confident_gen_count}, no_humans={no_humans_conf:.2f})',
-			sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+			sorted_siglip,
+			raw_chars,
+			raw_gens,
+			raw_ratings,
+			import_tags,
 		)
 
 	return TriageVerdict(
-		src_path, 'KEEP', 'Stage 3B (SigLIP+EVA02)',
+		src_path,
+		'KEEP',
+		'Stage 3B (SigLIP+EVA02)',
 		f'{best_keep_key} ({best_keep_key}={best_keep_val:.2f}, subj={subject_conf:.2f}, tags={confident_gen_count})',
-		sorted_siglip, raw_chars, raw_gens, raw_ratings, import_tags,
+		sorted_siglip,
+		raw_chars,
+		raw_gens,
+		raw_ratings,
+		import_tags,
 	)
 
 
@@ -855,7 +967,7 @@ def _write_unified_sidecar(target_media_path: Path, verdict: TriageVerdict) -> N
 		parts.extend(f'rating:{k}={v:.3f}' for k, v in verdict.raw_ratings.items())
 		parts.extend(f'char:{k}={v:.3f}' for k, v in verdict.raw_char_tags.items())
 		parts.extend(f'{k}={v:.3f}' for k, v in verdict.raw_gen_tags.items())
-		lines.append(f"# Full Tags: {', '.join(parts)}")
+		lines.append(f'# Full Tags: {", ".join(parts)}')
 
 	if verdict.import_tags:
 		lines.append(', '.join(verdict.import_tags))
@@ -936,16 +1048,8 @@ def run_triage(args) -> None:
 		print(f'[ERROR] Target directory not found: {base_dir}')
 		return
 
-	fluff_dir = (
-		Path(args.fluff_dir).resolve()
-		if getattr(args, 'fluff_dir', None)
-		else base_dir.with_name(f'{base_dir.name}-fluff')
-	)
-	comic_dir = (
-		Path(args.comic_dir).resolve()
-		if getattr(args, 'comic_dir', None)
-		else base_dir.with_name(f'{base_dir.name}-comic')
-	)
+	fluff_dir = Path(args.fluff_dir).resolve() if getattr(args, 'fluff_dir', None) else base_dir.with_name(f'{base_dir.name}-fluff')
+	comic_dir = Path(args.comic_dir).resolve() if getattr(args, 'comic_dir', None) else base_dir.with_name(f'{base_dir.name}-comic')
 
 	if getattr(args, 'reset', False) or getattr(args, 'retriage', False):
 		print('[*] Resetting previous triage state (preserving pre-existing sidecars)...')
@@ -966,7 +1070,7 @@ def run_triage(args) -> None:
 	print(f'📚  Comic Side-Dir:   {comic_dir}')
 	print(f'🗑️  Fluff Side-Dir:   {fluff_dir}')
 	if reso_fluff:
-		print(f"📐  Reso Fluff:       {', '.join(f'{w}x{h}' for w, h in sorted(reso_fluff))}")
+		print(f'📐  Reso Fluff:       {", ".join(f"{w}x{h}" for w, h in sorted(reso_fluff))}')
 	print(f'🔍  Candidates:       {len(candidates):,} files')
 	print(f'🧵  Worker Threads:   {args.threads}')
 	print(f'🧪  Dry Run:          {args.dry_run}\n')
@@ -997,10 +1101,7 @@ def run_triage(args) -> None:
 			else:
 				stage2_candidates.append(f_path)
 
-		print(
-			f'  -> Stage 1 complete: {kept_stage1:,} known MD5s kept in-place, '
-			f'{len(stage2_candidates):,} unknown files advancing to Stage 2.'
-		)
+		print(f'  -> Stage 1 complete: {kept_stage1:,} known MD5s kept in-place, {len(stage2_candidates):,} unknown files advancing to Stage 2.')
 
 		# --- Stage 2: Single-Open Header Geometry, Fixed Resolution & Camera EXIF ---
 		stage3_candidates: list[Path] = []
@@ -1011,9 +1112,7 @@ def run_triage(args) -> None:
 					lambda f: (f, _evaluate_stage2_file(f, args.min_size, args.max_ratio, reso_fluff)),
 					stage2_candidates,
 				)
-				for f_path, verdict in tqdm.tqdm(
-					s2_iter, total=len(stage2_candidates), desc='Pre-filtering', leave=False
-				):
+				for f_path, verdict in tqdm.tqdm(s2_iter, total=len(stage2_candidates), desc='Pre-filtering', leave=False):
 					if verdict is not None:
 						all_verdicts.append(verdict)
 						if not args.dry_run:
@@ -1022,10 +1121,7 @@ def run_triage(args) -> None:
 						stage3_candidates.append(f_path)
 
 			s2_rejected = len(stage2_candidates) - len(stage3_candidates)
-			print(
-				f'  -> Stage 2 complete: {s2_rejected:,} files routed to fluff, '
-				f'{len(stage3_candidates):,} files advancing to Stage 3.'
-			)
+			print(f'  -> Stage 2 complete: {s2_rejected:,} files routed to fluff, {len(stage3_candidates):,} files advancing to Stage 3.')
 
 		# --- Stage 3: Cascaded SigLIP (3A) -> EVA02 (3B) ---
 		if stage3_candidates:
@@ -1036,10 +1132,7 @@ def run_triage(args) -> None:
 			group_info = (child_to_parents, sex_group_tags)
 
 			chunk_size = max(64, args.batch * 8)
-			print(
-				f'\n[Stage 3/3] Running cascaded SigLIP -> {args.model} on '
-				f'{len(stage3_candidates):,} files (chunk={chunk_size})...'
-			)
+			print(f'\n[Stage 3/3] Running cascaded SigLIP -> {args.model} on {len(stage3_candidates):,} files (chunk={chunk_size})...')
 
 			with ThreadPoolExecutor(max_workers=args.threads) as pool:
 				for start in tqdm.tqdm(range(0, len(stage3_candidates), chunk_size), desc='GPU Chunks'):
@@ -1083,9 +1176,7 @@ def run_triage(args) -> None:
 						continue
 
 					# Stage 3B: Parallel 448x448 pad + EVA02 inference on survivors only
-					eva_padded_lists = list(
-						pool.map(lambda item: _prep_eva_pad_uint8(item[1]), eva_survivors)
-					)
+					eva_padded_lists = list(pool.map(lambda item: _prep_eva_pad_uint8(item[1]), eva_survivors))
 					eva_flat_arrays: list[np.ndarray] = []
 					eva_slices: list[tuple[Path, dict[str, float], int, int]] = []
 

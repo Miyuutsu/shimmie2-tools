@@ -54,14 +54,8 @@ def _collect_missing_sidecars(target_dir: Path, allowed_extensions: set[str]) ->
 	"""Finds all valid media files missing a .txt sidecar."""
 	if not target_dir or not target_dir.is_dir():
 		return []
-	all_files = [
-		f for f in target_dir.rglob('*')
-		if f.is_file() and 'thumbnails' not in f.parts and f.suffix.lower() in allowed_extensions
-	]
-	return [
-		f for f in all_files
-		if not f.with_suffix('.txt').exists() and not f.with_name(f'{f.name}.txt').exists()
-	]
+	all_files = [f for f in target_dir.rglob('*') if f.is_file() and 'thumbnails' not in f.parts and f.suffix.lower() in allowed_extensions]
+	return [f for f in all_files if not f.with_suffix('.txt').exists() and not f.with_name(f'{f.name}.txt').exists()]
 
 
 def _stage_media_files(media_list: list[Path], stage_dir: Path) -> dict[int, dict[str, Path | int | list[str]]]:
@@ -246,10 +240,7 @@ def run_auto_tagger(args) -> None:
 		return
 
 	print(f'[INFO] Found {len(missing_sidecars):,} files missing sidecars. Checking DB status...')
-	md5_by_file = {
-		f: extract_or_compute_md5(f)
-		for f in tqdm.tqdm(missing_sidecars, desc='Extracting Hashes', leave=False)
-	}
+	md5_by_file = {f: extract_or_compute_md5(f) for f in tqdm.tqdm(missing_sidecars, desc='Extracting Hashes', leave=False)}
 
 	db_config = get_shimmie_db_credentials(args.spath) if getattr(args, 'spath', None) else None
 	existing_hashes = get_existing_shimmie_hashes(md5_by_file.values(), db_config)
@@ -290,16 +281,12 @@ def run_auto_tagger(args) -> None:
 			print('=== Processing Known Files ===')
 			if known_reg := _stage_media_files(known_files, known_dir):
 				subprocess.run(_build_tagger_cmd(venv_python, known_dir, args), cwd=SUBMODULE_PATH, check=True)
-				total_created += _consolidate_and_write_sidecars(
-					known_dir, known_reg, 'tagai:', args.dir_as_artist, rating_weights, group_info
-				)
+				total_created += _consolidate_and_write_sidecars(known_dir, known_reg, 'tagai:', args.dir_as_artist, rating_weights, group_info)
 
 		if unknown_files:
 			print('\n=== Processing Unknown Files ===')
 			if unknown_reg := _stage_media_files(unknown_files, unknown_dir):
 				subprocess.run(_build_tagger_cmd(venv_python, unknown_dir, args), cwd=SUBMODULE_PATH, check=True)
-				total_created += _consolidate_and_write_sidecars(
-					unknown_dir, unknown_reg, '', args.dir_as_artist, rating_weights, group_info
-				)
+				total_created += _consolidate_and_write_sidecars(unknown_dir, unknown_reg, '', args.dir_as_artist, rating_weights, group_info)
 
 	print(f'\n[✓] Sidecar generation complete! Created {total_created:,} new files.')

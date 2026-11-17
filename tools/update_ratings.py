@@ -18,11 +18,7 @@ def _load_tag_rating_map() -> dict[str, int]:
 		raise FileNotFoundError(f'Tag rating DB not found: {TAG_DB_PATH}')
 
 	with sqlite3.connect(TAG_DB_PATH) as conn:
-		return {
-			t.strip().lower(): int(r)
-			for t, r in conn.execute('SELECT tag_name, dominant_rating FROM dominant_tag_ratings')
-			if t and t.strip()
-		}
+		return {t.strip().lower(): int(r) for t, r in conn.execute('SELECT tag_name, dominant_rating FROM dominant_tag_ratings') if t and t.strip()}
 
 
 def _calculate_new_rating(
@@ -72,9 +68,7 @@ def update_ratings(args) -> None:
 
 		updates: list[tuple[int, str]] = []
 		for image_id, current_rating, tags in tqdm.tqdm(rows, desc='Evaluating Ratings', leave=False):
-			new_rating = _calculate_new_rating(
-				tags or (), current_rating, tag_rating_map, args.smax, args.qmax
-			)
+			new_rating = _calculate_new_rating(tags or (), current_rating, tag_rating_map, args.smax, args.qmax)
 			if new_rating != current_rating:
 				updates.append((image_id, new_rating))
 
@@ -93,4 +87,4 @@ def update_ratings(args) -> None:
 			pg_conn.commit()
 
 		updated = len(updates)
-		print(f"[✓] Updated {updated:,} image rating{'s' if updated != 1 else ''}.\n")
+		print(f'[✓] Updated {updated:,} image rating{"s" if updated != 1 else ""}.\n')

@@ -47,10 +47,7 @@ def _is_legitimate_history_tag(bad_tag: str, hist_tokens: set[str], ctx: TagCura
 		if base_s not in ctx.series_set:
 			return False
 
-	return any(
-		tok == bad_lower or bad_tag in ctx.expand_single_tag(tok, {})
-		for tok in hist_tokens
-	)
+	return any(tok == bad_lower or bad_tag in ctx.expand_single_tag(tok, {}) for tok in hist_tokens)
 
 
 def _revert_single_tag(cur, raw_spec: str, ctx: TagCurationContext, merged_map: dict[str, str]) -> None:
@@ -165,11 +162,7 @@ def _revert_single_tag(cur, raw_spec: str, ctx: TagCurationContext, merged_map: 
 	)
 
 	if restore_pairs:
-		id_pairs = [
-			(iid, local_tag_ids[t_name])
-			for iid, t_name in restore_pairs
-			if t_name in local_tag_ids
-		]
+		id_pairs = [(iid, local_tag_ids[t_name]) for iid, t_name in restore_pairs if t_name in local_tag_ids]
 		psycopg2.extras.execute_values(
 			cur,
 			'INSERT INTO image_tags (image_id, tag_id) VALUES %s ON CONFLICT DO NOTHING',
@@ -216,12 +209,7 @@ def _revert_poisoned_tags(
 	merged_map: dict[str, str],
 ) -> None:
 	"""Reverts one or more poisoned tags in PostgreSQL."""
-	specs = [
-		sub.strip()
-		for item in raw_revert_args
-		for sub in item.split(',')
-		if sub.strip()
-	]
+	specs = [sub.strip() for item in raw_revert_args for sub in item.split(',') if sub.strip()]
 	with psycopg2.connect(**db_config) as conn, conn.cursor() as cur:
 		for spec in specs:
 			_revert_single_tag(cur, spec, ctx, merged_map)
@@ -255,9 +243,7 @@ def _load_input_rows(in_path: Path) -> tuple[list[dict[str, str]], list[str]]:
 					'Confidence': str(conf),
 					'Sample_Size': str(sample),
 				}
-				for s_tag, c_tag, conf, sample in conn.execute(
-					'SELECT sidecar_tag, canonical_tag, confidence, sample_size FROM tagmap'
-				)
+				for s_tag, c_tag, conf, sample in conn.execute('SELECT sidecar_tag, canonical_tag, confidence, sample_size FROM tagmap')
 			]
 		return rows, fieldnames
 
@@ -364,13 +350,10 @@ def fix_curation_map(args) -> None:
 				purged_poison.append((s_tag, c_tag, f'Low confidence ({conf_candidates[0]:.4f} < 0.60)'))
 				continue
 
-			non_numeric_extra = [
-				e for e in extra_cols
-				if not _is_number(e) and e not in {'Confidence', 'Count', 'Canonical_Tag'}
-			]
+			non_numeric_extra = [e for e in extra_cols if not _is_number(e) and e not in {'Confidence', 'Count', 'Canonical_Tag'}]
 			if non_numeric_extra and c_tag not in {'_DROP_', ''}:
 				merged_target = ' '.join([c_tag, *non_numeric_extra])
-				repaired_comma_rows.append((s_tag, f"{c_tag},{','.join(non_numeric_extra)}", merged_target))
+				repaired_comma_rows.append((s_tag, f'{c_tag},{",".join(non_numeric_extra)}', merged_target))
 				c_tag = merged_target
 				row['Canonical_Tag'] = c_tag
 

@@ -90,9 +90,7 @@ def process_webp(task: tuple[Path, Path]) -> None:
 def convert_to_webp(src_path: Path, dst_path: Path) -> None:
 	"""Tier 1: Converts images natively using pyvips."""
 	dst_path.parent.mkdir(parents=True, exist_ok=True)
-	image = pyvips.Image.thumbnail(
-		str(src_path), 512, height=512, size='down', fail_on='none'
-	)
+	image = pyvips.Image.thumbnail(str(src_path), 512, height=512, size='down', fail_on='none')
 	image.webpsave(str(dst_path), Q=92)
 
 
@@ -124,8 +122,15 @@ def get_video_resolution(file_path: Path) -> tuple[int | None, int | None]:
 
 	try:
 		cmd = [
-			'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-			'-show_entries', 'stream=width,height', '-of', 'json',
+			'ffprobe',
+			'-v',
+			'error',
+			'-select_streams',
+			'v:0',
+			'-show_entries',
+			'stream=width,height',
+			'-of',
+			'json',
 			str(file_path),
 		]
 		output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
@@ -152,11 +157,7 @@ def extract_video_frames(src_path: Path, max_frames: int = 5) -> list[Image.Imag
 			return frames
 
 		stream = container.streams.video[0]
-		pcts = (
-			[random.uniform(0.15, 0.35)]
-			if max_frames == 1
-			else [0.10 + (0.80 * i / (max_frames - 1)) for i in range(max_frames)]
-		)
+		pcts = [random.uniform(0.15, 0.35)] if max_frames == 1 else [0.10 + (0.80 * i / (max_frames - 1)) for i in range(max_frames)]
 
 		if stream.duration and stream.duration > 0:
 			for pct in pcts:
@@ -213,10 +214,24 @@ def extract_video_thumbnail(src_path: Path, dst_path: Path) -> None:
 
 	temp_webp_path = dst_path.with_name(f'{dst_path.name}.webp')
 	cmd = [
-		'ffmpeg', '-y', '-v', 'error', '-i', str(src_path),
-		'-ss', '00:00:00.000', '-vframes', '1',
-		'-vf', "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'",
-		'-c:v', 'libwebp', '-lossless', '0', '-q:v', '92',
+		'ffmpeg',
+		'-y',
+		'-v',
+		'error',
+		'-i',
+		str(src_path),
+		'-ss',
+		'00:00:00.000',
+		'-vframes',
+		'1',
+		'-vf',
+		"scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)'",
+		'-c:v',
+		'libwebp',
+		'-lossless',
+		'0',
+		'-q:v',
+		'92',
 		str(temp_webp_path),
 	]
 	subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

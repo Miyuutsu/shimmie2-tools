@@ -102,6 +102,7 @@ def get_cache_conn(cache_path: Path = CACHE_PATH):
 
 def row_to_post_dict(row: tuple) -> dict[str, str | list[str]]:
 	"""Converts a SQLite `posts` table row into a structured post dictionary."""
+
 	def _split(field: str | None) -> list[str]:
 		if not field:
 			return []
@@ -259,11 +260,7 @@ def resolve_post(
 			if post is None:
 				cur.execute('SELECT * FROM posts WHERE pixel_hash = ?', (px_hash,))
 				row = cur.fetchone()
-				post = (
-					row_to_post_dict(row)
-					if row
-					else row_to_post_dict((md5, px_hash, '?', '', '', '', '', ''))
-				)
+				post = row_to_post_dict(row) if row else row_to_post_dict((md5, px_hash, '?', '', '', '', '', ''))
 
 		except Exception as e:
 			print(f'\n[ERROR] Skipping corrupt or unreadable file: {image}')
@@ -286,13 +283,11 @@ def get_shimmie_db_credentials(spath: str | Path | None) -> dict[str, str | int]
 
 	content = config_path.read_text(encoding='utf-8')
 
-	user_match = (
-		re.search(r"\$database_user\s*=\s*['\"]([^'\"]+)['\"]", content)
-		or re.search(r"define\s*\(\s*['\"]DATABASE_USER['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", content)
+	user_match = re.search(r"\$database_user\s*=\s*['\"]([^'\"]+)['\"]", content) or re.search(
+		r"define\s*\(\s*['\"]DATABASE_USER['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", content
 	)
-	pass_match = (
-		re.search(r"\$database_pass\s*=\s*['\"]([^'\"]+)['\"]", content)
-		or re.search(r"define\s*\(\s*['\"]DATABASE_PASS['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", content)
+	pass_match = re.search(r"\$database_pass\s*=\s*['\"]([^'\"]+)['\"]", content) or re.search(
+		r"define\s*\(\s*['\"]DATABASE_PASS['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", content
 	)
 
 	if uri_match := re.search(r"['\"]((?:pgsql|postgres|postgresql)://[^'\"]+)['\"]", content):
@@ -315,11 +310,7 @@ def get_shimmie_db_credentials(spath: str | Path | None) -> dict[str, str | int]
 			'host': dsn_parts.get('host', 'localhost'),
 			'dbname': dsn_parts.get('dbname', 'shimmie'),
 			'user': dsn_parts.get('user') or (user_match.group(1) if user_match else 'postgres'),
-			'password': (
-				dsn_parts['password']
-				if 'password' in dsn_parts
-				else (pass_match.group(1) if pass_match else '')
-			),
+			'password': (dsn_parts['password'] if 'password' in dsn_parts else (pass_match.group(1) if pass_match else '')),
 		}
 		if 'port' in dsn_parts:
 			res['port'] = dsn_parts['port']
@@ -481,6 +472,7 @@ SEED_TAGMAP_RULES = (
 	('series:fate/strange_fake', 'series:fate/strange_fake series:fate', 1.0, 0),
 	('series:fate/hollow_ataraxia', 'series:fate/hollow_ataraxia series:fate', 1.0, 0),
 )
+
 
 def init_tagmap_db(db_path: Path = TAGMAP_DB_PATH) -> None:
 	"""Ensures the tagmap SQLite table exists, seeding base rules and migrating complete_tagmap.csv on first creation."""

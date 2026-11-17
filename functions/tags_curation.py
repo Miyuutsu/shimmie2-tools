@@ -12,11 +12,19 @@ from functions.common import ADB_PATH, CDB_PATH, ROOT_DIR, SUBMODULE_PATH
 from functions.source_resolver import is_recognized_prefix, resolve_prefixed_tag
 
 EXPLICIT_GROUP_PARENTS = {
-	'eyewear', 'headwear', 'footwear', 'legwear',
-	'pushing', 'lipstick_mark',
+	'eyewear',
+	'headwear',
+	'footwear',
+	'legwear',
+	'pushing',
+	'lipstick_mark',
 }
 NO_GROUP_PARENT = {
-	'hair', 'skin', 'pupils', 'scales', 'group',
+	'hair',
+	'skin',
+	'pupils',
+	'scales',
+	'group',
 }
 
 _CONTEXT_CACHE: dict[str, 'TagCurationContext'] = {}
@@ -83,21 +91,13 @@ def calculate_rating(
 	if real_tag_count >= 10:
 		return 's' if calc_rating == 'g' else calc_rating
 
-	final_rating = (
-		calc_rating
-		if hierarchy.get(calc_rating, 0) > hierarchy.get(fallback_rating, 0)
-		else fallback_rating
-	)
+	final_rating = calc_rating if hierarchy.get(calc_rating, 0) > hierarchy.get(fallback_rating, 0) else fallback_rating
 	return 's' if final_rating == 'g' else final_rating
 
 
 def _is_excluded_from_expansion(tag: str) -> bool:
 	"""Returns True if a tag is a negation/removed state that must not trigger parent tags."""
-	return (
-		tag.startswith('no_')
-		or tag.endswith(('_removed', '_partially_removed'))
-		or tag == 'flat_chest'
-	)
+	return tag.startswith('no_') or tag.endswith(('_removed', '_partially_removed')) or tag == 'flat_chest'
 
 
 def _is_plural_variant(tag1: str, tag2: str) -> bool:
@@ -149,10 +149,7 @@ def load_tag_groups_metadata() -> tuple[dict[str, set[str]], set[str], set[str],
 
 			bases = content.get('base', [])
 			canonical_parent = (
-				group_name
-				if (group_name in bases or group_name in EXPLICIT_GROUP_PARENTS)
-				and group_name not in NO_GROUP_PARENT
-				else None
+				group_name if (group_name in bases or group_name in EXPLICIT_GROUP_PARENTS) and group_name not in NO_GROUP_PARENT else None
 			)
 			if canonical_parent:
 				known_general.add(canonical_parent)
@@ -203,11 +200,7 @@ class TagCurationContext:
 	def __init__(self, mappings=None):
 		if mappings is not None:
 			self.char_map = dict(mappings.char)
-			self.artist_map = (
-				dict(mappings.artist)
-				if isinstance(mappings.artist, dict)
-				else {a: a for a in mappings.artist}
-			)
+			self.artist_map = dict(mappings.artist) if isinstance(mappings.artist, dict) else {a: a for a in mappings.artist}
 		else:
 			self.char_map, self.artist_map = self._load_char_and_artist_dbs()
 
@@ -237,8 +230,7 @@ class TagCurationContext:
 		self.norm_general_map = {
 			re.sub(r'[_()-]', '', t.lower()): t
 			for t in self.known_general
-			if re.fullmatch(r'[a-z0-9_()-]{3,}', t.lower())
-			and len(re.sub(r'[_()-]', '', t.lower())) >= 3
+			if re.fullmatch(r'[a-z0-9_()-]{3,}', t.lower()) and len(re.sub(r'[_()-]', '', t.lower())) >= 3
 		}
 
 		self.bogus_prefixed_tags: set[str] = set()
@@ -292,11 +284,7 @@ class TagCurationContext:
 		"""Splits comma-separated series strings from characters.db into clean series names."""
 		if not raw_val:
 			return []
-		items = (
-			raw_val
-			if isinstance(raw_val, (list, tuple, set))
-			else [p.strip() for p in str(raw_val).split(',') if p.strip()]
-		)
+		items = raw_val if isinstance(raw_val, (list, tuple, set)) else [p.strip() for p in str(raw_val).split(',') if p.strip()]
 
 		out: list[str] = []
 		for item in items:
@@ -307,7 +295,7 @@ class TagCurationContext:
 
 	@staticmethod
 	def _clean_series_name(name: str) -> str:
-		clean = re.sub(r'\s+', '_', name.strip().strip("\"'"))
+		clean = re.sub(r'\s+', '_', name.strip().strip('"\''))
 		clean = re.sub(r'_series\)$', ')', clean)
 		return re.sub(r'_\(series\)$', '', clean)
 
@@ -322,7 +310,7 @@ class TagCurationContext:
 					c_raw = row[0].strip()
 					s_raw = row[1].strip() if len(row) >= 2 and row[1] else ''
 					char_map[c_raw] = s_raw
-					c_unquoted = c_raw.strip("\"'")
+					c_unquoted = c_raw.strip('"\'')
 					if c_unquoted and c_unquoted not in char_map:
 						char_map[c_unquoted] = s_raw
 
@@ -355,11 +343,7 @@ class TagCurationContext:
 
 		if s_clean in self.known_general and not is_recognized_prefix(s_clean):
 			for target_token in c_clean.split():
-				if (
-					target_token.startswith(('artist:', 'character:', 'series:'))
-					or target_token in self.artist_set
-					or target_token in self.char_map
-				):
+				if target_token.startswith(('artist:', 'character:', 'series:')) or target_token in self.artist_set or target_token in self.char_map:
 					return False
 
 		return True
@@ -394,7 +378,7 @@ class TagCurationContext:
 			if norm_tok == '_DROP_':
 				continue
 
-			for raw_sub in (norm_tok.split() if ' ' in norm_tok else [norm_tok]):
+			for raw_sub in norm_tok.split() if ' ' in norm_tok else [norm_tok]:
 				cur_tok = (
 					lookup_map[raw_sub]
 					if raw_sub != tag and raw_sub in lookup_map and self.is_safe_mapping(raw_sub, lookup_map[raw_sub])
@@ -443,11 +427,7 @@ class TagCurationContext:
 				results.append(raw_norm)
 				continue
 
-			norm_tag = (
-				raw_norm.split(':', 1)[1].strip()
-				if raw_norm in self.bogus_prefixed_tags
-				else raw_norm
-			)
+			norm_tag = raw_norm.split(':', 1)[1].strip() if raw_norm in self.bogus_prefixed_tags else raw_norm
 
 			if norm_tag.startswith('character:'):
 				base_c = norm_tag.split(':', 1)[1].strip()
@@ -526,11 +506,7 @@ def apply_tag_curation(
 			res = ctx.expand_single_tag(raw_tag, lookup_map)
 		expanded_tags.extend(res)
 
-	image_qualifiers = {
-		t.split(':', 1)[1]
-		for t in expanded_tags
-		if t.startswith(('artist:', 'series:'))
-	}
+	image_qualifiers = {t.split(':', 1)[1] for t in expanded_tags if t.startswith(('artist:', 'series:'))}
 
 	if image_qualifiers and ctx.qualified_char_map:
 		for raw_t in tags:
