@@ -94,6 +94,8 @@ def get_cache_conn(cache_path: Path = CACHE_PATH):
 	conn = conns.get(resolved)
 	if conn is None:
 		conn = sqlite3.connect(resolved, timeout=30.0, check_same_thread=False)
+		conn.execute('PRAGMA journal_mode=WAL;')  # Ensure WAL mode for concurrency
+		conn.execute('PRAGMA busy_timeout=5000;')  # 5 second timeout on locked tables
 		conns[resolved] = conn
 	yield conn
 

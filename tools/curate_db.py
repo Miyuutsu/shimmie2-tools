@@ -34,8 +34,8 @@ class CurationChangeset:
 		)
 
 
-def _fetch_target_images(cur, target_tag: str | None) -> list[tuple[int, str | None, str | None, list[str | None]]]:
-	"""Fetches image IDs, sources, ratings, and tag arrays from PostgreSQL."""
+def _fetch_target_images(cur, target_tag: str | None):
+	"""Yields image rows in batches using a withhold server-side cursor."""
 	if target_tag:
 		print(f"Fetching image tags from Postgres strictly for batch '{target_tag}'...")
 		cur.execute(
@@ -53,21 +53,30 @@ def _fetch_target_images(cur, target_tag: str | None) -> list[tuple[int, str | N
 			GROUP BY i.id, i.source, i.rating
 			""",
 			(target_tag,),
+			withhold=True,
 		)
 	else:
 		print('Fetching all images and tags from Postgres...')
-		cur.execute("""
+		cur.execute(
+			"""
 			SELECT i.id, i.source, i.rating, array_agg(t.tag)
 			FROM images i
 			LEFT JOIN image_tags it ON i.id = it.image_id
 			LEFT JOIN tags t ON it.tag_id = t.id
 			GROUP BY i.id, i.source, i.rating
-		""")
-	return cur.fetchall()
+			""",
+			withhold=True,
+		)
+
+	while True:
+		batch = cur.fetchmany(5000)
+		if not batch:
+			break
+		yield batch
 
 
 def _evaluate_curation_changes(
-	images_data: list[tuple[int, str | None, str | None, list[str | None]]],
+	cursor,
 	merged_map: dict[str, str],
 	ctx: TagCurationContext,
 	single_tag_cache: dict[str, tuple[str, ...]],
@@ -76,61 +85,62 @@ def _evaluate_curation_changes(
 	"""Evaluates all fetched images against curation rules and builds a CurationChangeset."""
 	changeset = CurationChangeset()
 
-	for img_id, current_source, current_rating, raw_tags in tqdm.tqdm(images_data, desc='Curating Tags'):
-		current_tags = [t for t in (raw_tags or ()) if t is not None]
-		curated_tags = list(current_tags)
+	for batch in _fetch_target_images(cursor):
+		for img_id, current_source, current_rating, raw_tags in tqdm.tqdm(batch, desc='Curating Tags', leave=False):
+			current_tags = [t for t in (raw_tags or ()) if t is not None]
+			curated_tags = list(current_tags)
 
-		apply_tag_curation(
-			curated_tags,
-			dynamic_mappings=merged_map,
-			context=ctx,
-			single_tag_cache=single_tag_cache,
-		)
+			apply_tag_curation(
+				curated_tags,
+				dynamic_mappings=merged_map,
+				context=ctx,
+				single_tag_cache=single_tag_cache,
+			)
 
-		extracted_ratings = [
-			t.split(':', 1)[1].lower()
-			for t in curated_tags
-			if t.lower() in CANONICAL_RATING_TAGS
-		]
-		if extracted_ratings:
-			if not (current_rating and current_rating.strip()):
-				best_rating = max(extracted_ratings, key=lambda r: RATING_PRIORITY.get(r, 0))
-				changeset.rating_updates.append((img_id, best_rating))
-			curated_tags = [t for t in curated_tags if t.lower() not in CANONICAL_RATING_TAGS]
+			extracted_ratings = [
+				t.split(':', 1)[1].lower()
+				for t in curated_tags
+				if t.lower() in CANONICAL_RATING_TAGS
+			]
+			if extracted_ratings:
+				if not (current_rating and current_rating.strip()):
+					best_rating = max(extracted_ratings, key=lambda r: RATING_PRIORITY.get(r, 0))
+					changeset.rating_updates.append((img_id, best_rating))
+				curated_tags = [t for t in curated_tags if t.lower() not in CANONICAL_RATING_TAGS]
 
-		clean_curr_src = current_source.strip() if current_source else ''
-		candidate_urls = {
-			t.split(':', 1)[1].strip()
-			for t in curated_tags
-			if t.lower().startswith('source:') and len(t) > 7 and t.split(':', 1)[1].strip()
-		}
-		if clean_curr_src:
-			candidate_urls.add(clean_curr_src)
+			clean_curr_src = current_source.strip() if current_source else ''
+			candidate_urls = {
+				t.split(':', 1)[1].strip()
+				for t in curated_tags
+				if t.lower().startswith('source:') and len(t) > 7 and t.split(':', 1)[1].strip()
+			}
+			if clean_curr_src:
+				candidate_urls.add(clean_curr_src)
 
-		if candidate_urls:
-			best_url = min(candidate_urls, key=lambda u: (get_source_score(u), u))
-			if best_url != clean_curr_src:
-				changeset.source_updates.append((img_id, best_url))
+			if candidate_urls:
+				best_url = min(candidate_urls, key=lambda u: (get_source_score(u), u))
+				if best_url != clean_curr_src:
+					changeset.source_updates.append((img_id, best_url))
 
-		if len(curated_tags) < 15:
-			curated_tags.append('tagme')
-		if not any(t.startswith('artist:') for t in curated_tags):
-			curated_tags.append('artist:tagme')
-		if not any(t.startswith('character:') for t in curated_tags):
-			curated_tags.append('character:tagme')
-		if not any(t.startswith('series:') for t in curated_tags):
-			curated_tags.append('series:tagme')
+			if len(curated_tags) < 15:
+				curated_tags.append('tagme')
+			if not any(t.startswith('artist:') for t in curated_tags):
+				curated_tags.append('artist:tagme')
+			if not any(t.startswith('character:') for t in curated_tags):
+				curated_tags.append('character:tagme')
+			if not any(t.startswith('series:') for t in curated_tags):
+				curated_tags.append('series:tagme')
 
-		curr_set = set(current_tags)
-		cur_set = set(curated_tags)
+			curr_set = set(current_tags)
+			cur_set = set(curated_tags)
 
-		for t in cur_set - curr_set:
-			changeset.tags_to_add.append((img_id, t))
-			if t not in tag_id_map:
-				changeset.new_unique_tags.add(t)
+			for t in cur_set - curr_set:
+				changeset.tags_to_add.append((img_id, t))
+				if t not in tag_id_map:
+					changeset.new_unique_tags.add(t)
 
-		for t in curr_set - cur_set:
-			changeset.tags_to_remove.append((img_id, tag_id_map[t]))
+			for t in curr_set - cur_set:
+				changeset.tags_to_remove.append((img_id, tag_id_map[t]))
 
 	return changeset
 
@@ -273,14 +283,8 @@ def curate_existing_tags(args) -> None:
 		for tag_name in tag_id_map:
 			single_tag_cache[tag_name] = ctx.expand_single_tag(tag_name, merged_map)
 
-		images_data = _fetch_target_images(cur, getattr(args, 'target_tag', None))
-		if not images_data:
-			print('\n[✓] No images matched for curation.')
-			return
-
-		print(f'Evaluating {len(images_data):,} images...')
 		changeset = _evaluate_curation_changes(
-			images_data, merged_map, ctx, single_tag_cache, tag_id_map
+			cur, merged_map, ctx, single_tag_cache, tag_id_map
 		)
 
 		if changeset.is_empty():

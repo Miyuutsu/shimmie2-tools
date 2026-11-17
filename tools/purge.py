@@ -243,6 +243,7 @@ def _execute_purge(
 
 	print('\n[Step 3/3] Deleting physical files from disk...')
 	deleted_files = 0
+	disk_failures = []
 	for _, hsh, *_ in tqdm.tqdm(trash_images, desc='Files Purged', unit='file'):
 		if not _is_safe_hash(hsh):
 			print(f'\n[WARNING] Skipping invalid hash format on disk: {hsh!r}')
@@ -252,11 +253,21 @@ def _execute_purge(
 		img_file = images_dir / prefix1 / prefix2 / hsh
 		thumb_file = thumbs_dir / prefix1 / prefix2 / hsh
 
-		if img_file.is_file():
-			img_file.unlink()
-			deleted_files += 1
-		if thumb_file.is_file():
-			thumb_file.unlink()
+		try:
+			if img_file.is_file():
+				img_file.unlink()
+				deleted_files += 1
+			if thumb_file.is_file():
+				thumb_file.unlink()
+		except OSError as e:
+			disk_failures.append(f'{hsh}: {e}')
+
+	if disk_failures:
+		print(f'\n[WARNING] {len(disk_failures)} files could not be deleted (DB records removed):')
+		for f in disk_failures[:10]:
+			print(f'  - {f}')
+		if len(disk_failures) > 10:
+			print(f'  ... and {len(disk_failures) - 10} more')
 
 	print(f'\n[✓] Purge Complete: Destroyed {len(img_ids_to_drop):,} DB entries and {deleted_files:,} image files.')
 

@@ -321,12 +321,22 @@ def import_items_to_shimmie(
 	for item in tqdm.tqdm(items, desc='Verifying Hashes', leave=False):
 		if not item.md5:
 			item.md5 = extract_or_compute_md5(item.file_path)
+
 		if item.md5 in by_md5:
 			prev = by_md5[item.md5]
-			merged = sorted(set(prev.tags) | set(item.tags))
-			prev.tags = merged
-			if item.source and (not prev.source or get_source_score(item.source) < get_source_score(prev.source)):
-				prev.source = item.source
+			# Merge tags safely without modifying during iteration
+			merged_tags = sorted(set(prev.tags) | set(item.tags))
+			best_source = prev.source
+			if item.source and get_source_score(item.source) < get_source_score(prev.source):
+				best_source = item.source
+			by_md5[item.md5] = ImportItem(
+				file_path=prev.file_path,  # Keep first file path
+				tags=merged_tags,
+				source=best_source,
+				rating=prev.rating,
+				thumb_path=prev.thumb_path or item.thumb_path,
+				md5=item.md5,
+			)
 		else:
 			by_md5[item.md5] = item
 
