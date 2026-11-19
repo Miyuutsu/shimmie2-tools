@@ -373,10 +373,10 @@ def _get_cached_tagged_hashes(
             placeholders = ",".join(["?"] * len(chunk))
             cur.execute(
                 f"""
-				SELECT md5, general, character, artist, series
-				FROM posts
-				WHERE md5 IN ({placeholders})
-				""",
+                SELECT md5, general, character, artist, series
+                FROM posts
+                WHERE md5 IN ({placeholders})
+                """,
                 chunk,
             )
             for md5, gen, char, art, ser in cur.fetchall():
@@ -662,7 +662,12 @@ def _check_stage3a_siglip_fluff(
 
     # Only short-circuit in Stage 3A when fluff probability mass is high (>= 0.65) and beats keep & comic;
     # borderline cases advance to Stage 3B so EVA02 can inspect exact tags.
-    if fluff_sum >= 0.65 and best_fluff_val > best_keep_val and best_fluff_val > best_comic_val:
+    if (
+        fluff_sum >= 0.65
+        and best_fluff_val > best_keep_val
+        and best_fluff_val > best_comic_val
+        and best_fluff_key != "doll_or_figurine"
+    ):
         return (
             TriageVerdict(
                 src_path,
@@ -750,7 +755,7 @@ def _build_import_tags_and_raw_maps(
     if dir_as_artist:
         artist_name = src_path.resolve().parent.name.lower().replace(" ", "_")
         import_tags.append(f"artist:{artist_name}")
-    import_tags.extend(approved_chars)
+    import_tags.extend(f"character:{c}" for c in approved_chars)
     import_tags.extend(sorted_gens)
 
     return import_tags, sorted_raw_chars, sorted_raw_gens, sorted_ratings

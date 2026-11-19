@@ -60,8 +60,9 @@ def calculate_rating(
             continue
 
         real_tag_count += 1
-        base_tag = tag.split(":", 1)[-1] if ":" in tag else tag
-        weight = rating_map.get(base_tag, 0)
+        if is_recognized_prefix(tag):
+            continue
+        weight = rating_map.get(tag.lower(), 0)
         if weight > 1:
             total_score += weight
         elif weight == 1 and total_score == 0:
@@ -86,7 +87,7 @@ def calculate_rating(
     else:
         fallback_rating = "?"
 
-    if calc_rating is None:
+    if calc_rating is None or (calc_rating == "?" and fallback_rating != "?"):
         return fallback_rating
     if real_tag_count >= 10:
         return "s" if calc_rating == "g" else calc_rating
@@ -589,6 +590,7 @@ def apply_tag_curation(
 
     real_bases: set[str] = set()
     prefixed_bases: set[str] = set()
+    qualified_char_stems: set[str] = set()
     for tag in expanded_set:
         if tag.startswith("tagai:"):
             continue
@@ -603,6 +605,7 @@ def apply_tag_curation(
                     stem_val = base_val.rsplit("_(", 1)[0]
                     prefixed_bases.add(stem_val)
                     real_bases.add(stem_val)
+                    qualified_char_stems.add(stem_val)
                 if tag.startswith("language:"):
                     real_bases.add(f"{base_val}_text")
                     real_bases.add(f"{base_val}_language")
@@ -614,6 +617,9 @@ def apply_tag_curation(
             continue
 
         if not is_recognized_prefix(tag) and tag in prefixed_bases:
+            continue
+
+        if tag.startswith("character:") and tag.split(":", 1)[1] in qualified_char_stems:
             continue
 
         if tag.endswith("_(cosplay)") and f"character:{tag[:-10]}" in expanded_set:
@@ -656,6 +662,6 @@ def get_sidecar_tags(image_path: Path) -> list[str]:
                 line_clean = html.unescape(line.strip())
                 if not line_clean or line_clean.startswith("#"):
                     continue
-                parts = [t.strip().lower() for t in re.split(r"[,;]", line_clean) if t.strip()]
+                parts = [t.strip().lower() for t in line_clean.split(",") if t.strip()]
                 extra_tags.extend(re.sub(r"\s+", "_", t) for t in parts if t)
     return extra_tags

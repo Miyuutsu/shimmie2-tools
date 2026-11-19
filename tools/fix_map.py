@@ -97,11 +97,11 @@ def _revert_single_tag(
     )
 
     cur.execute("""
-		SELECT DISTINCT ON (th.image_id) th.image_id, th.tags
-		FROM tag_histories th
-		JOIN tmp_rev_cand trc ON th.image_id = trc.img_id
-		ORDER BY th.image_id, th.id DESC
-	""")
+        SELECT DISTINCT ON (th.image_id) th.image_id, th.tags
+        FROM tag_histories th
+        JOIN tmp_rev_cand trc ON th.image_id = trc.img_id
+        ORDER BY th.image_id, th.id DESC
+    """)
     hist_map = dict(cur.fetchall())
 
     poisoned_ids: list[int] = []
@@ -148,7 +148,7 @@ def _revert_single_tag(
 
     keep_count = len(affected_ids) - len(poisoned_ids)
     print(
-        f"	-> Reverting '{bad_tag}' on {len(poisoned_ids):,} poisoned images (keeping {keep_count:,} legitimate)..."
+        f"    -> Reverting '{bad_tag}' on {len(poisoned_ids):,} poisoned images (keeping {keep_count:,} legitimate)..."
     )
 
     psycopg2.extras.execute_values(
@@ -170,10 +170,10 @@ def _revert_single_tag(
 
     cur.execute(
         """
-		DELETE FROM image_tags it
-		USING tmp_rev_fix trf
-		WHERE it.image_id = trf.img_id AND it.tag_id = %s
-		""",
+        DELETE FROM image_tags it
+        USING tmp_rev_fix trf
+        WHERE it.image_id = trf.img_id AND it.tag_id = %s
+        """,
         (bad_id,),
     )
 
@@ -192,27 +192,27 @@ def _revert_single_tag(
         tagme_tid = local_tag_ids[f"{ns_prefix}:tagme"]
         cur.execute(
             """
-			INSERT INTO image_tags (image_id, tag_id)
-			SELECT trf.img_id, %s
-			FROM tmp_rev_fix trf
-			WHERE NOT EXISTS (
-				SELECT 1
-				FROM image_tags it
-				JOIN tags t ON it.tag_id = t.id
-				WHERE it.image_id = trf.img_id AND t.tag LIKE %s
-			)
-			ON CONFLICT DO NOTHING
-			""",
+            INSERT INTO image_tags (image_id, tag_id)
+            SELECT trf.img_id, %s
+            FROM tmp_rev_fix trf
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM image_tags it
+                JOIN tags t ON it.tag_id = t.id
+                WHERE it.image_id = trf.img_id AND t.tag LIKE %s
+            )
+            ON CONFLICT DO NOTHING
+            """,
             (tagme_tid, f"{ns_prefix}:%"),
         )
 
     touched_ids = list(local_tag_ids.values())
     cur.execute(
         """
-		UPDATE tags t
-		SET count = (SELECT COUNT(it.image_id) FROM image_tags it WHERE it.tag_id = t.id)
-		WHERE t.id = ANY(%s)
-		""",
+        UPDATE tags t
+        SET count = (SELECT COUNT(it.image_id) FROM image_tags it WHERE it.tag_id = t.id)
+        WHERE t.id = ANY(%s)
+        """,
         (touched_ids,),
     )
     cur.execute("DELETE FROM tags WHERE id = %s AND count <= 0", (bad_id,))
@@ -391,6 +391,10 @@ def fix_curation_map(args) -> None:
             purged_poison.append((s_tag, c_tag, "Poisoned general -> artist/character/series rule"))
             continue
 
+        if c_tag == "_DROP_" and s_tag in ctx.known_general:
+            purged_poison.append((s_tag, c_tag, "Protected known general tag from _DROP_"))
+            continue
+
         if c_tag in {"_DROP_", ""} and (rescued_target := _try_rescue_target(s_tag, ctx)):
             row["Canonical_Tag"] = rescued_target
             rescued_mappings.append((s_tag, c_tag or "<BLANK>", rescued_target))
@@ -422,9 +426,9 @@ def fix_curation_map(args) -> None:
             f.write(f"  - {s_t}: '{old_c}' -> '{new_c}'\n")
 
     print(f"[✓] Fixed map written to {out_path.resolve()} (Log: {log_path.resolve()})")
-    print(f"	-> Repaired {len(repaired_comma_rows):,} comma-shifted rows")
-    print(f"	-> Purged {len(purged_poison):,} poisoned rules")
-    print(f"	-> Rescued {len(rescued_mappings):,} tags into canonical/prefixed mappings")
+    print(f"    -> Repaired {len(repaired_comma_rows):,} comma-shifted rows")
+    print(f"    -> Purged {len(purged_poison):,} poisoned rules")
+    print(f"    -> Rescued {len(rescued_mappings):,} tags into canonical/prefixed mappings")
 
     if revert_list := getattr(args, "revert", None):
         if not db_config:

@@ -295,7 +295,8 @@ FILENAME_SOURCE_PATTERNS = (
 
 PIXIV_CDN_RE = re.compile(
     r"(?:i|img)\d{0,5}\.(?:pximg|pixiv)\.net/"
-    r"(?:(?:img-original|img\d{1,5})/img/|img/)"
+    r"(?:c/[^/]+/)?"
+    r"(?:(?:img-original|img-master|img\d{1,5})/img/|img/)"
     r"(?:\d{4}/\d{2}/\d{2}/\d{2}/\d{2}/\d{2}/)?"
     r"(?:[^/]+/)?"
     r"(\d+)"
@@ -308,15 +309,21 @@ E621_ID_TAG_RE = re.compile(r"\d+_\(e621\)")
 RATING_ARTIST_TAG_RE = re.compile(r"rating_[a-z_]+_\(artist\)")
 
 
+_ALLOW_LEADING_UNDERSCORE_PREFIXES = (
+    ARTIST_PREFIXES
+    | SERIES_PREFIXES
+    | CORE_PASSTHROUGH_PREFIXES
+    | {"filename", "file_name", "path", "[filename]"}
+)
+
+
 def is_recognized_prefix(tag: str) -> bool:
     """Returns True ONLY if the tag starts with a real namespace prefix (not a colon inside a title)."""
     if ":" not in tag:
         return False
     prefix, val = tag.split(":", 1)
     p_lower = prefix.lstrip("\"'").lower()
-    if p_lower in JUNK_METADATA_PREFIXES or p_lower == "[filename]":
-        return True
-    if val.startswith("_") and p_lower not in RECOGNIZED_PREFIXES:
+    if val.startswith("_") and p_lower not in _ALLOW_LEADING_UNDERSCORE_PREFIXES:
         return False
     return p_lower in RECOGNIZED_PREFIXES
 

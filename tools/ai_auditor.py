@@ -21,13 +21,13 @@ def _init_quarantine_db() -> sqlite3.Connection:
     QUARANTINE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     q_conn = sqlite3.connect(QUARANTINE_DB_PATH)
     q_conn.execute("""
-		CREATE TABLE IF NOT EXISTS ai_tags (
-			image_hash TEXT,
-			tag TEXT,
-			confidence REAL,
-			UNIQUE(image_hash, tag)
-		)
-	""")
+        CREATE TABLE IF NOT EXISTS ai_tags (
+            image_hash TEXT,
+            tag TEXT,
+            confidence REAL,
+            UNIQUE(image_hash, tag)
+        )
+    """)
     q_conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_tags_hash ON ai_tags(image_hash)")
     return q_conn
 
@@ -40,13 +40,19 @@ def _get_image_batches(
     with pg_conn.cursor(name="audit_cursor", withhold=True) as cur:
         cur.execute(
             """
-			SELECT i.id, i.hash, array_agg(t.tag)
-			FROM images i
-			LEFT JOIN image_tags it ON i.id = it.image_id
-			LEFT JOIN tags t ON it.tag_id = t.id
-			WHERE LOWER(i.ext) NOT IN %s
-			GROUP BY i.id, i.hash
-			""",
+            SELECT i.id, i.hash, array_agg(t.tag)
+            FROM images i
+            LEFT JOIN image_tags it ON i.id = it.image_id
+            LEFT JOIN tags t ON it.tag_id = t.id
+            WHERE LOWER(i.ext) NOT IN %s
+                AND NOT EXISTS (
+                SELECT 1
+                FROM image_tags it2
+                JOIN tags t2 ON it2.tag_id = t2.id
+                WHERE it2.image_id = i.id AND t2.tag LIKE 'tagai:%%'
+                )
+            GROUP BY i.id, i.hash
+            """,
             (excluded_exts,),
         )
 
@@ -54,8 +60,7 @@ def _get_image_batches(
             batch_data: dict[str, dict[str, int | set[str]]] = {}
             for img_id, img_hash, tag_list in rows:
                 clean_tags = {t for t in (tag_list or ()) if t is not None}
-                if not any(t.startswith("tagai:") for t in clean_tags):
-                    batch_data[img_hash] = {"id": img_id, "tags": clean_tags}
+                batch_data[img_hash] = {"id": img_id, "tags": clean_tags}
             yield batch_data
 
 
@@ -158,7 +163,9 @@ def _run_audit_pipeline(
 
                 all_tags = {**output.get("character", {}), **output.get("general", {})}
                 raw_db_tags: set[str] = data["tags"]  # type: ignore[assignment]
-                base_db_tags = {t.split(":", 1)[-1] if ":" in t else t for t in raw_db_tags}
+                base_db_tags = {
+                    (t.split(":", 1)[-1] if ":" in t else t).lower() for t in raw_db_tags
+                }
 
                 for tag, confidence in all_tags.items():
                     tag_clean = tag.replace(" ", "_").lower()
@@ -192,14 +199,14 @@ def _run_audit_pipeline(
 
     print("\nRecalculating global tagai:* counts...")
     pg_cur.execute("""
-		UPDATE tags
-		SET count = (
-			SELECT COUNT(image_id)
-			FROM image_tags
-			WHERE tag_id = tags.id
-		)
-		WHERE tag LIKE 'tagai:%'
-	""")
+        UPDATE tags
+        SET count = (
+            SELECT COUNT(image_id)
+            FROM image_tags
+            WHERE tag_id = tags.id
+        )
+        WHERE tag LIKE 'tagai:%'
+    """)
     pg_conn.commit()
     print("\n[✓] Global Audit Complete.")
 

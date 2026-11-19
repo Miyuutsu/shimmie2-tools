@@ -31,58 +31,53 @@ class CurationChangeset:
         )
 
 
-def _fetch_target_images(cur, target_tag: str | None):
-    """Yields image rows in batches using a withhold server-side cursor."""
-    if target_tag:
-        print(f"Fetching image tags from Postgres strictly for batch '{target_tag}'...")
-        cur.execute(
-            """
-			SELECT i.id, i.source, i.rating, array_agg(t.tag)
-			FROM images i
-			JOIN image_tags it ON i.id = it.image_id
-			JOIN tags t ON it.tag_id = t.id
-			WHERE i.id IN (
-				SELECT it2.image_id
-				FROM image_tags it2
-				JOIN tags t2 ON it2.tag_id = t2.id
-				WHERE t2.tag = %s
-			)
-			GROUP BY i.id, i.source, i.rating
-			""",
-            (target_tag,),
-            withhold=True,
-        )
-    else:
-        print("Fetching all images and tags from Postgres...")
-        cur.execute(
-            """
-			SELECT i.id, i.source, i.rating, array_agg(t.tag)
-			FROM images i
-			LEFT JOIN image_tags it ON i.id = it.image_id
-			LEFT JOIN tags t ON it.tag_id = t.id
-			GROUP BY i.id, i.source, i.rating
-			""",
-            withhold=True,
-        )
+def _fetch_target_images(conn, target_tag: str | None):
+    with conn.cursor(name="curate_cursor", withhold=True) as read_cur:
+        if target_tag:
+            print(f"Fetching image tags from Postgres strictly for batch '{target_tag}'...")
+            read_cur.execute(
+                """
+                SELECT i.id, i.source, i.rating, array_agg(t.tag)
+                FROM images i
+                JOIN image_tags it ON i.id = it.image_id
+                JOIN tags t ON it.tag_id = t.id
+                WHERE i.id IN (
+                    SELECT it2.image_id
+                    FROM image_tags it2
+                    JOIN tags t2 ON it2.tag_id = t2.id
+                    WHERE t2.tag = %s
+                )
+                GROUP BY i.id, i.source, i.rating
+                """,
+                (target_tag,),
+            )
+        else:
+            print("Fetching all images and tags from Postgres...")
+            read_cur.execute(
+                """
+                SELECT i.id, i.source, i.rating, array_agg(t.tag)
+                FROM images i
+                LEFT JOIN image_tags it ON i.id = it.image_id
+                LEFT JOIN tags t ON it.tag_id = t.id
+                GROUP BY i.id, i.source, i.rating
+                """
+            )
 
-    while True:
-        batch = cur.fetchmany(5000)
-        if not batch:
-            break
-        yield batch
+        while batch := read_cur.fetchmany(5000):
+            yield batch
 
 
 def _evaluate_curation_changes(
-    cursor,
+    conn,
+    target_tag: str | None,
     merged_map: dict[str, str],
     ctx: TagCurationContext,
     single_tag_cache: dict[str, tuple[str, ...]],
     tag_id_map: dict[str, int],
 ) -> CurationChangeset:
-    """Evaluates all fetched images against curation rules and builds a CurationChangeset."""
     changeset = CurationChangeset()
 
-    for batch in _fetch_target_images(cursor):
+    for batch in _fetch_target_images(conn, target_tag):
         for img_id, current_source, current_rating, raw_tags in tqdm.tqdm(
             batch, desc="Curating Tags", leave=False
         ):
@@ -102,7 +97,7 @@ def _evaluate_curation_changes(
                 if t.lower() in CANONICAL_RATING_TAGS
             ]
             if extracted_ratings:
-                if not (current_rating and current_rating.strip()):
+                if not current_rating or current_rating.strip() in {"", "?"}:
                     best_rating = max(extracted_ratings, key=lambda r: RATING_PRIORITY.get(r, 0))
                     changeset.rating_updates.append((img_id, best_rating))
                 curated_tags = [t for t in curated_tags if t.lower() not in CANONICAL_RATING_TAGS]
@@ -117,7 +112,7 @@ def _evaluate_curation_changes(
                 candidate_urls.add(clean_curr_src)
 
             if candidate_urls:
-                best_url = min(candidate_urls, key=lambda u: (get_source_score(u), u))
+                best_url = min(candidate_urls, key=lambda u: (get_source_score(u), u))[:255]
                 if best_url != clean_curr_src:
                     changeset.source_updates.append((img_id, best_url))
 
@@ -157,12 +152,12 @@ def _apply_curation_updates(
         psycopg2.extras.execute_values(
             cur,
             """
-			UPDATE images AS i
-			SET source = v.new_source
-			FROM (VALUES %s) AS v(id, new_source)
-			WHERE i.id = v.id
+            UPDATE images AS i
+            SET source = v.new_source
+            FROM (VALUES %s) AS v(id, new_source)
+            WHERE i.id = v.id
             AND i.source IS DISTINCT FROM v.new_source
-			""",
+            """,
             changeset.source_updates,
             page_size=10000,
         )
@@ -172,12 +167,12 @@ def _apply_curation_updates(
         psycopg2.extras.execute_values(
             cur,
             """
-			UPDATE images AS i
-			SET rating = v.new_rating
-			FROM (VALUES %s) AS v(id, new_rating)
-			WHERE i.id = v.id
-            AND (i.rating IS NULL OR BTRIM(i.rating) = '')
-			""",
+            UPDATE images AS i
+            SET rating = v.new_rating
+            FROM (VALUES %s) AS v(id, new_rating)
+            WHERE i.id = v.id
+            AND (i.rating IS NULL OR BTRIM(i.rating) IN ('', '?'))
+            """,
             changeset.rating_updates,
             page_size=10000,
         )
@@ -204,10 +199,10 @@ def _apply_curation_updates(
             cur, "INSERT INTO tmp_del VALUES %s", changeset.tags_to_remove, page_size=10000
         )
         cur.execute("""
-			DELETE FROM image_tags
-			USING tmp_del
-			WHERE image_tags.image_id = tmp_del.img_id AND image_tags.tag_id = tmp_del.tag_id
-		""")
+            DELETE FROM image_tags
+            USING tmp_del
+            WHERE image_tags.image_id = tmp_del.img_id AND image_tags.tag_id = tmp_del.tag_id
+        """)
 
     if changeset.tags_to_add:
         print("Applying new tag links...")
@@ -233,17 +228,17 @@ def _apply_curation_updates(
             page_size=10000,
         )
         cur.execute("""
-			WITH new_counts AS (
-				SELECT tat.tag_id, COUNT(it.image_id) AS cnt
-				FROM tmp_affected_tags tat
-				LEFT JOIN image_tags it ON tat.tag_id = it.tag_id
-				GROUP BY tat.tag_id
-			)
-			UPDATE tags AS t
-			SET count = nc.cnt
-			FROM new_counts nc
-			WHERE t.id = nc.tag_id
-		""")
+            WITH new_counts AS (
+                SELECT tat.tag_id, COUNT(it.image_id) AS cnt
+                FROM tmp_affected_tags tat
+                LEFT JOIN image_tags it ON tat.tag_id = it.tag_id
+                GROUP BY tat.tag_id
+            )
+            UPDATE tags AS t
+            SET count = nc.cnt
+            FROM new_counts nc
+            WHERE t.id = nc.tag_id
+        """)
 
     print("Dropping orphaned tags...")
     cur.execute("DELETE FROM tags WHERE count <= 0")
@@ -286,7 +281,14 @@ def curate_existing_tags(args) -> None:
         for tag_name in tag_id_map:
             single_tag_cache[tag_name] = ctx.expand_single_tag(tag_name, merged_map)
 
-        changeset = _evaluate_curation_changes(cur, merged_map, ctx, single_tag_cache, tag_id_map)
+        changeset = _evaluate_curation_changes(
+            conn,
+            getattr(args, "target_tag", None),
+            merged_map,
+            ctx,
+            single_tag_cache,
+            tag_id_map,
+        )
 
         if changeset.is_empty():
             print("\n[✓] All tags are already clean. No changes needed.")

@@ -185,7 +185,8 @@ def _consolidate_and_write_sidecars(
             artist_name = src_path.resolve().parent.name.lower().replace(" ", "_")
             final_tags.append(f"artist:{artist_name}")
 
-        final_tags.extend(f"{tag_prefix}{c}" for c in approved_chars)
+        char_prefix = tag_prefix or "character:"
+        final_tags.extend(f"{char_prefix}{c}" for c in approved_chars)
         final_tags.extend(f"{tag_prefix}{g}" for g in sorted_gens)
 
         sidecar_path = src_path.with_suffix(".txt")

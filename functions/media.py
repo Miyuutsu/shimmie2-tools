@@ -4,6 +4,7 @@ import hashlib
 import json
 import random
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 
 import av
@@ -164,23 +165,34 @@ def extract_video_frames(src_path: Path, max_frames: int = 5) -> list[Image.Imag
         )
 
         if stream.duration and stream.duration > 0:
+            start_pts = stream.start_time or 0
             for pct in pcts:
-                target_pts = int(stream.duration * pct)
-                container.seek(target_pts, stream=stream, backward=True, any_frame=False)
-                for frame in container.decode(stream):
-                    frames.append(frame.to_image())
+                target_pts = start_pts + int(stream.duration * pct)
+                try:
+                    container.seek(target_pts, stream=stream, backward=True, any_frame=False)
+                    for frame in container.decode(stream):
+                        frames.append(frame.to_image())
+                        break
+                except av.AVError:
+                    frames.clear()
                     break
         elif container.duration and container.duration > 0:
+            start_ts = container.start_time or 0
             for pct in pcts:
-                target_ts = int(container.duration * pct)
-                container.seek(target_ts, backward=True, any_frame=False)
-                for frame in container.decode(stream):
-                    frames.append(frame.to_image())
+                target_ts = start_ts + int(container.duration * pct)
+                try:
+                    container.seek(target_ts, backward=True, any_frame=False)
+                    for frame in container.decode(stream):
+                        frames.append(frame.to_image())
+                        break
+                except av.AVError:
+                    frames.clear()
                     break
 
         # Fallback for GIFs / WebMs without seekable duration headers
         if not frames:
-            container.seek(0)
+            with suppress(av.AVError):
+                container.seek(0)
             all_decoded: list[Image.Image] = []
             for idx, frame in enumerate(container.decode(stream)):
                 all_decoded.append(frame.to_image())

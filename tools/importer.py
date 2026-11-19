@@ -72,7 +72,6 @@ def _normalize_ext(suffix: str) -> str:
 
 def _inspect_webp_or_gif(file_path: Path, ext: str) -> tuple[bool, bool, bool, int, int]:
     """Returns (is_image, is_video, is_lossless, width, height) for GIF and WebP files."""
-    is_animated = False
     width, height = 0, 0
     is_lossless = ext == "gif"
 
@@ -87,12 +86,11 @@ def _inspect_webp_or_gif(file_path: Path, ext: str) -> tuple[bool, bool, bool, i
     try:
         with Image.open(file_path) as im:
             width, height = im.size
-            is_animated = bool(getattr(im, "is_animated", False) and getattr(im, "n_frames", 1) > 1)
     except Exception:
         w, h = get_image_resolution(file_path)
         width, height = w or 0, h or 0
 
-    return (not is_animated), is_animated, is_lossless, width, height
+    return True, False, is_lossless, width, height
 
 
 def _inspect_video_container(file_path: Path) -> tuple[int, int, bool, int | None, str | None]:
@@ -327,16 +325,20 @@ def import_items_to_shimmie(
 
         if item.md5 in by_md5:
             prev = by_md5[item.md5]
-            # Merge tags safely without modifying during iteration
-            merged_tags = sorted(set(prev.tags) | set(item.tags))
+            merged_tags = _clean_merged_tags(set(prev.tags), item.tags)
             best_source = prev.source
             if item.source and get_source_score(item.source) < get_source_score(prev.source):
                 best_source = item.source
+            best_rating = (
+                item.rating
+                if prev.rating not in {"s", "q", "e"} and item.rating in {"s", "q", "e"}
+                else prev.rating
+            )
             by_md5[item.md5] = ImportItem(
-                file_path=prev.file_path,  # Keep first file path
+                file_path=prev.file_path,
                 tags=merged_tags,
                 source=best_source,
-                rating=prev.rating,
+                rating=best_rating,
                 thumb_path=prev.thumb_path or item.thumb_path,
                 md5=item.md5,
             )
@@ -356,13 +358,13 @@ def import_items_to_shimmie(
             chunk = all_hashes[idx : idx + 10000]
             cur.execute(
                 """
-				SELECT i.hash, i.id, i.source, i.rating, array_agg(t.tag)
-				FROM images i
-				LEFT JOIN image_tags it ON i.id = it.image_id
-				LEFT JOIN tags t ON it.tag_id = t.id
-				WHERE i.hash = ANY(%s)
-				GROUP BY i.hash, i.id, i.source, i.rating
-				""",
+                SELECT i.hash, i.id, i.source, i.rating, array_agg(t.tag)
+                FROM images i
+                LEFT JOIN image_tags it ON i.id = it.image_id
+                LEFT JOIN tags t ON it.tag_id = t.id
+                WHERE i.hash = ANY(%s)
+                GROUP BY i.hash, i.id, i.source, i.rating
+                """,
                 (chunk,),
             )
             for hsh, img_id, src, rating, tag_arr in cur.fetchall():
@@ -426,14 +428,14 @@ def import_items_to_shimmie(
                 returned = psycopg2.extras.execute_values(
                     cur,
                     """
-					INSERT INTO images (
-						owner_id, owner_ip, filename, filesize, hash, ext, source,
-						width, height, lossless, video, audio, length, mime, image,
-						video_codec, rating
-					) VALUES %s
-					ON CONFLICT (hash) DO NOTHING
-					RETURNING id, hash
-					""",
+                    INSERT INTO images (
+                        owner_id, owner_ip, filename, filesize, hash, ext, source,
+                        width, height, lossless, video, audio, length, mime, image,
+                        video_codec, rating
+                    ) VALUES %s
+                    ON CONFLICT (hash) DO NOTHING
+                    RETURNING id, hash
+                    """,
                     image_insert_rows,
                     page_size=5000,
                     fetch=True,
@@ -562,10 +564,10 @@ def import_items_to_shimmie(
                         cur, "INSERT INTO tmp_merge_del VALUES %s", tags_to_remove, page_size=10000
                     )
                     cur.execute("""
-						DELETE FROM image_tags
-						USING tmp_merge_del
-						WHERE image_tags.image_id = tmp_merge_del.img_id AND image_tags.tag_id = tmp_merge_del.tag_id
-					""")
+                        DELETE FROM image_tags
+                        USING tmp_merge_del
+                        WHERE image_tags.image_id = tmp_merge_del.img_id AND image_tags.tag_id = tmp_merge_del.tag_id
+                    """)
 
                 if tags_to_add:
                     psycopg2.extras.execute_values(
@@ -587,11 +589,11 @@ def import_items_to_shimmie(
                     psycopg2.extras.execute_values(
                         cur,
                         """
-						UPDATE images AS i
-						SET source = v.new_source
-						FROM (VALUES %s) AS v(id, new_source)
-						WHERE i.id = v.id
-						""",
+                        UPDATE images AS i
+                        SET source = v.new_source
+                        FROM (VALUES %s) AS v(id, new_source)
+                        WHERE i.id = v.id
+                        """,
                         merge_source_updates,
                         page_size=5000,
                     )
@@ -606,11 +608,11 @@ def import_items_to_shimmie(
                     psycopg2.extras.execute_values(
                         cur,
                         """
-						UPDATE images AS i
-						SET rating = v.new_rating
-						FROM (VALUES %s) AS v(id, new_rating)
-						WHERE i.id = v.id
-						""",
+                        UPDATE images AS i
+                        SET rating = v.new_rating
+                        FROM (VALUES %s) AS v(id, new_rating)
+                        WHERE i.id = v.id
+                        """,
                         merge_rating_updates,
                         page_size=5000,
                     )
@@ -628,17 +630,17 @@ def import_items_to_shimmie(
                 page_size=10000,
             )
             cur.execute("""
-				WITH new_counts AS (
-					SELECT ttt.tag_id, COUNT(it.image_id) AS cnt
-					FROM tmp_touched_tags ttt
-					LEFT JOIN image_tags it ON ttt.tag_id = it.tag_id
-					GROUP BY ttt.tag_id
-				)
-				UPDATE tags AS t
-				SET count = nc.cnt
-				FROM new_counts nc
-				WHERE t.id = nc.tag_id
-			""")
+                WITH new_counts AS (
+                    SELECT ttt.tag_id, COUNT(it.image_id) AS cnt
+                    FROM tmp_touched_tags ttt
+                    LEFT JOIN image_tags it ON ttt.tag_id = it.tag_id
+                    GROUP BY ttt.tag_id
+                )
+                UPDATE tags AS t
+                SET count = nc.cnt
+                FROM new_counts nc
+                WHERE t.id = nc.tag_id
+            """)
             cur.execute("DELETE FROM tags WHERE count <= 0")
 
         conn.commit()
@@ -658,6 +660,10 @@ def _resolve_csv_item_path(raw_path: str, csv_dir: Path, shimmie_root: Path) -> 
         resolved = base / str(cand).lstrip("/")
         if resolved.is_file():
             return resolved
+    if len(cand.parts) > 1:
+        stripped = csv_dir.joinpath(*cand.parts[1:])
+        if stripped.is_file():
+            return stripped
     return cand
 
 

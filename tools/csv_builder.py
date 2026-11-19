@@ -12,6 +12,7 @@ from PIL import Image
 from functions.common import (
     CACHE_PATH,
     IMAGE_EXTS,
+    ROOT_DIR,
     TAGMAP_DB_PATH,
     VIDEO_EXTS,
     BlacklistConfig,
@@ -349,32 +350,28 @@ def write_skips_log(base_path: str | Path, skips: list[tuple[str, str]]) -> None
 
 def _resolve_batch_metadata(
     batch: list[Path],
-    threads: int,
+    executor: ThreadPoolExecutor,
     existing_hashes: set[str],
     md5_by_file: dict[Path, str],
 ) -> list[ResolutionData]:
     """Resolves post metadata across worker threads for a single batch."""
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        resolver = executor.map(
-            lambda img: resolve_post(
-                img,
-                cache_path=CACHE_PATH,
-                existing_hashes=existing_hashes,
-                precomputed_md5=md5_by_file.get(img),
-            ),
-            batch,
-        )
-        return list(
-            tqdm.tqdm(resolver, total=len(batch), desc="Resolving", position=2, leave=False)
-        )
+    resolver = executor.map(
+        lambda img: resolve_post(
+            img,
+            cache_path=CACHE_PATH,
+            existing_hashes=existing_hashes,
+            precomputed_md5=md5_by_file.get(img),
+        ),
+        batch,
+    )
+    return list(tqdm.tqdm(resolver, total=len(batch), desc="Resolving", position=2, leave=False))
 
 
-def _generate_thumbnails(tasks: list[tuple[Path, Path]], threads: int) -> None:
+def _generate_thumbnails(tasks: list[tuple[Path, Path]], executor: ThreadPoolExecutor) -> None:
     """Generates WebP thumbnails in parallel across worker threads."""
     if not tasks:
         return
-    with ThreadPoolExecutor(max_workers=threads) as imgpro:
-        list(imgpro.map(process_webp, tasks))
+    list(executor.map(process_webp, tasks))
 
 
 def run(args) -> None:
@@ -394,6 +391,8 @@ def run(args) -> None:
     blacklist_cfg: BlacklistConfig | None = None
     if getattr(args, "blacklist", None):
         blacklist_path = Path(args.blacklist)
+        if not blacklist_path.is_file() and args.blacklist == "blacklist.txt":
+            blacklist_path = ROOT_DIR / "blacklist.txt"
         if blacklist_path.is_file() or args.blacklist != "blacklist.txt":
             blacklist_cfg = load_blacklist(blacklist_path)
             print(
@@ -436,28 +435,29 @@ def run(args) -> None:
     existing_thumbs: set[str] = set()
     all_skips: list[tuple[str, str]] = []
 
-    for batch in tqdm.tqdm(batches, desc="Media batches", position=1, leave=False):
-        results = _resolve_batch_metadata(batch, args.threads, existing_hashes, md5_by_file)
-        thumb_tasks: list[tuple[Path, Path]] = []
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for batch in tqdm.tqdm(batches, desc="Media batches", position=1, leave=False):
+            results = _resolve_batch_metadata(batch, executor, existing_hashes, md5_by_file)
+            thumb_tasks: list[tuple[Path, Path]] = []
 
-        for img, res_data in zip(batch, results, strict=True):
-            row, import_item, thumb_key, skip_info = process_image_result(
-                img, res_data, args, mappings, dynamic_mappings, blacklist_cfg
-            )
-            if skip_info:
-                all_skips.append(skip_info)
-            if thumb_key:
-                existing_thumbs.add(thumb_key)
-            if row and import_item:
-                csv_rows.append(row)
-                import_items.append(import_item)
-                if args.thumbnail and not getattr(args, "direct_import", False):
-                    t_src = _get_thumbnail_path(img, args)
-                    if str(t_src) not in existing_thumbs and not t_src.is_file():
-                        thumb_tasks.append((img, t_src))
+            for img, res_data in zip(batch, results, strict=True):
+                row, import_item, thumb_key, skip_info = process_image_result(
+                    img, res_data, args, mappings, dynamic_mappings, blacklist_cfg
+                )
+                if skip_info:
+                    all_skips.append(skip_info)
+                if thumb_key:
+                    existing_thumbs.add(thumb_key)
+                if row and import_item:
+                    csv_rows.append(row)
+                    import_items.append(import_item)
+                    if args.thumbnail and not getattr(args, "direct_import", False):
+                        t_src = _get_thumbnail_path(img, args)
+                        if str(t_src) not in existing_thumbs and not t_src.is_file():
+                            thumb_tasks.append((img, t_src))
 
-        if thumb_tasks:
-            _generate_thumbnails(thumb_tasks, args.threads)
+            if thumb_tasks:
+                _generate_thumbnails(thumb_tasks, args.threads)
 
     out_dir = args.image_path or args.video_path
     if all_skips:

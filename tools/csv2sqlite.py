@@ -49,7 +49,7 @@ def csv_to_sqlite(args) -> None:
             cursor.execute(f"CREATE TABLE IF NOT EXISTS {safe_table} ({create_cols})")
             cursor.executemany(
                 f"INSERT INTO {safe_table} ({insert_cols}) VALUES ({placeholders})",
-                reader,
+                (row for row in reader if row),
             )
 
     print(f"[✓] Converted '{csv_path}' to '{db_path}' in table '{args.table}'.")

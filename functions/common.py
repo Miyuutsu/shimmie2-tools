@@ -17,7 +17,7 @@ QUARANTINE_DB_PATH = DB_DIR / "ai_quarantine_cache.db"
 TAGMAP_DB_PATH = DB_DIR / "tagmap.db"
 TAG_DB_PATH = DB_DIR / "tag_rating_dominant.db"
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
 
 MD5_REGEX = re.compile(r"[a-fA-F0-9]{32}")
@@ -106,11 +106,12 @@ def load_blacklist(blacklist_path: Path) -> BlacklistConfig:
 
 def expand_tags_for_blacklist(tags: Iterable[str]) -> set[str]:
     """Expands a tag iterable with unprefixed and un-qualified stems for blacklist evaluation."""
-    clean_tags = set(tags)
-    for tag in tags:
+    clean_tags: set[str] = set()
+    for raw_tag in tags:
+        tag = raw_tag.lower()
+        clean_tags.add(tag)
         if tag.startswith(("tagai:", "booru:")):
             continue
-        clean_tags.add(tag)
         base_tag = tag.split(":", 1)[1] if ":" in tag else tag
         clean_tags.add(base_tag)
         if "_(" in base_tag and base_tag.endswith(")"):

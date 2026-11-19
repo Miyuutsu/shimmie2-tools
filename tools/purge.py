@@ -8,7 +8,7 @@ import psycopg2
 import psycopg2.extras
 import tqdm
 
-from functions.common import BlacklistConfig, expand_tags_for_blacklist, load_blacklist
+from functions.common import ROOT_DIR, BlacklistConfig, expand_tags_for_blacklist, load_blacklist
 from functions.db_cache import get_shimmie_db_credentials
 
 SAFE_HASH_RE = re.compile(r"^[a-fA-F0-9]{32,64}$")
@@ -56,18 +56,18 @@ def _fetch_suspects(
 
     cur.execute(
         """
-		WITH suspect_images AS (
-			SELECT DISTINCT it.image_id
-			FROM image_tags it
-			WHERE it.tag_id = ANY(%s)
-		)
-		SELECT i.id, i.hash, string_agg(t.tag, ' ') AS all_tags
-		FROM suspect_images s
-		JOIN images i ON s.image_id = i.id
-		JOIN image_tags it ON i.id = it.image_id
-		JOIN tags t ON it.tag_id = t.id
-		GROUP BY i.id, i.hash
-		""",
+        WITH suspect_images AS (
+            SELECT DISTINCT it.image_id
+            FROM image_tags it
+            WHERE it.tag_id = ANY(%s)
+        )
+        SELECT i.id, i.hash, string_agg(t.tag, ' ') AS all_tags
+        FROM suspect_images s
+        JOIN images i ON s.image_id = i.id
+        JOIN image_tags it ON i.id = it.image_id
+        JOIN tags t ON it.tag_id = t.id
+        GROUP BY i.id, i.hash
+        """,
         (list(anchor_tag_ids),),
     )
     return cur.fetchall(), rules_by_anchor
@@ -233,17 +233,17 @@ def _execute_purge(
             page_size=10000,
         )
         cur.execute("""
-			WITH new_counts AS (
-				SELECT tpt.tag_id, COUNT(it.image_id) AS cnt
-				FROM tmp_purged_tags tpt
-				LEFT JOIN image_tags it ON tpt.tag_id = it.tag_id
-				GROUP BY tpt.tag_id
-			)
-			UPDATE tags AS t
-			SET count = nc.cnt
-			FROM new_counts nc
-			WHERE t.id = nc.tag_id
-		""")
+            WITH new_counts AS (
+                SELECT tpt.tag_id, COUNT(it.image_id) AS cnt
+                FROM tmp_purged_tags tpt
+                LEFT JOIN image_tags it ON tpt.tag_id = it.tag_id
+                GROUP BY tpt.tag_id
+            )
+            UPDATE tags AS t
+            SET count = nc.cnt
+            FROM new_counts nc
+            WHERE t.id = nc.tag_id
+        """)
 
     print("  -> Pruning orphaned tags with 0 count...")
     cur.execute("DELETE FROM tags WHERE count <= 0")
@@ -284,8 +284,11 @@ def _execute_purge(
 
 def purge_images(args) -> None:
     """Main CLI entry point for purge."""
+    blacklist_path = Path(args.blacklist)
+    if not blacklist_path.is_file() and args.blacklist == "blacklist.txt":
+        blacklist_path = ROOT_DIR / "blacklist.txt"
     try:
-        blacklist_cfg = load_blacklist(Path(args.blacklist))
+        blacklist_cfg = load_blacklist(blacklist_path)
     except (FileNotFoundError, ValueError) as e:
         print(f"[ERROR] {e}")
         return

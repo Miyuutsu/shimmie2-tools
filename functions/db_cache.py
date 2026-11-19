@@ -66,17 +66,17 @@ def init_posts_cache(cache_path: Path = CACHE_PATH) -> None:
         with sqlite3.connect(resolved) as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("""
-				CREATE TABLE IF NOT EXISTS posts (
-					md5 TEXT PRIMARY KEY,
-					pixel_hash TEXT,
-					rating TEXT,
-					source TEXT,
-					general TEXT,
-					character TEXT,
-					artist TEXT,
-					series TEXT
-				)
-			""")
+                CREATE TABLE IF NOT EXISTS posts (
+                    md5 TEXT PRIMARY KEY,
+                    pixel_hash TEXT,
+                    rating TEXT,
+                    source TEXT,
+                    general TEXT,
+                    character TEXT,
+                    artist TEXT,
+                    series TEXT
+                )
+            """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_pixel_hash ON posts(pixel_hash)")
         _initialized_caches.add(resolved)
 
@@ -94,7 +94,6 @@ def get_cache_conn(cache_path: Path = CACHE_PATH):
     conn = conns.get(resolved)
     if conn is None:
         conn = sqlite3.connect(resolved, timeout=30.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")  # Ensure WAL mode for concurrency
         conn.execute("PRAGMA busy_timeout=5000;")  # 5 second timeout on locked tables
         conns[resolved] = conn
     yield conn
@@ -168,10 +167,10 @@ def add_post_to_cache(
     with get_cache_conn(cache_path) as conn, _cache_write_lock:
         conn.execute(
             """
-			INSERT OR IGNORE INTO posts
-			(md5, pixel_hash, rating, source, general, character, artist, series)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			""",
+            INSERT OR IGNORE INTO posts
+            (md5, pixel_hash, rating, source, general, character, artist, series)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             row,
         )
         conn.commit()
@@ -207,10 +206,10 @@ def save_post_to_cache(
             with _cache_write_lock:
                 cur.execute(
                     """
-					INSERT OR REPLACE INTO posts
-					(md5, pixel_hash, rating, source, general, character, artist, series)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-					""",
+                    INSERT OR REPLACE INTO posts
+                    (md5, pixel_hash, rating, source, general, character, artist, series)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
                     (res_data.md5, res_data.px_hash, *new_data),
                 )
                 conn.commit()
@@ -355,13 +354,13 @@ def _fetch_postgres_tags(
 
             print("  -> Streaming matched tags from Postgres...")
             cur.execute("""
-				SELECT i.hash, array_agg(t.tag)
-				FROM tmp_hashes th
-				JOIN images i ON i.hash = th.hash
-				JOIN image_tags it ON i.id = it.image_id
-				JOIN tags t ON it.tag_id = t.id
-				GROUP BY i.hash;
-			""")
+                SELECT i.hash, array_agg(t.tag)
+                FROM tmp_hashes th
+                JOIN images i ON i.hash = th.hash
+                JOIN image_tags it ON i.id = it.image_id
+                JOIN tags t ON it.tag_id = t.id
+                GROUP BY i.hash;
+            """)
 
             for hsh, tag_list in tqdm.tqdm(
                 cur.fetchall(), desc="Reading Postgres tags", leave=False
@@ -423,14 +422,24 @@ def load_mappings() -> Mappings:
     char_map: dict[str, str] = {}
     with sqlite3.connect(CDB_PATH) as conn:
         for row in conn.execute("SELECT * FROM data"):
-            if len(row) >= 2 and row[0] and row[1] and row[0].strip() and row[1].strip():
-                char_map[row[0].strip()] = row[1].strip()
+            if not row or not row[0] or not row[0].strip():
+                continue
+            c_raw = row[0].strip()
+            s_raw = row[1].strip() if len(row) >= 2 and row[1] else ""
+            char_map[c_raw] = s_raw
+            c_unquoted = c_raw.strip("\"'")
+            if c_unquoted and c_unquoted not in char_map:
+                char_map[c_unquoted] = s_raw
 
     artist_map: dict[str, str] = {}
     with sqlite3.connect(ADB_PATH) as conn:
         for row in conn.execute("SELECT * FROM data"):
-            if len(row) >= 2 and row[0] and row[1] and row[0].strip() and row[1].strip():
-                artist_map[row[0].strip()] = row[1].strip()
+            if not row or not row[0] or not row[0].strip():
+                continue
+            a_raw = row[0].strip()
+            a_fixed = row[1].strip() if len(row) >= 2 and row[1] and row[1].strip() else a_raw
+            artist_map[a_raw] = a_fixed
+            artist_map[a_fixed] = a_fixed
 
     rating_map: dict[str, int] = {}
     with sqlite3.connect(TAG_DB_PATH) as conn:
@@ -507,13 +516,13 @@ def init_tagmap_db(db_path: Path = TAGMAP_DB_PATH) -> None:
 
     with sqlite3.connect(db_path) as conn:
         conn.execute("""
-			CREATE TABLE IF NOT EXISTS tagmap (
-				sidecar_tag TEXT PRIMARY KEY,
-				canonical_tag TEXT NOT NULL,
-				confidence REAL NOT NULL DEFAULT 1.0,
-				sample_size INTEGER NOT NULL DEFAULT 0
-			)
-		""")
+            CREATE TABLE IF NOT EXISTS tagmap (
+                sidecar_tag TEXT PRIMARY KEY,
+                canonical_tag TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                sample_size INTEGER NOT NULL DEFAULT 0
+            )
+        """)
 
     if is_new:
         save_tagmap_entries(SEED_TAGMAP_RULES, db_path)
@@ -595,13 +604,13 @@ def save_tagmap_entries(
     with sqlite3.connect(db_path) as conn:
         conn.executemany(
             """
-			INSERT INTO tagmap (sidecar_tag, canonical_tag, confidence, sample_size)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(sidecar_tag) DO UPDATE SET
-				canonical_tag = excluded.canonical_tag,
-				confidence = excluded.confidence,
-				sample_size = excluded.sample_size
-			""",
+            INSERT INTO tagmap (sidecar_tag, canonical_tag, confidence, sample_size)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(sidecar_tag) DO UPDATE SET
+                canonical_tag = excluded.canonical_tag,
+                confidence = excluded.confidence,
+                sample_size = excluded.sample_size
+            """,
             rows,
         )
     return len(rows)

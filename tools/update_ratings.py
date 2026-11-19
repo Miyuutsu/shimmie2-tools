@@ -9,6 +9,7 @@ import tqdm
 
 from functions.common import TAG_DB_PATH
 from functions.db_cache import get_shimmie_db_credentials
+from functions.source_resolver import is_recognized_prefix
 from functions.tags_curation import rating_from_score
 
 
@@ -38,8 +39,10 @@ def _calculate_new_rating(
         if not tag or tag.startswith(("booru:", "tagai:")):
             continue
 
-        base_tag = (tag.split(":", 1)[-1] if ":" in tag else tag).lower()
-        weight = tag_rating_map.get(base_tag)
+        if is_recognized_prefix(tag):
+            continue
+
+        weight = tag_rating_map.get(tag.lower())
         if weight is None:
             continue
         if weight == 1 and total_score == 0:
@@ -61,34 +64,34 @@ def update_ratings(args) -> None:
 
     with psycopg2.connect(**pg_config) as pg_conn, pg_conn.cursor() as pg_cur:
         print("Fetching images and tags from Postgres...")
-        pg_cur.execute("""
-			SELECT i.id, i.rating, array_agg(t.tag)
-			FROM images i
-			LEFT JOIN image_tags it ON i.id = it.image_id
-			LEFT JOIN tags t ON it.tag_id = t.id
-			GROUP BY i.id, i.rating
-		""")
-        rows = pg_cur.fetchall()
-
         updates: list[tuple[int, str]] = []
-        for image_id, current_rating, tags in tqdm.tqdm(
-            rows, desc="Evaluating Ratings", leave=False
-        ):
-            new_rating = _calculate_new_rating(
-                tags or (), current_rating, tag_rating_map, args.smax, args.qmax
-            )
-            if new_rating != current_rating:
-                updates.append((image_id, new_rating))
+        with pg_conn.cursor(name="ratings_cursor", withhold=True) as read_cur:
+            read_cur.execute("""
+                SELECT i.id, i.rating, array_agg(t.tag)
+                FROM images i
+                LEFT JOIN image_tags it ON i.id = it.image_id
+                LEFT JOIN tags t ON it.tag_id = t.id
+                GROUP BY i.id, i.rating
+            """)
+            while batch := read_cur.fetchmany(5000):
+                for image_id, current_rating, tags in tqdm.tqdm(
+                    batch, desc="Evaluating Ratings", leave=False
+                ):
+                    new_rating = _calculate_new_rating(
+                        tags or (), current_rating, tag_rating_map, args.smax, args.qmax
+                    )
+                    if new_rating != current_rating:
+                        updates.append((image_id, new_rating))
 
         if updates:
             psycopg2.extras.execute_values(
                 pg_cur,
                 """
-				UPDATE images AS i
-				SET rating = v.new_rating
-				FROM (VALUES %s) AS v(id, new_rating)
-				WHERE i.id = v.id
-				""",
+                UPDATE images AS i
+                SET rating = v.new_rating
+                FROM (VALUES %s) AS v(id, new_rating)
+                WHERE i.id = v.id
+                """,
                 updates,
                 page_size=10000,
             )
