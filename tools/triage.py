@@ -282,6 +282,69 @@ class TriageVerdict:
     raw_ratings: dict[str, float] = field(default_factory=dict)
     import_tags: list[str] = field(default_factory=list)
 
+ALL_SIGLIP_KEYS = (
+    set(SIGLIP_KEEP_PROMPTS) | set(SIGLIP_COMIC_PROMPTS) | set(SIGLIP_FLUFF_PROMPTS)
+)
+
+
+@dataclass(slots=True)
+class CachedTriageData:
+    """Cached SigLIP scores, EVA02 raw tags, and import tags parsed from a '# Verdict:' sidecar."""
+
+    siglip_scores: dict[str, float] = field(default_factory=dict)
+    raw_char_tags: dict[str, float] = field(default_factory=dict)
+    raw_gen_tags: dict[str, float] = field(default_factory=dict)
+    raw_ratings: dict[str, float] = field(default_factory=dict)
+    import_tags: list[str] = field(default_factory=list)
+
+
+def _parse_triage_sidecar(media_path: Path) -> CachedTriageData | None:
+    """Parses cached SigLIP and EVA02 scores from an existing '# Verdict:' .txt sidecar."""
+    txt_path = media_path.with_suffix(".txt")
+    if not txt_path.is_file() or not _is_triage_sidecar(txt_path):
+        return None
+
+    data = CachedTriageData()
+    try:
+        lines = txt_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("# SigLIP:"):
+            parsed: dict[str, float] = {}
+            for tok in line[len("# SigLIP:") :].split(","):
+                if "=" not in tok:
+                    continue
+                k, v_str = tok.rsplit("=", 1)
+                with suppress(ValueError):
+                    parsed[k.strip()] = float(v_str.strip())
+            if ALL_SIGLIP_KEYS.issubset(parsed):
+                data.siglip_scores = parsed
+        elif line.startswith("# Full Tags:"):
+            for tok in line[len("# Full Tags:") :].split(","):
+                if "=" not in tok:
+                    continue
+                k, v_str = tok.rsplit("=", 1)
+                k = k.strip()
+                try:
+                    val = float(v_str.strip())
+                except ValueError:
+                    continue
+                if k.startswith("rating:"):
+                    data.raw_ratings[k[7:]] = val
+                elif k.startswith("char:"):
+                    data.raw_char_tags[k[5:]] = val
+                else:
+                    data.raw_gen_tags[k] = val
+        elif not line.startswith("#"):
+            data.import_tags.extend(t.strip() for t in line.split(",") if t.strip())
+
+    return data
+
 
 def _safe_rel_path(file_path: Path, base_dir: Path) -> Path:
     """Computes relative path safely even if intermediate directories or files are symlinks."""
@@ -300,8 +363,17 @@ def _is_triage_sidecar(txt_path: Path) -> bool:
         return False
 
 
-def _reset_triage_state(base_dir: Path, fluff_dir: Path, comic_dir: Path) -> tuple[int, int]:
-    """Restores moved media from fluff_dir/comic_dir back to base_dir and deletes only '# Verdict:' sidecars."""
+def _reset_triage_state(
+    base_dir: Path,
+    fluff_dir: Path,
+    comic_dir: Path,
+    delete_triage_sidecars: bool = True,
+) -> tuple[int, int]:
+    """Restores moved media from fluff_dir/comic_dir back to base_dir.
+
+    When delete_triage_sidecars is False, '# Verdict:' sidecars are moved back and preserved
+    so --retriage can re-evaluate rules without re-running GPU inference.
+    """
     allowed_exts = IMAGE_EXTS | VIDEO_EXTS
     restored_files = 0
     removed_sidecars = 0
@@ -321,7 +393,7 @@ def _reset_triage_state(base_dir: Path, fluff_dir: Path, comic_dir: Path) -> tup
 
             for cand_txt in (f.with_suffix(".txt"), f.with_name(f"{f.name}.txt")):
                 if cand_txt.is_file():
-                    if _is_triage_sidecar(cand_txt):
+                    if delete_triage_sidecars and _is_triage_sidecar(cand_txt):
                         cand_txt.unlink()
                         removed_sidecars += 1
                     else:
@@ -337,10 +409,11 @@ def _reset_triage_state(base_dir: Path, fluff_dir: Path, comic_dir: Path) -> tup
         with suppress(OSError):
             side_dir.rmdir()
 
-    for txt_file in base_dir.rglob("*.txt"):
-        if txt_file.is_file() and _is_triage_sidecar(txt_file):
-            txt_file.unlink()
-            removed_sidecars += 1
+    if delete_triage_sidecars:
+        for txt_file in base_dir.rglob("*.txt"):
+            if txt_file.is_file() and _is_triage_sidecar(txt_file):
+                txt_file.unlink()
+                removed_sidecars += 1
 
     return restored_files, removed_sidecars
 
@@ -375,8 +448,9 @@ def _collect_candidate_files(
     allowed_exts: set[str],
     fluff_dir: Path,
     comic_dir: Path,
+    include_triage_sidecars: bool = False,
 ) -> list[Path]:
-    """Finds all valid media files missing a .txt sidecar, excluding thumbnails, fluff_dir, and comic_dir."""
+    """Finds valid media files missing a non-triage .txt sidecar (optionally including '# Verdict:' files)."""
     if not target_dir or not target_dir.is_dir():
         return []
 
@@ -390,8 +464,15 @@ def _collect_candidate_files(
         resolved = f.resolve()
         if resolved.is_relative_to(res_fluff) or resolved.is_relative_to(res_comic):
             continue
-        if f.with_suffix(".txt").exists() or f.with_name(f"{f.name}.txt").exists():
+
+        stem_txt = f.with_suffix(".txt")
+        full_txt = f.with_name(f"{f.name}.txt")
+        if stem_txt.exists():
+            if not (include_triage_sidecars and _is_triage_sidecar(stem_txt)):
+                continue
+        elif full_txt.exists():
             continue
+
         candidates.append(f)
 
     return sorted(candidates)
@@ -455,8 +536,8 @@ def _evaluate_stage2_file(
     min_size: int,
     max_ratio: float,
     reso_fluff: set[tuple[int, int]],
-) -> TriageVerdict | None:
-    """Single-open header inspection for resolution, aspect ratio, and physical camera EXIF."""
+) -> tuple[TriageVerdict | None, float]:
+    """Single-open header inspection returning (fluff_verdict_or_None, aspect_ratio)."""
     is_video = file_path.suffix.lower() in VIDEO_EXTS
     camera_info: str | None = None
 
@@ -472,43 +553,59 @@ def _evaluate_stage2_file(
             width, height = get_image_resolution(file_path)
 
     if not width or not height:
-        return TriageVerdict(file_path, "FLUFF", "Stage 2 (Geometry)", "corrupt_or_unreadable")
+        return (
+            TriageVerdict(file_path, "FLUFF", "Stage 2 (Geometry)", "corrupt_or_unreadable"),
+            1.0,
+        )
+
+    w_over_h = width / height
 
     if any(abs(width - rw) <= 2 and abs(height - rh) <= 2 for rw, rh in reso_fluff):
-        return TriageVerdict(
-            file_path, "FLUFF", "Stage 2 (Resolution)", f"matched_reso_fluff ({width}x{height})"
+        return (
+            TriageVerdict(
+                file_path, "FLUFF", "Stage 2 (Resolution)", f"matched_reso_fluff ({width}x{height})"
+            ),
+            w_over_h,
         )
 
     shortest = min(width, height)
     longest = max(width, height)
     ratio = longest / shortest
-    w_over_h = width / height
 
     if shortest < min_size:
-        return TriageVerdict(
-            file_path,
-            "FLUFF",
-            "Stage 2 (Geometry)",
-            f"small_dimensions ({width}x{height}, shortest={shortest}px < {min_size}px)",
+        return (
+            TriageVerdict(
+                file_path,
+                "FLUFF",
+                "Stage 2 (Geometry)",
+                f"small_dimensions ({width}x{height}, shortest={shortest}px < {min_size}px)",
+            ),
+            w_over_h,
         )
 
     if ratio > max_ratio or w_over_h >= 2.65:
-        return TriageVerdict(
-            file_path,
-            "FLUFF",
-            "Stage 2 (Geometry)",
-            f"banner_or_extreme_aspect_ratio ({width}x{height}, w/h={w_over_h:.2f})",
+        return (
+            TriageVerdict(
+                file_path,
+                "FLUFF",
+                "Stage 2 (Geometry)",
+                f"banner_or_extreme_aspect_ratio ({width}x{height}, w/h={w_over_h:.2f})",
+            ),
+            w_over_h,
         )
 
     if camera_info:
-        return TriageVerdict(
-            file_path,
-            "FLUFF",
-            "Stage 2 (EXIF)",
-            f"camera_exif_detected ({camera_info})",
+        return (
+            TriageVerdict(
+                file_path,
+                "FLUFF",
+                "Stage 2 (EXIF)",
+                f"camera_exif_detected ({camera_info})",
+            ),
+            w_over_h,
         )
 
-    return None
+    return None, w_over_h
 
 
 def _pil_ensure_rgb_448(image: Image.Image) -> Image.Image:
@@ -1189,6 +1286,11 @@ def _route_file_and_sidecar(
     dst_path = dest_root / rel_path
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src_path), str(dst_path))
+
+    old_sidecar = src_path.with_suffix(".txt")
+    if old_sidecar.is_file() and _is_triage_sidecar(old_sidecar):
+        old_sidecar.unlink()
+
     _write_unified_sidecar(dst_path, verdict)
 
 
@@ -1252,13 +1354,28 @@ def run_triage(args) -> None:
         else base_dir.with_name(f"{base_dir.name}-comic")
     )
 
-    if getattr(args, "reset", False) or getattr(args, "retriage", False):
-        print("[*] Resetting previous triage state (preserving pre-existing sidecars)...")
-        restored, removed_txt = _reset_triage_state(base_dir, fluff_dir, comic_dir)
+    is_full_reset = bool(getattr(args, "full_reset", False))
+    is_full_retriage = bool(getattr(args, "full_retriage", False))
+    is_soft_reset = bool(getattr(args, "reset", False))
+    is_fast_retriage = bool(getattr(args, "retriage", False))
+
+    if is_full_reset or is_full_retriage:
+        print("[*] Full reset: restoring moved files and deleting '# Verdict:' sidecars...")
+        restored, removed_txt = _reset_triage_state(
+            base_dir, fluff_dir, comic_dir, delete_triage_sidecars=True
+        )
         print(
             f"  -> Restored {restored:,} moved files and removed {removed_txt:,} triage (# Verdict:) sidecars.\n"
         )
-        if getattr(args, "reset", False):
+        if is_full_reset:
+            return
+    elif is_soft_reset or is_fast_retriage:
+        print("[*] Soft reset: restoring moved files while retaining '# Verdict:' sidecars...")
+        restored, _ = _reset_triage_state(
+            base_dir, fluff_dir, comic_dir, delete_triage_sidecars=False
+        )
+        print(f"  -> Restored {restored:,} moved files (triage sidecars retained).\n")
+        if is_soft_reset:
             return
 
     protected_thumbs: set[str] = set()
@@ -1267,7 +1384,13 @@ def run_triage(args) -> None:
 
     reso_fluff = _parse_reso_fluff(getattr(args, "reso_fluff", ""))
 
-    candidates = _collect_candidate_files(base_dir, IMAGE_EXTS | VIDEO_EXTS, fluff_dir, comic_dir)
+    candidates = _collect_candidate_files(
+        base_dir,
+        IMAGE_EXTS | VIDEO_EXTS,
+        fluff_dir,
+        comic_dir,
+        include_triage_sidecars=is_fast_retriage,
+    )
     if not candidates:
         print("[✓] No untagged candidate media files found to triage.")
         return
@@ -1276,6 +1399,8 @@ def run_triage(args) -> None:
     print(f"📁  Source Path:      {base_dir}")
     print(f"📚  Comic Side-Dir:   {comic_dir}")
     print(f"🗑️  Fluff Side-Dir:   {fluff_dir}")
+    if is_fast_retriage:
+        print("⚡  Mode:             Fast Retriage (re-evaluating cached sidecar scores)")
     if protected_thumbs:
         print(f"🛡️  Protected Thumbs: {len(protected_thumbs):,} thumbnail_only preview(s)")
     if reso_fluff:
@@ -1286,6 +1411,7 @@ def run_triage(args) -> None:
 
     all_verdicts: list[TriageVerdict] = []
     kept_stage1 = 0
+    cached_reused = 0
 
     try:
         # --- Stage 1: Fast Bulk MD5-Only Lookup (Zero Image Decoding) ---
@@ -1326,26 +1452,78 @@ def run_triage(args) -> None:
                 s2_iter = pool.map(
                     lambda f: (
                         f,
-                        _evaluate_stage2_file(f, args.min_size, args.max_ratio, reso_fluff),
+                        *_evaluate_stage2_file(f, args.min_size, args.max_ratio, reso_fluff),
                     ),
                     stage2_candidates,
                 )
-                for f_path, verdict in tqdm.tqdm(
+                for f_path, verdict, aspect_ratio in tqdm.tqdm(
                     s2_iter, total=len(stage2_candidates), desc="Pre-filtering", leave=False
                 ):
+                    is_protected = os.path.abspath(f_path) in protected_thumbs
                     if verdict is not None and (
                         verdict.reason == "corrupt_or_unreadable"
-                        or os.path.abspath(f_path) not in protected_thumbs
+                        or verdict.stage in {"Stage 2 (Resolution)", "Stage 2 (EXIF)"}
+                        or not is_protected
                     ):
                         all_verdicts.append(verdict)
                         if not args.dry_run:
                             _route_file_and_sidecar(verdict, base_dir, fluff_dir, comic_dir)
-                    else:
-                        stage3_candidates.append(f_path)
+                        continue
 
-            s2_rejected = len(stage2_candidates) - len(stage3_candidates)
+                    # Fast retriage: re-evaluate cached SigLIP + EVA02 sidecar scores on CPU
+                    if is_fast_retriage and (cached := _parse_triage_sidecar(f_path)):
+                        if cached.siglip_scores:
+                            fluff_v, sorted_sig = _check_stage3a_siglip_fluff(
+                                f_path, [cached.siglip_scores]
+                            )
+                            if fluff_v is not None and not is_protected:
+                                all_verdicts.append(fluff_v)
+                                if not args.dry_run:
+                                    _route_file_and_sidecar(fluff_v, base_dir, fluff_dir, comic_dir)
+                                cached_reused += 1
+                                continue
+
+                            has_eva = bool(
+                                cached.raw_gen_tags or cached.raw_char_tags or cached.raw_ratings
+                            )
+                            if has_eva:
+                                cached_v = _classify_stage3b_verdict(
+                                    f_path,
+                                    sorted_sig,
+                                    cached.raw_char_tags,
+                                    cached.raw_gen_tags,
+                                    cached.raw_ratings,
+                                    cached.import_tags,
+                                    args.gen_threshold,
+                                    aspect_ratio=aspect_ratio,
+                                )
+                                if cached_v.category == "FLUFF" and is_protected:
+                                    cached_v = TriageVerdict(
+                                        f_path,
+                                        "KEEP",
+                                        "Stage 3B (Protected Thumb)",
+                                        f"protected_thumb (bypassed: {cached_v.stage} - {cached_v.reason})",
+                                        cached_v.siglip_scores,
+                                        cached_v.raw_char_tags,
+                                        cached_v.raw_gen_tags,
+                                        cached_v.raw_ratings,
+                                        cached_v.import_tags,
+                                    )
+                                all_verdicts.append(cached_v)
+                                if not args.dry_run:
+                                    _route_file_and_sidecar(
+                                        cached_v, base_dir, fluff_dir, comic_dir
+                                    )
+                                cached_reused += 1
+                                continue
+
+                    stage3_candidates.append(f_path)
+
+            s2_rejected = len(stage2_candidates) - len(stage3_candidates) - cached_reused
             print(
-                f"  -> Stage 2 complete: {s2_rejected:,} files routed to fluff, {len(stage3_candidates):,} files advancing to Stage 3."
+                f"  -> Stage 2 complete: {s2_rejected:,} routed to fluff, "
+                f"{cached_reused:,} re-evaluated from cached sidecars, "
+                f"{len(stage3_candidates):,} advancing to GPU Stage 3."
             )
 
         # --- Stage 3: Cascaded SigLIP (3A) -> EVA02 (3B) ---

@@ -598,12 +598,22 @@ def _add_triage_parser(subparsers) -> None:
     parser.add_argument(
         "--reset",
         action="store_true",
-        help="Restore files from -fluff/-comic and delete only triage (# Verdict:) sidecars, then exit",
+        help="Restore files from -fluff/-comic while retaining triage (# Verdict:) sidecars, then exit",
     )
     parser.add_argument(
         "--retriage",
         action="store_true",
-        help="Restore files from -fluff/-comic, clear triage (# Verdict:) sidecars, and re-run triage",
+        help="Restore files and re-run triage rules using cached sidecar scores (GPU only for uncached files)",
+    )
+    parser.add_argument(
+        "--full-reset",
+        action="store_true",
+        help="Restore files from -fluff/-comic and delete all triage (# Verdict:) sidecars, then exit",
+    )
+    parser.add_argument(
+        "--full-retriage",
+        action="store_true",
+        help="Restore files, delete all triage (# Verdict:) sidecars, and re-run full GPU inference",
     )
     parser.add_argument(
         "--protect-thumbs",
