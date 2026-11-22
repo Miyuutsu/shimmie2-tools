@@ -148,7 +148,6 @@ EVA_HARD_FLUFF_TAGS = {
     "text_focus",
     "calendar",
     "chart",
-    "figure",
     "action_figure",
     "merchandise",
     "acrylic_stand",
@@ -203,6 +202,24 @@ TEXT_LANG_TAGS = {
     "chinese_text",
     "korean_text",
 }
+
+PROTECTED_RESOS = (
+    (1280, 720),
+    (1600, 900),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+    (1200, 900),
+)
+PROTECTED_VARIANCE = 0.10
+
+
+def _hits_protected_reso(w: int, h: int) -> tuple[int, int] | None:
+    """Returns the protected (pw, ph) if (w, h) falls within ±10% of a protected standard resolution."""
+    for pw, ph in PROTECTED_RESOS:
+        if abs(w - pw) <= pw * PROTECTED_VARIANCE and abs(h - ph) <= ph * PROTECTED_VARIANCE:
+            return (pw, ph)
+    return None
 
 # ==========================================
 # SigLIP Zero-Shot Semantic Prompts
@@ -320,6 +337,12 @@ def _parse_reso_fluff(raw_spec: str | None) -> set[tuple[int, int]]:
         w_str, h_str = clean.split("x", 1)
         try:
             w, h = int(w_str.strip()), int(h_str.strip())
+            if prot := _hits_protected_reso(w, h):
+                print(
+                    f"[WARNING] Ignoring --reso-fluff entry {w}x{h}: "
+                    f"within ±{int(PROTECTED_VARIANCE * 100)}% of protected resolution {prot[0]}x{prot[1]}."
+                )
+                continue
             if w > 0 and h > 0:
                 res_set.add((w, h))
         except ValueError:
@@ -431,7 +454,10 @@ def _evaluate_stage2_file(
     if not width or not height:
         return TriageVerdict(file_path, "FLUFF", "Stage 2 (Geometry)", "corrupt_or_unreadable")
 
-    if (width, height) in reso_fluff:
+    if any(
+        abs(width - rw) <= 2 and abs(height - rh) <= 2
+        for rw, rh in reso_fluff
+    ):
         return TriageVerdict(
             file_path, "FLUFF", "Stage 2 (Resolution)", f"matched_reso_fluff ({width}x{height})"
         )
@@ -662,11 +688,15 @@ def _check_stage3a_siglip_fluff(
 
     # Only short-circuit in Stage 3A when fluff probability mass is high (>= 0.65) and beats keep & comic;
     # borderline cases advance to Stage 3B so EVA02 can inspect exact tags.
+    irl_is_borderline = (
+        best_fluff_key == "irl_photo" and best_fluff_val < 0.85 and keep_sum >= 0.12
+    )
     if (
         fluff_sum >= 0.65
         and best_fluff_val > best_keep_val
         and best_fluff_val > best_comic_val
         and best_fluff_key != "doll_or_figurine"
+        and not irl_is_borderline
     ):
         return (
             TriageVerdict(
@@ -769,6 +799,7 @@ def _classify_stage3b_verdict(
     raw_ratings: dict[str, float],
     import_tags: list[str],
     gen_threshold: float,
+    aspect_ratio: float = 1.0,
 ) -> TriageVerdict:
     """Applies EVA02 + SigLIP rules on Stage 3A survivors to classify KEEP, COMIC, or FLUFF."""
     best_keep_key = max(SIGLIP_KEEP_PROMPTS, key=lambda k: sorted_siglip[k])
@@ -838,6 +869,38 @@ def _classify_stage3b_verdict(
             "FLUFF",
             "Stage 3B (EVA02)",
             f"eva_fluff_tag ({fluff_tag}={fluff_conf:.2f})",
+            sorted_siglip,
+            raw_chars,
+            raw_gens,
+            raw_ratings,
+            import_tags,
+        )
+
+    fig_conf = raw_gens.get("figure", 0.0)
+    is_censored_cg = (
+        raw_gens.get("bar_censor", 0.0) >= 0.35
+        or raw_gens.get("mosaic_censoring", 0.0) >= 0.35
+        or raw_gens.get("censored", 0.0) >= 0.50
+    )
+    has_photo_signal = (
+        raw_gens.get("photo_(medium)", 0.0) >= 0.15
+        or raw_gens.get("real_life", 0.0) >= 0.15
+        or raw_gens.get("cosplay", 0.0) >= 0.30
+    )
+    if (
+        not is_censored_cg
+        and fig_conf >= 0.30
+        and (
+            fig_conf >= 0.80
+            or has_photo_signal
+            or sorted_siglip.get("doll_or_figurine", 0.0) >= 0.35
+        )
+    ):
+        return TriageVerdict(
+            src_path,
+            "FLUFF",
+            "Stage 3B (EVA02)",
+            f"eva_figure_fluff (figure={fig_conf:.2f}, doll={sorted_siglip.get('doll_or_figurine', 0.0):.2f})",
             sorted_siglip,
             raw_chars,
             raw_gens,
@@ -957,10 +1020,44 @@ def _classify_stage3b_verdict(
             import_tags,
         )
 
-    # 6. SigLIP Combined Fluff vs Keep Balance (for borderline cases that passed Stage 3A)
     if (
-        fluff_sum >= keep_sum * 0.85 or best_fluff_val > best_keep_val
-    ) and best_fluff_key != "doll_or_figurine":
+        aspect_ratio >= 1.80
+        and raw_gens.get("portrait", 0.0) >= 0.55
+        and body_framing_conf < 0.20
+        and (
+            raw_gens.get("simple_background", 0.0) >= 0.50
+            or raw_gens.get("close-up", 0.0) >= 0.20
+        )
+    ):
+        return TriageVerdict(
+            src_path,
+            "FLUFF",
+            "Stage 3B (Crop)",
+            f"wide_header_face_crop (w/h={aspect_ratio:.2f}, portrait={raw_gens.get('portrait', 0.0):.2f})",
+            sorted_siglip,
+            raw_chars,
+            raw_gens,
+            raw_ratings,
+            import_tags,
+        )
+
+    subject_conf = max((raw_gens.get(t, 0.0) for t in CORE_SUBJECT_TAGS), default=0.0)
+    confident_gen_count = sum(1 for v in raw_gens.values() if v >= gen_threshold)
+
+    # 6. SigLIP Combined Fluff vs Keep Balance (for borderline cases that passed Stage 3A)
+    is_strong_cg_override = (
+        best_fluff_key == "irl_photo"
+        and best_fluff_val < 0.85
+        and not has_photo_signal
+        and subject_conf >= 0.80
+        and confident_gen_count >= 12
+        and keep_sum >= 0.20
+    )
+    if (
+        (fluff_sum >= keep_sum * 0.85 or best_fluff_val > best_keep_val)
+        and best_fluff_key != "doll_or_figurine"
+        and not is_strong_cg_override
+    ):
         return TriageVerdict(
             src_path,
             "FLUFF",
@@ -974,8 +1071,6 @@ def _classify_stage3b_verdict(
         )
 
     # 7. Strict Minimum Booru Subject & Feature Density Gate
-    subject_conf = max((raw_gens.get(t, 0.0) for t in CORE_SUBJECT_TAGS), default=0.0)
-    confident_gen_count = sum(1 for v in raw_gens.values() if v >= gen_threshold)
     no_humans_conf = raw_gens.get("no_humans", 0.0)
 
     if (
@@ -1271,18 +1366,22 @@ def run_triage(args) -> None:
                         pool.map(lambda item: _prep_eva_pad_uint8(item[1]), eva_survivors)
                     )
                     eva_flat_arrays: list[np.ndarray] = []
-                    eva_slices: list[tuple[Path, dict[str, float], int, int]] = []
+                    eva_slices: list[tuple[Path, dict[str, float], float, int, int]] = []
 
-                    for (f_path, _, sorted_siglip), pad_arrays in zip(
+                    for (f_path, pil_frames, sorted_siglip), pad_arrays in zip(
                         eva_survivors, eva_padded_lists, strict=True
                     ):
+                        fw, fh = pil_frames[0].size
+                        aspect_ratio = fw / fh if fh > 0 else 1.0
                         e_start = len(eva_flat_arrays)
                         eva_flat_arrays.extend(pad_arrays)
-                        eva_slices.append((f_path, sorted_siglip, e_start, len(eva_flat_arrays)))
+                        eva_slices.append(
+                            (f_path, sorted_siglip, aspect_ratio, e_start, len(eva_flat_arrays))
+                        )
 
                     eva_probs_list = engine.infer_eva02(eva_flat_arrays, args.batch)
 
-                    for f_path, sorted_siglip, e_start, e_end in eva_slices:
+                    for f_path, sorted_siglip, aspect_ratio, e_start, e_end in eva_slices:
                         f_tag_probs = eva_probs_list[e_start:e_end]
                         import_tags, raw_chars, raw_gens, raw_ratings = (
                             _build_import_tags_and_raw_maps(
@@ -1304,6 +1403,7 @@ def run_triage(args) -> None:
                             raw_ratings,
                             import_tags,
                             args.gen_threshold,
+                            aspect_ratio=aspect_ratio,
                         )
                         all_verdicts.append(verdict)
                         if not args.dry_run:
