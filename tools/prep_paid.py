@@ -7,6 +7,9 @@ import shlex
 import shutil
 import sqlite3
 import stat
+import subprocess
+import tarfile
+import zipfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,8 +29,22 @@ from functions.common import (
 from functions.db_cache import load_mappings
 
 MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
-ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".cbz", ".cbr"}
+ARCHIVE_EXTS = {
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".tgz",
+    ".tbz2",
+    ".txz",
+    ".cbz",
+    ".cbr",
+}
 KNOWN_PLATFORMS = {"fanbox", "fantia", "patreon", "gumroad", "subscribestar", "boosty", "pixiv"}
+_SEVEN_ZIP_BIN = shutil.which("7z") or shutil.which("7zz")
 
 ARTIST_ID_SUFFIX_RE = re.compile(r"^(?P<name>.+?)(?:[\s_]+)\((?P<cid>\d+)\)$")
 POST_DIR_ID_RE = re.compile(r"^(\d{4,12})(?:[_\s-]|$)")
@@ -83,7 +100,7 @@ class PostGroup:
 
 @dataclass(slots=True)
 class StagedRecord:
-    """Represents one staged media file recorded in timeline_index.db."""
+    """Represents one staged media file recorded in timeline_index.db and staging_state.db."""
 
     md5: str
     original_path: str
@@ -178,6 +195,23 @@ def init_staging_state_db(db_path: Path = STAGING_STATE_DB_PATH) -> None:
                 PRIMARY KEY (staging_dir, original_path)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS empty_posts (
+                post_dir TEXT PRIMARY KEY,
+                staging_dir TEXT NOT NULL,
+                unit_path TEXT NOT NULL,
+                artist TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                post_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                expected_media INTEGER NOT NULL DEFAULT 0,
+                archives_count INTEGER NOT NULL DEFAULT 0,
+                source_url TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_empty_posts_staging ON empty_posts(staging_dir, status)"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_dir ON staged_files(staging_dir)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_unit ON staged_files(unit_path)")
 
@@ -268,7 +302,6 @@ def _parse_kemono_metadata(data: dict[str, Any]) -> ParsedPostMeta:
     if isinstance(data.get("attachments"), list):
         raw_entries.extend(a for a in data["attachments"] if isinstance(a, dict))
 
-    idx = 0
     ext_aliases = {".jpe": ".jpg", ".jfif": ".jpg"}
     idx = 0
     for entry in raw_entries:
@@ -744,40 +777,153 @@ def _build_source_url(group: PostGroup) -> str:
     return ""
 
 
+def _inspect_with_7z(arc: Path) -> tuple[bool, bool]:
+    """Lists .7z/.rar/.cbr entries via 7z/7zz without extracting or prompting for passwords."""
+    if not _SEVEN_ZIP_BIN:
+        return True, False
+    try:
+        proc = subprocess.run(
+            [_SEVEN_ZIP_BIN, "l", "-slt", "-p-", "--", str(arc)],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True, False
+
+    combined = f"{proc.stdout}\n{proc.stderr}".lower()
+    if proc.returncode != 0:
+        is_enc = "wrong password" in combined or "encrypted" in combined
+        return True, is_enc
+
+    cur_is_media = False
+    has_media = False
+    is_encrypted = False
+    for line in proc.stdout.splitlines():
+        if line.startswith("Path = "):
+            entry_path = line[7:].strip().lower()
+            ext = os.path.splitext(entry_path)[1]
+            cur_is_media = ext in MEDIA_EXTS or ext in ARCHIVE_EXTS
+            if cur_is_media:
+                has_media = True
+        elif line.startswith("Encrypted = +") and cur_is_media:
+            is_encrypted = True
+
+    return has_media, is_encrypted
+
+
+def _archives_may_contain_media(archives: list[Path]) -> tuple[bool, bool]:
+    """Returns (may_contain_media, has_encrypted). Peeks inside zip, tar, and (with 7z) 7z/rar."""
+    if not archives:
+        return False, False
+
+    for arc in archives:
+        suffix = arc.suffix.lower()
+
+        if suffix in {".zip", ".cbz"}:
+            try:
+                with zipfile.ZipFile(arc) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        ext = os.path.splitext(info.filename.lower())[1]
+                        if ext in MEDIA_EXTS or ext in ARCHIVE_EXTS:
+                            return True, bool(info.flag_bits & 0x1)
+            except (OSError, zipfile.BadZipFile):
+                return True, False
+            continue
+
+        if suffix in {".tar", ".tgz", ".tbz2", ".txz"} or tarfile.is_tarfile(arc):
+            try:
+                with tarfile.open(arc, "r:*") as tf:
+                    for member in tf.getmembers():
+                        if not member.isfile():
+                            continue
+                        ext = os.path.splitext(member.name.lower())[1]
+                        if ext in MEDIA_EXTS or ext in ARCHIVE_EXTS:
+                            return True, False
+            except (OSError, tarfile.TarError):
+                return True, False
+            continue
+
+        if suffix in {".7z", ".rar", ".cbr"}:
+            has_media, is_enc = _inspect_with_7z(arc)
+            if has_media:
+                return True, is_enc
+            continue
+
+        return True, False
+
+    return False, False
+
+
+def _dedup_files_by_md5(
+    files: list[Path],
+    hash_cache: dict[Path, tuple[str, str]],
+) -> tuple[list[Path], list[tuple[Path, str]]]:
+    """Deduplicates byte-identical files within a directory by MD5, caching results."""
+    if len(files) <= 1:
+        return files, []
+
+    unique: list[Path] = []
+    dups: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for f in files:
+        if f not in hash_cache:
+            try:
+                hash_cache[f] = _compute_hashes(f, need_sha256=False)
+            except OSError:
+                continue
+        md5 = hash_cache[f][0]
+        if md5 in seen:
+            dups.append((f, md5))
+        else:
+            seen.add(md5)
+            unique.append(f)
+    return unique, dups
+
+
 def _resolve_thumbnails_with_safeguards(
     group: PostGroup,
     review_log: list[str],
     hash_cache: dict[Path, tuple[str, str]],
     promote_archive_thumbs: bool = False,
-) -> list[tuple[Path, bool]]:
-    """Returns [(file_path, is_thumbnail)] applying JSON reconciliation and anomaly safeguards."""
+) -> tuple[list[tuple[Path, bool]], list[tuple[Path, str]]]:
+    """Returns ([(file_path, is_thumbnail)], [(dup_thumb_path, md5)])."""
     selected: list[tuple[Path, bool]] = [(f, False) for f in group.main_files]
     if not group.thumb_files:
-        return selected
+        return selected, []
 
     cover_stems = group.meta.cover_stems
     thumb_files = [t for t in group.thumb_files if t.stem.lower() not in cover_stems]
     if not thumb_files:
-        return selected
+        return selected, []
 
     expected_count = len(group.meta.manifest)
-    has_archives = bool(group.archives)
+    has_media_archives, has_encrypted = _archives_may_contain_media(group.archives)
+    enc_note = " [encrypted]" if has_encrypted else ""
 
     if not group.main_files:
-        if has_archives and not promote_archive_thumbs:
+        if has_media_archives and not promote_archive_thumbs:
             review_log.append(
-                f"[ARCHIVE_SHADOW] {group.post_dir} | 0 main media, {len(group.archives)} archive(s), "
-                f"{len(thumb_files)} thumb(s) skipped (originals may be inside archive)"
+                f"[ARCHIVE_SHADOW]{enc_note} {group.post_dir} | 0 main media, "
+                f"{len(group.archives)} archive(s), {len(thumb_files)} thumb(s) skipped "
+                "(originals may be inside archive)"
             )
-            return selected
-        if expected_count > 0 and len(thumb_files) > expected_count + 1:
+            return selected, []
+
+        unique_thumbs, dup_thumbs = _dedup_files_by_md5(thumb_files, hash_cache)
+        if expected_count > 0 and len(unique_thumbs) > expected_count + 1:
             review_log.append(
                 f"[COUNT_EXCEEDS_MANIFEST] {group.post_dir} | 0 main media, "
-                f"{len(thumb_files)} thumb(s) > {expected_count} expected in JSON"
+                f"{len(unique_thumbs)} unique thumb(s) > {expected_count} expected in JSON"
             )
-            return selected
-        selected.extend((t, True) for t in thumb_files)
-        return selected
+            return selected, []
+
+        selected.extend((t, True) for t in unique_thumbs)
+        return selected, dup_thumbs
 
     if expected_count > 0:
         attachment_hashes = {
@@ -792,47 +938,49 @@ def _resolve_thumbnails_with_safeguards(
                     hash_cache[f] = _compute_hashes(f, need_sha256=True)
                 main_hashes.add(hash_cache[f][1])
             if required_hashes.issubset(main_hashes):
-                return selected
+                return selected, []
         elif len(group.main_files) >= expected_count:
-            return selected
+            return selected, []
 
     main_stems = {f.stem.lower() for f in group.main_files}
     thumb_stems = {t.stem.lower() for t in thumb_files}
     unmatched_thumbs = [t for t in thumb_files if t.stem.lower() not in main_stems]
 
     if not unmatched_thumbs:
-        return selected
+        return selected, []
 
-    if has_archives and not promote_archive_thumbs:
+    if has_media_archives and not promote_archive_thumbs:
         review_log.append(
-            f"[ARCHIVE_SHADOW] {group.post_dir} | {len(group.main_files)} main, "
+            f"[ARCHIVE_SHADOW]{enc_note} {group.post_dir} | {len(group.main_files)} main, "
             f"{len(group.archives)} archive(s), {len(unmatched_thumbs)} unmatched thumb(s) skipped"
         )
-        return selected
+        return selected, []
 
     if main_stems.isdisjoint(thumb_stems):
         review_log.append(
             f"[ZERO_OVERLAP_MISMATCH] {group.post_dir} | {len(group.main_files)} main, "
             f"{len(thumb_files)} thumb(s), 0 matching stems (JSON expected={expected_count})"
         )
-        return selected
+        return selected, []
 
-    if expected_count > 0 and (len(group.main_files) + len(unmatched_thumbs)) > expected_count + 1:
+    unique_unmatched, dup_thumbs = _dedup_files_by_md5(unmatched_thumbs, hash_cache)
+
+    if expected_count > 0 and (len(group.main_files) + len(unique_unmatched)) > expected_count + 1:
         review_log.append(
             f"[COUNT_EXCEEDS_MANIFEST] {group.post_dir} | {len(group.main_files)} main + "
-            f"{len(unmatched_thumbs)} unmatched thumb(s) > {expected_count} expected in JSON"
+            f"{len(unique_unmatched)} unique unmatched thumb(s) > {expected_count} expected in JSON"
         )
-        return selected
+        return selected, []
 
-    if expected_count == 0 and len(unmatched_thumbs) > max(10, len(group.main_files) * 3):
+    if expected_count == 0 and len(unique_unmatched) > max(10, len(group.main_files) * 3):
         review_log.append(
             f"[THUMB_COUNT_EXPLOSION] {group.post_dir} | {len(group.main_files)} main vs "
-            f"{len(unmatched_thumbs)} unmatched thumb(s) (no JSON to verify)"
+            f"{len(unique_unmatched)} unique unmatched thumb(s) (no JSON to verify)"
         )
-        return selected
+        return selected, []
 
-    selected.extend((t, True) for t in unmatched_thumbs)
-    return selected
+    selected.extend((t, True) for t in unique_unmatched)
+    return selected, dup_thumbs
 
 
 def _resolve_page_index(
@@ -924,11 +1072,13 @@ def _commit_artist_records(
     timeline_conn: sqlite3.Connection,
     state_conn: sqlite3.Connection,
     records: list[StagedRecord],
+    empty_posts: list[tuple[str, str, str, str, str, str, str, int, int, str]],
     unit_path: str,
     staging_dir: str,
 ) -> None:
-    """Commits portable rows to timeline_index.db and local paths/checkpoint to staging_state.db."""
-    if records:
+    """Commits portable rows to timeline_index.db and local paths/checkpoints to staging_state.db."""
+    primary_records = [r for r in records if r.staged_path]
+    if primary_records:
         timeline_conn.executemany(
             """
             INSERT INTO timeline_items (
@@ -967,9 +1117,11 @@ def _commit_artist_records(
                     int(r.is_thumbnail),
                     ",".join(r.extra_tags),
                 )
-                for r in records
+                for r in primary_records
             ],
         )
+
+    if records:
         state_conn.executemany(
             """
             INSERT INTO staged_files (
@@ -1005,6 +1157,27 @@ def _commit_artist_records(
             ],
         )
 
+    if empty_posts:
+        state_conn.executemany(
+            """
+            INSERT INTO empty_posts (
+                post_dir, staging_dir, unit_path, artist, platform, post_id,
+                status, expected_media, archives_count, source_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_dir) DO UPDATE SET
+                staging_dir = excluded.staging_dir,
+                unit_path = excluded.unit_path,
+                artist = excluded.artist,
+                platform = excluded.platform,
+                post_id = excluded.post_id,
+                status = excluded.status,
+                expected_media = excluded.expected_media,
+                archives_count = excluded.archives_count,
+                source_url = excluded.source_url
+            """,
+            empty_posts,
+        )
+
     state_conn.execute(
         """
         INSERT INTO completed_units (unit_path, staging_dir, completed_at, files_count)
@@ -1014,7 +1187,7 @@ def _commit_artist_records(
             completed_at = excluded.completed_at,
             files_count = excluded.files_count
         """,
-        (unit_path, staging_dir, datetime.now(timezone.utc).isoformat(), len(records)),
+        (unit_path, staging_dir, datetime.now(timezone.utc).isoformat(), len(primary_records)),
     )
     timeline_conn.commit()
     state_conn.commit()
@@ -1038,6 +1211,8 @@ def _stamp_existing_staging_sidecars(
         )
         while batch := cur.fetchmany(5000):
             for staged_str, artist, source_url, extra_csv in batch:
+                if not staged_str:
+                    continue
                 staged_file = Path(staged_str)
                 if not staged_file.is_file():
                     continue
@@ -1092,13 +1267,16 @@ def run_prep_paid(args) -> None:
     out_str = str(out_dir)
     src_str = str(src_root)
     review_path = out_dir / "needs_review.log"
+    empty_log_path = out_dir / "empty_posts.log"
 
     total_staged = 0
     total_thumbs = 0
     total_covers = 0
     total_anomalies = 0
+    total_dups = 0
     artists_done = 0
     artists_skipped = 0
+    empty_counts: dict[str, int] = defaultdict(int)
 
     with (
         sqlite3.connect(TIMELINE_DB_PATH) as timeline_conn,
@@ -1169,7 +1347,7 @@ def run_prep_paid(args) -> None:
                 groups = _scan_artist_unit(artist_dir, default_platform, artist_override)
                 if not groups:
                     if not args.dry_run:
-                        _commit_artist_records(timeline_conn, state_conn, [], unit_str, out_str)
+                        _commit_artist_records(timeline_conn, state_conn, [], [], unit_str, out_str)
                     artists_done += 1
                     if max_files == 0:
                         overall_pbar.update(1)
@@ -1189,6 +1367,10 @@ def run_prep_paid(args) -> None:
 
                 artist_records: list[StagedRecord] = []
                 artist_review: list[str] = []
+                artist_empty_posts: list[
+                    tuple[str, str, str, str, str, str, str, int, int, str]
+                ] = []
+                artist_empty_lines: list[str] = []
                 seen_md5: set[str] = set()
                 artist_bytes_read = 0
 
@@ -1207,14 +1389,78 @@ def run_prep_paid(args) -> None:
                         artist_slug = _clean_artist_slug(group.artist_raw, mappings.artist)
                         pub_ts, date_src = _resolve_post_timestamp(group, anchors)
                         source_url = _build_source_url(group)
-                        hash_cache: dict[Path, tuple[str, str]] = {}
+                        plat_label = group.platform or "paid"
+                        pid_num = int(group.post_id) if group.post_id.isdigit() else 0
+                        pid_pad = f"{pid_num:010d}" if pid_num else "0000000000"
 
-                        candidates = _resolve_thumbnails_with_safeguards(
+                        if not group.main_files and not group.thumb_files and group.json_path:
+                            expected_media = len(group.meta.manifest)
+                            if group.archives:
+                                status = "ARCHIVE_ONLY"
+                            elif expected_media > 0:
+                                status = "MISSING_MEDIA"
+                            else:
+                                status = "TEXT_ONLY"
+                            empty_counts[status] += 1
+                            artist_empty_posts.append(
+                                (
+                                    str(group.post_dir),
+                                    out_str,
+                                    unit_str,
+                                    artist_slug,
+                                    plat_label,
+                                    group.post_id,
+                                    status,
+                                    expected_media,
+                                    len(group.archives),
+                                    source_url,
+                                )
+                            )
+                            if status != "TEXT_ONLY":
+                                artist_empty_lines.append(
+                                    f"[{status}] {group.post_dir} | expected_media={expected_media}, "
+                                    f"archives={len(group.archives)}"
+                                    + (f" | {source_url}" if source_url else "")
+                                )
+                            continue
+
+                        hash_cache: dict[Path, tuple[str, str]] = {}
+                        candidates, dup_thumbs = _resolve_thumbnails_with_safeguards(
                             group,
                             artist_review,
                             hash_cache,
                             promote_archive_thumbs=getattr(args, "promote_archive_thumbs", False),
                         )
+
+                        for dup_path, dup_md5 in dup_thumbs:
+                            try:
+                                dup_st = dup_path.stat()
+                            except OSError:
+                                continue
+                            total_dups += 1
+                            artist_records.append(
+                                StagedRecord(
+                                    md5=dup_md5,
+                                    original_path=str(dup_path),
+                                    staged_path="",
+                                    source_root=src_str,
+                                    staging_dir=out_str,
+                                    unit_path=unit_str,
+                                    file_size=dup_st.st_size,
+                                    mtime_ns=dup_st.st_mtime_ns,
+                                    artist=artist_slug,
+                                    platform=plat_label,
+                                    post_id=group.post_id,
+                                    post_id_num=pid_num,
+                                    published_ts=pub_ts,
+                                    date_source=date_src,
+                                    page_index=0,
+                                    source_url=source_url,
+                                    is_thumbnail=True,
+                                    extra_tags=[],
+                                )
+                            )
+
                         if not candidates:
                             continue
 
@@ -1230,9 +1476,6 @@ def run_prep_paid(args) -> None:
                             s.item_id for s in group.meta.manifest if s.item_id
                         }
                         has_manifest_hashes = any(s.sha256 for s in group.meta.manifest)
-                        plat_label = group.platform or "paid"
-                        pid_num = int(group.post_id) if group.post_id.isdigit() else 0
-                        pid_pad = f"{pid_num:010d}" if pid_num else "0000000000"
 
                         for idx, (file_path, is_thumb) in enumerate(candidates):
                             file_pbar.update(1)
@@ -1276,6 +1519,29 @@ def run_prep_paid(args) -> None:
                                 )
 
                             if md5 in seen_md5:
+                                total_dups += 1
+                                artist_records.append(
+                                    StagedRecord(
+                                        md5=md5,
+                                        original_path=orig_str,
+                                        staged_path="",
+                                        source_root=src_str,
+                                        staging_dir=out_str,
+                                        unit_path=unit_str,
+                                        file_size=st.st_size,
+                                        mtime_ns=st.st_mtime_ns,
+                                        artist=artist_slug,
+                                        platform=plat_label,
+                                        post_id=group.post_id,
+                                        post_id_num=pid_num,
+                                        published_ts=pub_ts,
+                                        date_source=date_src,
+                                        page_index=idx,
+                                        source_url=source_url,
+                                        is_thumbnail=is_thumb,
+                                        extra_tags=[],
+                                    )
+                                )
                                 continue
                             seen_md5.add(md5)
 
@@ -1340,9 +1606,19 @@ def run_prep_paid(args) -> None:
                     with review_path.open("a", encoding="utf-8") as rf:
                         rf.write("\n".join(artist_review) + "\n")
 
+                if artist_empty_lines:
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    with empty_log_path.open("a", encoding="utf-8") as ef:
+                        ef.write("\n".join(artist_empty_lines) + "\n")
+
                 if not args.dry_run:
                     _commit_artist_records(
-                        timeline_conn, state_conn, artist_records, unit_str, out_str
+                        timeline_conn,
+                        state_conn,
+                        artist_records,
+                        artist_empty_posts,
+                        unit_str,
+                        out_str,
                     )
                 artists_done += 1
                 if max_files == 0:
@@ -1356,8 +1632,14 @@ def run_prep_paid(args) -> None:
     remaining = max(0, len(pending_units) - artists_done)
     print(
         f"\n[✓] prep-paid complete ({mode_lbl}): {artists_done:,} artist(s) processed "
-        f"({remaining:,} remaining) | {total_staged:,} media files "
-        f"({total_thumbs:,} promoted thumbs, {total_covers:,} covers skipped, {total_anomalies:,} anomalies)."
+        f"({remaining:,} remaining) | {total_staged:,} staged "
+        f"({total_thumbs:,} thumbs, {total_dups:,} dup originals tracked, "
+        f"{total_covers:,} covers skipped, {total_anomalies:,} anomalies)."
     )
+    if empty_counts:
+        summary = ", ".join(f"{k}={v:,}" for k, v in sorted(empty_counts.items()))
+        print(f"[INFO] JSON-only posts (0 media/thumbs): {summary}")
+        if empty_log_path.is_file():
+            print(f"[INFO] Missing/archive-only post log: {empty_log_path}")
     if total_anomalies:
         print(f"[⚠️] Anomaly log: {review_path}")
