@@ -474,7 +474,7 @@ def run(args) -> None:
                             thumb_tasks.append((img, t_src))
 
             if thumb_tasks:
-                _generate_thumbnails(thumb_tasks, args.threads)
+                _generate_thumbnails(thumb_tasks, executor)
 
     out_dir = args.image_path or args.video_path
     if all_skips:
