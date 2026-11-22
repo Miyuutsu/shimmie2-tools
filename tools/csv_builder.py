@@ -33,6 +33,7 @@ from functions.db_cache import (
     load_tagmap,
     resolve_post,
     save_post_to_cache,
+    save_posts_batch_to_cache,
 )
 from functions.media import get_image_resolution, get_video_resolution, process_webp
 from functions.source_resolver import resolve_best_source
@@ -115,6 +116,14 @@ def collect_files(
                 f"[WARNING] Skipping {stem}.* - Ambiguous multiple formats without unique sidecar."
             )
 
+    def _disk_order_key(path: Path) -> str:
+        try:
+            return os.readlink(path) if path.is_symlink() else str(path)
+        except OSError:
+            return str(path)
+
+    final_files.sort(key=_disk_order_key)
+
     batch_size = max(1, batch_size)
     batches = [final_files[i : i + batch_size] for i in range(0, len(final_files), batch_size)]
     return final_files, batches
@@ -162,6 +171,7 @@ def compile_metadata(
     mappings: Mappings,
     args,
     dynamic_mappings: dict[str, str],
+    single_tag_cache: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[str, str, list[str], str | None]:
     """Curates tags, resolves the highest-priority source URL, and calculates the post rating."""
     tags: list[str] = []
@@ -175,7 +185,7 @@ def compile_metadata(
     tags = clean_resolution_tags(tags, image)
 
     ctx = get_curation_context(mappings)
-    apply_tag_curation(tags, dynamic_mappings, context=ctx)
+    apply_tag_curation(tags, dynamic_mappings, context=ctx, single_tag_cache=single_tag_cache)
 
     rescued_sources = [
         t.split(":", 1)[1].strip() for t in tags if t.startswith("source:") and len(t) > 7
@@ -256,6 +266,8 @@ def process_image_result(
     mappings: Mappings,
     dynamic_mappings: dict[str, str],
     blacklist_cfg: BlacklistConfig | None,
+    cache_updates: list[tuple[ResolutionData, str, list[str], str | None]] | None = None,
+    single_tag_cache: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[list[str] | None, ImportItem | None, str | None, tuple[str, str] | None]:
     """Processes a single resolved media file into a CSV row, ImportItem, thumbnail key, or skip log entry."""
     if res_data.exists == "error":
@@ -280,7 +292,10 @@ def process_image_result(
         return None, None, None, ("blacklist", skip_entry)
 
     if args.update_cache:
-        save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
+        if cache_updates is not None:
+            cache_updates.append((res_data, rating, tag_list, best_source))
+        else:
+            save_post_to_cache(res_data, rating, tag_list, best_source, CACHE_PATH)
 
     # If the image already exists in Shimmie2, mark its thumbnail as already existing so we don't generate one
     thumb_skip_key = str(local_thumb) if res_data.exists else None
@@ -456,14 +471,23 @@ def run(args) -> None:
     existing_thumbs: set[str] = set()
     all_skips: list[tuple[str, str]] = []
 
+    single_tag_cache: dict[str, tuple[str, ...]] = {}
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         for batch in tqdm.tqdm(batches, desc="Media batches", position=1, leave=False):
             results = _resolve_batch_metadata(batch, executor, existing_hashes, md5_by_file)
             thumb_tasks: list[tuple[Path, Path]] = []
+            cache_updates: list[tuple[ResolutionData, str, list[str], str | None]] = []
 
             for img, res_data in zip(batch, results, strict=True):
                 row, import_item, thumb_key, skip_info = process_image_result(
-                    img, res_data, args, mappings, dynamic_mappings, blacklist_cfg
+                    img,
+                    res_data,
+                    args,
+                    mappings,
+                    dynamic_mappings,
+                    blacklist_cfg,
+                    cache_updates=cache_updates,
+                    single_tag_cache=single_tag_cache,
                 )
                 if skip_info:
                     all_skips.append(skip_info)
@@ -477,6 +501,8 @@ def run(args) -> None:
                         if str(t_src) not in existing_thumbs and not t_src.is_file():
                             thumb_tasks.append((img, t_src))
 
+            if cache_updates:
+                save_posts_batch_to_cache(cache_updates, CACHE_PATH)
             if thumb_tasks:
                 _generate_thumbnails(thumb_tasks, executor)
 

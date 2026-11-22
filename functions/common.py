@@ -31,6 +31,7 @@ _XATTR_DHASH_KEY = "user.shimmie.dhash"
 _XATTR_SHA256_KEY = "user.shimmie.sha256"
 _XATTR_META_KEY = "user.shimmie.meta"
 _XATTR_META_VERSION = "v1"
+_XATTR_PXHASH_KEY = "user.shimmie.pxhash"
 
 
 @dataclass(slots=True)
@@ -182,6 +183,43 @@ def write_xattr_media_meta(
     ).encode()
     with suppress(OSError):
         os.setxattr(file_path, _XATTR_META_KEY, payload, follow_symlinks=True)
+
+
+def read_xattr_pxhash(file_path: Path, st: os.stat_result | None = None) -> str:
+    """Reads and validates a cached Danbooru pixel hash from filesystem xattr."""
+    if not _XATTR.read or not hasattr(os, "getxattr"):
+        return ""
+    stat_res = st
+    if stat_res is None:
+        with suppress(OSError):
+            stat_res = file_path.stat()
+    if stat_res is None:
+        return ""
+    with suppress(OSError, UnicodeDecodeError, ValueError):
+        raw = os.getxattr(file_path, _XATTR_PXHASH_KEY, follow_symlinks=True).decode("ascii")
+        digest, size_s, mtime_s = raw.split(":", 2)
+        if (
+            len(digest) in {32, 64}
+            and int(size_s) == stat_res.st_size
+            and int(mtime_s) == stat_res.st_mtime_ns
+        ):
+            return digest
+    return ""
+
+
+def write_xattr_pxhash(
+    file_path: Path, px_hash: str, st: os.stat_result | None = None
+) -> None:
+    """Writes a validated Danbooru pixel hash + size + mtime_ns to filesystem xattr."""
+    if not _XATTR.write or not px_hash or not hasattr(os, "setxattr"):
+        return
+    stat_res = st
+    if stat_res is None:
+        with suppress(OSError):
+            stat_res = file_path.stat()
+    if stat_res is None:
+        return
+    _write_xattr_digest(file_path, _XATTR_PXHASH_KEY, px_hash, stat_res)
 
 
 def compute_hashes(

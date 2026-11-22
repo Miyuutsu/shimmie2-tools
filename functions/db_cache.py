@@ -24,6 +24,8 @@ from functions.common import (
     TAGMAP_DB_PATH,
     VIDEO_EXTS,
     extract_or_compute_md5,
+    read_xattr_pxhash,
+    write_xattr_pxhash,
 )
 from functions.media import compute_danbooru_pixel_hash
 from functions.source_resolver import is_recognized_prefix
@@ -65,6 +67,7 @@ def init_posts_cache(cache_path: Path = CACHE_PATH) -> None:
         resolved.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(resolved) as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
                     md5 TEXT PRIMARY KEY,
@@ -95,6 +98,7 @@ def get_cache_conn(cache_path: Path = CACHE_PATH):
     if conn is None:
         conn = sqlite3.connect(resolved, timeout=30.0, check_same_thread=False)
         conn.execute("PRAGMA busy_timeout=5000;")  # 5 second timeout on locked tables
+        conn.execute("PRAGMA synchronous=NORMAL;")
         conns[resolved] = conn
     yield conn
 
@@ -215,6 +219,61 @@ def save_post_to_cache(
                 conn.commit()
 
 
+def save_posts_batch_to_cache(
+    entries: list[tuple[ResolutionData, str, list[str], str | None]],
+    cache_path: Path = CACHE_PATH,
+) -> None:
+    """Batch-updates posts_cache.db in a single SQLite transaction."""
+    if not entries:
+        return
+
+    by_md5: dict[str, tuple[str | None, tuple[str, str, str, str, str, str]]] = {}
+    for res_data, rating_letter, tags, pure_source_link in entries:
+        parsed = parse_tags_for_cache(tags)
+        new_data = (
+            rating_letter,
+            pure_source_link or parsed[4] or "",
+            parsed[0],
+            parsed[1],
+            parsed[2],
+            parsed[3],
+        )
+        by_md5[res_data.md5] = (res_data.px_hash, new_data)
+
+    md5_list = list(by_md5.keys())
+    rows_to_upsert: list[tuple[str, str | None, str, str, str, str, str, str]] = []
+
+    with get_cache_conn(cache_path) as conn:
+        cur = conn.cursor()
+        existing_map: dict[str, tuple[str, str, str, str, str, str]] = {}
+        for idx in range(0, len(md5_list), 999):
+            chunk = md5_list[idx : idx + 999]
+            placeholders = ",".join(["?"] * len(chunk))
+            cur.execute(
+                f"SELECT md5, rating, source, general, character, artist, series "
+                f"FROM posts WHERE md5 IN ({placeholders})",
+                chunk,
+            )
+            for row in cur.fetchall():
+                existing_map[row[0]] = row[1:]
+
+        for md5, (px_hash, new_data) in by_md5.items():
+            if existing_map.get(md5) != new_data:
+                rows_to_upsert.append((md5, px_hash, *new_data))
+
+        if rows_to_upsert:
+            with _cache_write_lock:
+                cur.executemany(
+                    """
+                    INSERT OR REPLACE INTO posts
+                    (md5, pixel_hash, rating, source, general, character, artist, series)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows_to_upsert,
+                )
+                conn.commit()
+
+
 def get_existing_shimmie_hashes(md5_iterable: Iterable[str], db_config: dict | None) -> set[str]:
     """Returns the subset of MD5 hashes that already exist in Shimmie2's PostgreSQL `images` table."""
     md5_list = [m.lower() for m in md5_iterable if m]
@@ -256,7 +315,14 @@ def resolve_post(
 
         try:
             if not px_hash:
-                px_hash = md5 if is_video else compute_danbooru_pixel_hash(image)
+                if is_video:
+                    px_hash = md5
+                else:
+                    px_hash = read_xattr_pxhash(image)
+                    if not px_hash:
+                        px_hash = compute_danbooru_pixel_hash(image)
+                        if px_hash:
+                            write_xattr_pxhash(image, px_hash)
 
             if post is None:
                 cur.execute("SELECT * FROM posts WHERE pixel_hash = ?", (px_hash,))
