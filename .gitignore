@@ -12,10 +12,13 @@
 Thumbs.db
 __pycache__/
 cookies.txt
+database/*.db-shm
+database/*.db-wal
 database/ai_audit_staging.db
 database/ai_quarantine_cache.db
 database/ai_revert_log.db
 database/danbooru_wiki_cache.db
 database/posts_cache.db
+database/staging_state.db
 purge_dry_run.txt
 venv/

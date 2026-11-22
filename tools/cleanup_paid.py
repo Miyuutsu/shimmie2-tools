@@ -1,6 +1,6 @@
 """Safe post-import review mover for staged paid media.
 
-NEVER unlinks source media files. Streams MD5-verified records from database/timeline_index.db,
+NEVER unlinks source media files. Streams MD5-verified records from database,
 moves verified originals into a review directory on the source drive, and appends each move to
 undo_manifest.jsonl for crash-safe full reversal.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 import orjson
 import psycopg2
 
-from functions.common import TIMELINE_DB_PATH
+from functions.common import STAGING_STATE_DB_PATH
 from functions.db_cache import get_shimmie_db_credentials
 
 
@@ -28,12 +28,12 @@ def _fetch_imported_hashes(md5s: list[str], conn) -> set[str]:
 
 
 def _lookup_source_root(staging_dir: Path) -> Path:
-    """Looks up the source_root registered for a staging_dir in timeline_index.db."""
-    if not TIMELINE_DB_PATH.is_file():
-        print(f"[ERROR] Timeline DB not found: {TIMELINE_DB_PATH}")
+    """Looks up the source_root registered for a staging_dir in staging_state.db."""
+    if not STAGING_STATE_DB_PATH.is_file():
+        print(f"[ERROR] Staging state DB not found: {STAGING_STATE_DB_PATH}")
         sys.exit(1)
 
-    with sqlite3.connect(TIMELINE_DB_PATH) as conn:
+    with sqlite3.connect(STAGING_STATE_DB_PATH) as conn:
         row = conn.execute(
             "SELECT source_root FROM staging_batches WHERE staging_dir = ?",
             (str(staging_dir),),
@@ -42,13 +42,13 @@ def _lookup_source_root(staging_dir: Path) -> Path:
             return Path(row[0]).resolve()
 
         fallback = conn.execute(
-            "SELECT source_root FROM timeline_items WHERE staging_dir = ? AND source_root != '' LIMIT 1",
+            "SELECT source_root FROM staged_files WHERE staging_dir = ? AND source_root != '' LIMIT 1",
             (str(staging_dir),),
         ).fetchone()
         if fallback and fallback[0]:
             return Path(fallback[0]).resolve()
 
-    print(f"[ERROR] No staging batch found in {TIMELINE_DB_PATH} for: {staging_dir}")
+    print(f"[ERROR] No staging batch found in {STAGING_STATE_DB_PATH} for: {staging_dir}")
     sys.exit(1)
 
 
@@ -87,11 +87,11 @@ def _run_move_or_dry_run(args, apply: bool) -> None:
 
     try:
         with (
-            sqlite3.connect(TIMELINE_DB_PATH) as sconn,
+            sqlite3.connect(STAGING_STATE_DB_PATH) as sconn,
             psycopg2.connect(**db_cfg) as pg_conn,
         ):
             scur = sconn.execute(
-                "SELECT original_path, staged_path, md5 FROM timeline_items WHERE staging_dir = ?",
+                "SELECT original_path, staged_path, md5 FROM staged_files WHERE staging_dir = ?",
                 (str(staging_dir),),
             )
 

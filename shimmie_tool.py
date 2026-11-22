@@ -164,7 +164,6 @@ def _add_cleanup_paid_parser(subparsers) -> None:
         choices=["dry-run", "apply", "undo"],
         help="Action to perform on verified staged originals",
     )
-    parser.add_argument("--manifest", required=True, help="Path to cleanup_manifest.json")
     parser.add_argument("--spath", help="Path to Shimmie2 root (required for dry-run and apply)")
     parser.add_argument(
         "--review-dir",
@@ -711,6 +710,7 @@ def setup_parser():
     parser_csv = _add_csv_parser(subparsers)
     _add_audit_ratings_parser(subparsers)
     _add_auto_tag_parser(subparsers)
+    _add_cleanup_paid_parser(subparsers)
     _add_csv2sqlite_parser(subparsers)
     _add_curate_db_parser(subparsers)
     _add_fix_map_parser(subparsers)

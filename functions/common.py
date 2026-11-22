@@ -17,6 +17,7 @@ QUARANTINE_DB_PATH = DB_DIR / "ai_quarantine_cache.db"
 TAGMAP_DB_PATH = DB_DIR / "tagmap.db"
 TAG_DB_PATH = DB_DIR / "tag_rating_dominant.db"
 TIMELINE_DB_PATH = DB_DIR / "timeline_index.db"
+STAGING_STATE_DB_PATH = DB_DIR / "staging_state.db"
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}

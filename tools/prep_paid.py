@@ -19,6 +19,7 @@ import tqdm
 from functions.common import (
     IMAGE_EXTS,
     ROOT_DIR,
+    STAGING_STATE_DB_PATH,
     TIMELINE_DB_PATH,
     VIDEO_EXTS,
 )
@@ -104,7 +105,7 @@ class StagedRecord:
 
 
 def init_timeline_db(db_path: Path = TIMELINE_DB_PATH) -> None:
-    """Initializes and migrates timeline_index.db tables and indexes."""
+    """Initializes the shareable timeline_index.db (zero local filesystem paths)."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -117,6 +118,34 @@ def init_timeline_db(db_path: Path = TIMELINE_DB_PATH) -> None:
                 PRIMARY KEY (platform, post_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS timeline_items (
+                md5 TEXT PRIMARY KEY,
+                artist TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                post_id TEXT NOT NULL,
+                post_id_num INTEGER NOT NULL,
+                published_ts REAL NOT NULL,
+                date_source TEXT NOT NULL,
+                page_index INTEGER NOT NULL,
+                source_url TEXT NOT NULL,
+                is_thumbnail INTEGER NOT NULL DEFAULT 0,
+                extra_tags TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_artist ON timeline_items(artist)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_timeline_sort "
+            "ON timeline_items(artist, published_ts, post_id_num, page_index)"
+        )
+
+
+def init_staging_state_db(db_path: Path = STAGING_STATE_DB_PATH) -> None:
+    """Initializes the local-only staging_state.db (paths, resume cache, cleanup tracking)."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS staging_batches (
                 staging_dir TEXT PRIMARY KEY,
@@ -133,51 +162,23 @@ def init_timeline_db(db_path: Path = TIMELINE_DB_PATH) -> None:
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS timeline_items (
-                md5 TEXT PRIMARY KEY,
-                artist TEXT NOT NULL,
-                platform TEXT NOT NULL,
-                post_id TEXT NOT NULL,
-                post_id_num INTEGER NOT NULL,
-                published_ts REAL NOT NULL,
-                date_source TEXT NOT NULL,
-                page_index INTEGER NOT NULL,
-                source_url TEXT NOT NULL,
-                is_thumbnail INTEGER NOT NULL DEFAULT 0,
-                extra_tags TEXT NOT NULL DEFAULT '',
-                original_path TEXT NOT NULL DEFAULT '',
-                staged_path TEXT NOT NULL DEFAULT '',
-                source_root TEXT NOT NULL DEFAULT '',
-                staging_dir TEXT NOT NULL DEFAULT '',
-                unit_path TEXT NOT NULL DEFAULT '',
+            CREATE TABLE IF NOT EXISTS staged_files (
+                staging_dir TEXT NOT NULL,
+                original_path TEXT NOT NULL,
+                staged_path TEXT NOT NULL,
+                source_root TEXT NOT NULL,
+                unit_path TEXT NOT NULL,
+                md5 TEXT NOT NULL,
                 file_size INTEGER NOT NULL DEFAULT 0,
-                mtime_ns INTEGER NOT NULL DEFAULT 0
+                mtime_ns INTEGER NOT NULL DEFAULT 0,
+                artist TEXT NOT NULL,
+                source_url TEXT NOT NULL DEFAULT '',
+                extra_tags TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (staging_dir, original_path)
             )
         """)
-
-        existing_cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(timeline_items)").fetchall()
-        }
-        migrations = (
-            ("source_root", "TEXT NOT NULL DEFAULT ''"),
-            ("staging_dir", "TEXT NOT NULL DEFAULT ''"),
-            ("unit_path", "TEXT NOT NULL DEFAULT ''"),
-            ("file_size", "INTEGER NOT NULL DEFAULT 0"),
-            ("mtime_ns", "INTEGER NOT NULL DEFAULT 0"),
-        )
-        for col_name, col_def in migrations:
-            if col_name not in existing_cols:
-                conn.execute(f"ALTER TABLE timeline_items ADD COLUMN {col_name} {col_def}")
-
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_artist ON timeline_items(artist)")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timeline_sort "
-            "ON timeline_items(artist, published_ts, post_id_num, page_index)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timeline_staging ON timeline_items(staging_dir)"
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_unit ON timeline_items(unit_path)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_dir ON staged_files(staging_dir)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_unit ON staged_files(unit_path)")
 
 
 def _compute_hashes(file_path: Path, need_sha256: bool = False) -> tuple[str, str]:
@@ -517,7 +518,10 @@ def _scan_artist_unit(
                             pass
                     else:
                         post_subdirs.append(Path(entry.path))
-                elif entry.is_file(follow_symlinks=False) and os.path.splitext(entry.name.lower())[1] in MEDIA_EXTS:
+                elif (
+                    entry.is_file(follow_symlinks=False)
+                    and os.path.splitext(entry.name.lower())[1] in MEDIA_EXTS
+                ):
                     flat_media.append(Path(entry.path))
     except OSError:
         return []
@@ -526,7 +530,19 @@ def _scan_artist_unit(
     groups: list[PostGroup] = []
 
     # 1. Structured post directories
-    for p_dir in post_subdirs:
+    short_name = artist_dir.name[:22]
+    scan_iter = (
+        tqdm.tqdm(
+            post_subdirs,
+            desc=f"Scan  {short_name:<22}",
+            unit="post",
+            position=1,
+            leave=False,
+        )
+        if len(post_subdirs) >= 5
+        else post_subdirs
+    )
+    for p_dir in scan_iter:
         main_files, archives, json_path = _scan_post_dir(p_dir)
         t_dir = thumb_map.pop(p_dir.name, None)
         thumb_files: list[Path] = []
@@ -880,21 +896,20 @@ def _write_cleanup_wrapper(out_dir: Path) -> Path:
 
 
 def _commit_artist_records(
-    conn: sqlite3.Connection,
+    timeline_conn: sqlite3.Connection,
+    state_conn: sqlite3.Connection,
     records: list[StagedRecord],
     unit_path: str,
     staging_dir: str,
 ) -> None:
-    """Commits one artist unit's records and marks the unit complete in a single transaction."""
+    """Commits portable rows to timeline_index.db and local paths/checkpoint to staging_state.db."""
     if records:
-        conn.executemany(
+        timeline_conn.executemany(
             """
             INSERT INTO timeline_items (
                 md5, artist, platform, post_id, post_id_num, published_ts,
-                date_source, page_index, source_url, is_thumbnail,
-                extra_tags, original_path, staged_path, source_root,
-                staging_dir, unit_path, file_size, mtime_ns
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                date_source, page_index, source_url, is_thumbnail, extra_tags
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(md5) DO UPDATE SET
                 artist = excluded.artist,
                 platform = excluded.platform,
@@ -911,14 +926,7 @@ def _commit_artist_records(
                 page_index = excluded.page_index,
                 source_url = COALESCE(NULLIF(excluded.source_url, ''), timeline_items.source_url),
                 is_thumbnail = MIN(timeline_items.is_thumbnail, excluded.is_thumbnail),
-                extra_tags = excluded.extra_tags,
-                original_path = excluded.original_path,
-                staged_path = excluded.staged_path,
-                source_root = excluded.source_root,
-                staging_dir = excluded.staging_dir,
-                unit_path = excluded.unit_path,
-                file_size = excluded.file_size,
-                mtime_ns = excluded.mtime_ns
+                extra_tags = excluded.extra_tags
             """,
             [
                 (
@@ -933,18 +941,46 @@ def _commit_artist_records(
                     r.source_url,
                     int(r.is_thumbnail),
                     ",".join(r.extra_tags),
-                    r.original_path,
-                    r.staged_path,
-                    r.source_root,
-                    r.staging_dir,
-                    r.unit_path,
-                    r.file_size,
-                    r.mtime_ns,
                 )
                 for r in records
             ],
         )
-    conn.execute(
+        state_conn.executemany(
+            """
+            INSERT INTO staged_files (
+                staging_dir, original_path, staged_path, source_root, unit_path,
+                md5, file_size, mtime_ns, artist, source_url, extra_tags
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(staging_dir, original_path) DO UPDATE SET
+                staged_path = excluded.staged_path,
+                source_root = excluded.source_root,
+                unit_path = excluded.unit_path,
+                md5 = excluded.md5,
+                file_size = excluded.file_size,
+                mtime_ns = excluded.mtime_ns,
+                artist = excluded.artist,
+                source_url = excluded.source_url,
+                extra_tags = excluded.extra_tags
+            """,
+            [
+                (
+                    r.staging_dir,
+                    r.original_path,
+                    r.staged_path,
+                    r.source_root,
+                    r.unit_path,
+                    r.md5,
+                    r.file_size,
+                    r.mtime_ns,
+                    r.artist,
+                    r.source_url,
+                    ",".join(r.extra_tags),
+                )
+                for r in records
+            ],
+        )
+
+    state_conn.execute(
         """
         INSERT INTO completed_units (unit_path, staging_dir, completed_at, files_count)
         VALUES (?, ?, ?, ?)
@@ -955,21 +991,24 @@ def _commit_artist_records(
         """,
         (unit_path, staging_dir, datetime.now(timezone.utc).isoformat(), len(records)),
     )
-    conn.commit()
+    timeline_conn.commit()
+    state_conn.commit()
 
 
-def _stamp_existing_staging_sidecars(out_dir: Path, db_path: Path = TIMELINE_DB_PATH) -> None:
-    """Merges timeline_index.db metadata tags into surviving staged files after triage/auto-tag."""
-    if not db_path.is_file():
-        print(f"[ERROR] Timeline DB not found: {db_path}")
+def _stamp_existing_staging_sidecars(
+    out_dir: Path, state_db_path: Path = STAGING_STATE_DB_PATH
+) -> None:
+    """Merges staging_state.db metadata tags into surviving staged files after triage/auto-tag."""
+    if not state_db_path.is_file():
+        print(f"[ERROR] Staging state DB not found: {state_db_path}")
         return
 
     out_resolved = str(out_dir.resolve())
     stamped = 0
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(state_db_path) as conn:
         cur = conn.execute(
             "SELECT staged_path, artist, source_url, extra_tags "
-            "FROM timeline_items WHERE staging_dir = ?",
+            "FROM staged_files WHERE staging_dir = ?",
             (out_resolved,),
         )
         while batch := cur.fetchmany(5000):
@@ -992,9 +1031,10 @@ def run_prep_paid(args) -> None:
     """Main CLI entry point for prep-paid (streaming per artist with SQLite checkpointing)."""
     out_dir = Path(args.out).resolve()
     init_timeline_db(TIMELINE_DB_PATH)
+    init_staging_state_db(STAGING_STATE_DB_PATH)
 
     if getattr(args, "stamp_sidecars", False):
-        _stamp_existing_staging_sidecars(out_dir, TIMELINE_DB_PATH)
+        _stamp_existing_staging_sidecars(out_dir, STAGING_STATE_DB_PATH)
         return
 
     if not getattr(args, "path", None):
@@ -1035,15 +1075,20 @@ def run_prep_paid(args) -> None:
     artists_done = 0
     artists_skipped = 0
 
-    with sqlite3.connect(TIMELINE_DB_PATH) as conn:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        anchors = _load_anchors(conn)
+    with (
+        sqlite3.connect(TIMELINE_DB_PATH) as timeline_conn,
+        sqlite3.connect(STAGING_STATE_DB_PATH) as state_conn,
+    ):
+        for c in (timeline_conn, state_conn):
+            c.execute("PRAGMA journal_mode=WAL;")
+            c.execute("PRAGMA synchronous=NORMAL;")
+
+        anchors = _load_anchors(timeline_conn)
 
         completed_set: set[str] = set()
         if not rescan:
             completed_set = {
-                row[0] for row in conn.execute("SELECT unit_path FROM completed_units")
+                row[0] for row in state_conn.execute("SELECT unit_path FROM completed_units")
             }
 
         pending_units = [u for u in artist_units if str(u) not in completed_set]
@@ -1058,7 +1103,7 @@ def run_prep_paid(args) -> None:
             return
 
         if not args.dry_run:
-            conn.execute(
+            state_conn.execute(
                 """
                 INSERT INTO staging_batches (staging_dir, source_root, created_at)
                 VALUES (?, ?, ?)
@@ -1068,156 +1113,219 @@ def run_prep_paid(args) -> None:
                 """,
                 (out_str, src_str, datetime.now(timezone.utc).isoformat()),
             )
-            conn.commit()
+            state_conn.commit()
             script_path = _write_cleanup_wrapper(out_dir)
             print(f"[INFO] Safe cleanup wrapper ready at {script_path}")
 
-        pbar = tqdm.tqdm(pending_units, desc="Artists", unit="artist")
-        for artist_dir in pbar:
-            if (max_files and total_staged >= max_files) or (
-                max_artists and artists_done >= max_artists
-            ):
-                break
+        target_artists = min(max_artists, len(pending_units)) if max_artists else len(pending_units)
+        overall_pbar = (
+            tqdm.tqdm(total=max_files, desc="Batch Files", unit="file", position=0)
+            if max_files > 0
+            else tqdm.tqdm(total=target_artists, desc="Artists", unit="artist", position=0)
+        )
 
-            unit_str = str(artist_dir)
-            pbar.set_postfix(staged=total_staged, artist=artist_dir.name[:24])
+        try:
+            for artist_dir in pending_units:
+                if (max_files and total_staged >= max_files) or (
+                    max_artists and artists_done >= max_artists
+                ):
+                    break
 
-            groups = _scan_artist_unit(artist_dir, default_platform, artist_override)
-            if not groups:
-                if not args.dry_run:
-                    _commit_artist_records(conn, [], unit_str, out_str)
-                artists_done += 1
-                continue
+                unit_str = str(artist_dir)
+                short_name = artist_dir.name[:22]
+                if max_files > 0:
+                    overall_pbar.set_postfix(
+                        artists=f"{artists_done}/{len(pending_units)}",
+                        artist=short_name,
+                    )
+                else:
+                    overall_pbar.set_postfix(staged=total_staged, artist=short_name)
 
-            if not args.dry_run:
-                _upsert_group_anchors(conn, groups, anchors)
-
-            # Fast resume cache for partially processed artists: original_path -> (size, mtime_ns, md5)
-            cached_files = {
-                row[0]: (int(row[1]), int(row[2]), str(row[3]))
-                for row in conn.execute(
-                    "SELECT original_path, file_size, mtime_ns, md5 "
-                    "FROM timeline_items WHERE unit_path = ?",
-                    (unit_str,),
-                )
-            }
-
-            artist_records: list[StagedRecord] = []
-            artist_review: list[str] = []
-            seen_md5: set[str] = set()
-
-            for group in groups:
-                artist_slug = _clean_artist_slug(group.artist_raw, mappings.artist)
-                pub_ts, date_src = _resolve_post_timestamp(group, anchors)
-                source_url = _build_source_url(group)
-                hash_cache: dict[Path, tuple[str, str]] = {}
-
-                candidates = _resolve_thumbnails_with_safeguards(
-                    group,
-                    artist_review,
-                    hash_cache,
-                    promote_archive_thumbs=getattr(args, "promote_archive_thumbs", False),
-                )
-                if not candidates:
+                groups = _scan_artist_unit(artist_dir, default_platform, artist_override)
+                if not groups:
+                    if not args.dry_run:
+                        _commit_artist_records(timeline_conn, state_conn, [], unit_str, out_str)
+                    artists_done += 1
+                    if max_files == 0:
+                        overall_pbar.update(1)
                     continue
 
-                manifest_stems = {s.stem for s in group.meta.manifest} | {
-                    s.item_id for s in group.meta.manifest if s.item_id
+                if not args.dry_run:
+                    _upsert_group_anchors(timeline_conn, groups, anchors)
+
+                cached_files = {
+                    row[0]: (int(row[1]), int(row[2]), str(row[3]))
+                    for row in state_conn.execute(
+                        "SELECT original_path, file_size, mtime_ns, md5 "
+                        "FROM staged_files WHERE unit_path = ?",
+                        (unit_str,),
+                    )
                 }
-                has_manifest_hashes = any(s.sha256 for s in group.meta.manifest)
-                plat_label = group.platform or "paid"
-                pid_num = int(group.post_id) if group.post_id.isdigit() else 0
-                pid_pad = f"{pid_num:010d}" if pid_num else "0000000000"
 
-                for idx, (file_path, is_thumb) in enumerate(candidates):
-                    if group.meta.cover_stems and file_path.stem.lower() in group.meta.cover_stems:
-                        total_covers += 1
-                        continue
+                artist_records: list[StagedRecord] = []
+                artist_review: list[str] = []
+                seen_md5: set[str] = set()
+                artist_bytes_read = 0
 
-                    try:
-                        st = file_path.stat()
-                    except OSError:
-                        continue
-                    if st.st_size <= 0:
-                        continue
+                est_files = sum(
+                    len(g.main_files) + (len(g.thumb_files) if not g.main_files else 0)
+                    for g in groups
+                )
+                with tqdm.tqdm(
+                    total=est_files or None,
+                    desc=f"Stage {short_name:<22}",
+                    unit="file",
+                    position=1,
+                    leave=False,
+                ) as file_pbar:
+                    for group in groups:
+                        artist_slug = _clean_artist_slug(group.artist_raw, mappings.artist)
+                        pub_ts, date_src = _resolve_post_timestamp(group, anchors)
+                        source_url = _build_source_url(group)
+                        hash_cache: dict[Path, tuple[str, str]] = {}
 
-                    orig_str = str(file_path)
-                    need_sha = (
-                        has_manifest_hashes
-                        and not is_thumb
-                        and len(candidates) > 1
-                        and file_path.stem.lower() not in manifest_stems
-                    )
-
-                    if file_path in hash_cache:
-                        md5, f_sha256 = hash_cache[file_path]
-                    elif (
-                        not need_sha
-                        and (cached := cached_files.get(orig_str))
-                        and cached[0] == st.st_size
-                        and cached[1] == st.st_mtime_ns
-                    ):
-                        md5, f_sha256 = cached[2], ""
-                    else:
-                        md5, f_sha256 = _compute_hashes(file_path, need_sha256=need_sha)
-
-                    if md5 in seen_md5:
-                        continue
-                    seen_md5.add(md5)
-
-                    page_idx = _resolve_page_index(file_path, idx, group, file_sha256=f_sha256)
-                    staged_name = (
-                        f"{plat_label}_{pid_pad}_p{page_idx:04d}_{md5[:8]}{file_path.suffix.lower()}"
-                    )
-                    staged_path = out_dir / artist_slug / staged_name
-
-                    extra_tags = list(base_pretags)
-                    if is_thumb and thumb_tag:
-                        extra_tags.append(thumb_tag)
-
-                    if not args.dry_run:
-                        _link_or_copy(file_path, staged_path, args.link_mode)
-                        if args.write_sidecars:
-                            sidecar_tags = [*extra_tags, f"artist:{artist_slug}"]
-                            if source_url:
-                                sidecar_tags.append(f"source:{source_url}")
-                            _merge_sidecar_tags(staged_path, sidecar_tags)
-
-                    artist_records.append(
-                        StagedRecord(
-                            md5=md5,
-                            original_path=orig_str,
-                            staged_path=str(staged_path),
-                            source_root=src_str,
-                            staging_dir=out_str,
-                            unit_path=unit_str,
-                            file_size=st.st_size,
-                            mtime_ns=st.st_mtime_ns,
-                            artist=artist_slug,
-                            platform=plat_label,
-                            post_id=group.post_id,
-                            post_id_num=pid_num,
-                            published_ts=pub_ts,
-                            date_source=date_src,
-                            page_index=page_idx,
-                            source_url=source_url,
-                            is_thumbnail=is_thumb,
-                            extra_tags=extra_tags,
+                        candidates = _resolve_thumbnails_with_safeguards(
+                            group,
+                            artist_review,
+                            hash_cache,
+                            promote_archive_thumbs=getattr(args, "promote_archive_thumbs", False),
                         )
+                        if not candidates:
+                            continue
+
+                        if file_pbar.total is not None:
+                            promoted_extra = max(
+                                0,
+                                len(candidates) - (len(group.main_files) or len(group.thumb_files)),
+                            )
+                            if promoted_extra:
+                                file_pbar.total += promoted_extra
+
+                        manifest_stems = {s.stem for s in group.meta.manifest} | {
+                            s.item_id for s in group.meta.manifest if s.item_id
+                        }
+                        has_manifest_hashes = any(s.sha256 for s in group.meta.manifest)
+                        plat_label = group.platform or "paid"
+                        pid_num = int(group.post_id) if group.post_id.isdigit() else 0
+                        pid_pad = f"{pid_num:010d}" if pid_num else "0000000000"
+
+                        for idx, (file_path, is_thumb) in enumerate(candidates):
+                            file_pbar.update(1)
+                            if (
+                                group.meta.cover_stems
+                                and file_path.stem.lower() in group.meta.cover_stems
+                            ):
+                                total_covers += 1
+                                continue
+
+                            try:
+                                st = file_path.stat()
+                            except OSError:
+                                continue
+                            if st.st_size <= 0:
+                                continue
+
+                            orig_str = str(file_path)
+                            need_sha = (
+                                has_manifest_hashes
+                                and not is_thumb
+                                and len(candidates) > 1
+                                and file_path.stem.lower() not in manifest_stems
+                            )
+
+                            if file_path in hash_cache:
+                                md5, f_sha256 = hash_cache[file_path]
+                            elif (
+                                not need_sha
+                                and (cached := cached_files.get(orig_str))
+                                and cached[0] == st.st_size
+                                and cached[1] == st.st_mtime_ns
+                            ):
+                                md5, f_sha256 = cached[2], ""
+                            else:
+                                md5, f_sha256 = _compute_hashes(file_path, need_sha256=need_sha)
+                                artist_bytes_read += st.st_size
+                                file_pbar.set_postfix(
+                                    read=f"{artist_bytes_read / 1_048_576:.0f}MB",
+                                    refresh=False,
+                                )
+
+                            if md5 in seen_md5:
+                                continue
+                            seen_md5.add(md5)
+
+                            page_idx = _resolve_page_index(
+                                file_path, idx, group, file_sha256=f_sha256
+                            )
+                            staged_name = (
+                                f"{plat_label}_{pid_pad}_p{page_idx:04d}_{md5[:8]}"
+                                f"{file_path.suffix.lower()}"
+                            )
+                            staged_path = out_dir / artist_slug / staged_name
+
+                            extra_tags = list(base_pretags)
+                            if is_thumb and thumb_tag:
+                                extra_tags.append(thumb_tag)
+
+                            if not args.dry_run:
+                                _link_or_copy(file_path, staged_path, args.link_mode)
+                                if args.write_sidecars:
+                                    sidecar_tags = [*extra_tags, f"artist:{artist_slug}"]
+                                    if source_url:
+                                        sidecar_tags.append(f"source:{source_url}")
+                                    _merge_sidecar_tags(staged_path, sidecar_tags)
+
+                            artist_records.append(
+                                StagedRecord(
+                                    md5=md5,
+                                    original_path=orig_str,
+                                    staged_path=str(staged_path),
+                                    source_root=src_str,
+                                    staging_dir=out_str,
+                                    unit_path=unit_str,
+                                    file_size=st.st_size,
+                                    mtime_ns=st.st_mtime_ns,
+                                    artist=artist_slug,
+                                    platform=plat_label,
+                                    post_id=group.post_id,
+                                    post_id_num=pid_num,
+                                    published_ts=pub_ts,
+                                    date_source=date_src,
+                                    page_index=page_idx,
+                                    source_url=source_url,
+                                    is_thumbnail=is_thumb,
+                                    extra_tags=extra_tags,
+                                )
+                            )
+                            total_staged += 1
+                            if is_thumb:
+                                total_thumbs += 1
+                            if max_files > 0:
+                                overall_pbar.update(1)
+                            else:
+                                overall_pbar.set_postfix(
+                                    staged=total_staged,
+                                    artist=short_name,
+                                    refresh=False,
+                                )
+
+                if artist_review:
+                    total_anomalies += len(artist_review)
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    with review_path.open("a", encoding="utf-8") as rf:
+                        rf.write("\n".join(artist_review) + "\n")
+
+                if not args.dry_run:
+                    _commit_artist_records(
+                        timeline_conn, state_conn, artist_records, unit_str, out_str
                     )
-                    total_staged += 1
-                    if is_thumb:
-                        total_thumbs += 1
-
-            if artist_review:
-                total_anomalies += len(artist_review)
-                out_dir.mkdir(parents=True, exist_ok=True)
-                with review_path.open("a", encoding="utf-8") as rf:
-                    rf.write("\n".join(artist_review) + "\n")
-
-            if not args.dry_run:
-                _commit_artist_records(conn, artist_records, unit_str, out_str)
-            artists_done += 1
+                artists_done += 1
+                if max_files == 0:
+                    overall_pbar.update(1)
+        finally:
+            overall_pbar.close()
+            timeline_conn.commit()
+            timeline_conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
 
     mode_lbl = "DRY RUN" if args.dry_run else "STAGED"
     remaining = max(0, len(pending_units) - artists_done)
