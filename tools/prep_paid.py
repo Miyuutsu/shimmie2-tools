@@ -517,9 +517,8 @@ def _scan_artist_unit(
                             pass
                     else:
                         post_subdirs.append(Path(entry.path))
-                elif entry.is_file(follow_symlinks=False):
-                    if os.path.splitext(entry.name.lower())[1] in MEDIA_EXTS:
-                        flat_media.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False) and os.path.splitext(entry.name.lower())[1] in MEDIA_EXTS:
+                    flat_media.append(Path(entry.path))
     except OSError:
         return []
 
