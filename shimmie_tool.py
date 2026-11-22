@@ -340,6 +340,59 @@ def _add_generate_map_parser(subparsers) -> None:
     )
 
 
+def _add_prep_paid_parser(subparsers) -> None:
+    """Adds the prep-paid command."""
+    parser = subparsers.add_parser(
+        "prep-paid",
+        help="Stage paid media read-only, resolve thumbnail fallbacks, index timeline, and emit safe cleanup script",
+        formatter_class=ColorHelpFormatter,
+    )
+    parser.add_argument("--path", help="Source directory containing paid artist/post folders")
+    parser.add_argument("--out", required=True, help="Clean staging output directory")
+    parser.add_argument(
+        "--platform",
+        default="",
+        help="Fallback platform for flat folders without path/JSON markers (e.g., fanbox, fantia, patreon)",
+    )
+    parser.add_argument("--artist", help="Override artist tag name for this run")
+    parser.add_argument(
+        "--pretags",
+        default="paid_reward",
+        help="Comma-separated pretags to attach (Default: paid_reward)",
+    )
+    parser.add_argument(
+        "--thumb-tag",
+        default="thumbnail_only",
+        help="Tag added to promoted thumbnail-only fallbacks (Default: thumbnail_only)",
+    )
+    parser.add_argument(
+        "--link-mode",
+        choices=["symlink", "hardlink", "copy"],
+        default="symlink",
+        help="How to stage files into --out without altering originals (Default: symlink)",
+    )
+    parser.add_argument(
+        "--write-sidecars",
+        action="store_true",
+        help="Write .txt sidecars immediately (use only if skipping triage/auto-tag)",
+    )
+    parser.add_argument(
+        "--stamp-sidecars",
+        action="store_true",
+        help="After triage/auto-tag, append indexed artist/source/paid_reward tags to surviving staged sidecars",
+    )
+    parser.add_argument(
+        "--promote-archive-thumbs",
+        action="store_true",
+        help="Allow promoting thumbnails even when .zip/.rar/.7z archives exist in the post folder",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Scan and report anomalies without staging files or writing DB",
+    )
+
+
 def _add_purge_parser(subparsers) -> None:
     """Adds the purge command."""
     parser = subparsers.add_parser(
@@ -355,6 +408,36 @@ def _add_purge_parser(subparsers) -> None:
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Generate a report without deleting anything"
+    )
+
+
+def _add_sync_pools_parser(subparsers) -> None:
+    """Adds the sync-pools command."""
+    parser = subparsers.add_parser(
+        "sync-pools",
+        help="Create/update chronological per-artist Shimmie2 Pools from timeline_index.db",
+        formatter_class=ColorHelpFormatter,
+    )
+    parser.add_argument("--spath", required=True, help="Path to Shimmie2 root")
+    parser.add_argument(
+        "--user", default=None, help="Shimmie2 pool owner username (Defaults to config user)"
+    )
+    parser.add_argument("--artist", help="Only sync the pool for a single artist")
+    parser.add_argument(
+        "--title-template",
+        default="{artist} - Paid Rewards",
+        help='Pool title format string (Default: "{artist} - Paid Rewards")',
+    )
+    parser.add_argument(
+        "--public", action="store_true", help="Mark newly created pools as publicly editable"
+    )
+    parser.add_argument(
+        "--desc", action="store_true", help="Order newest-first instead of oldest-first"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview pools and counts without writing to Postgres",
     )
 
 
@@ -579,14 +662,16 @@ def setup_parser():
     subparsers = parser.add_subparsers(dest="command", title="Available Commands", metavar="")
 
     parser_csv = _add_csv_parser(subparsers)
-    _add_import_csv_parser(subparsers)
     _add_audit_ratings_parser(subparsers)
     _add_auto_tag_parser(subparsers)
     _add_csv2sqlite_parser(subparsers)
     _add_curate_db_parser(subparsers)
     _add_fix_map_parser(subparsers)
     _add_generate_map_parser(subparsers)
+    _add_import_csv_parser(subparsers)
+    _add_prep_paid_parser(subparsers)
     _add_purge_parser(subparsers)
+    _add_sync_pools_parser(subparsers)
     _add_tag_dump_parser(subparsers)
     _add_triage_parser(subparsers)
     _add_update_ratings_parser(subparsers)
@@ -671,6 +756,14 @@ def _dispatch(args, parser_csv) -> None:
         from tools import update_ratings
 
         update_ratings.update_ratings(args)
+    elif args.command == "prep-paid":
+        from tools import prep_paid
+
+        prep_paid.run_prep_paid(args)
+    elif args.command == "sync-pools":
+        from tools import sync_pools
+
+        sync_pools.run_sync_pools(args)
 
 
 def _ensure_venv() -> None:

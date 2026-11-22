@@ -1,6 +1,7 @@
 """Batch CSV generator, thumbnailer, and direct importer for Shimmie2."""
 
 import csv
+import os
 import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -195,17 +196,33 @@ def compile_metadata(
     return ", ".join(sorted_unique), rating, sorted_unique, best_source
 
 
+def _abs_no_follow(path: Path) -> Path:
+    """Normalizes a path without resolving a symlinked file target."""
+    return Path(os.path.abspath(path))
+
+
 def _get_base_dir(img: Path, args) -> Path:
     """Returns the matching root input directory for a media file."""
-    if args.image_path and img.is_relative_to(Path(args.image_path).resolve()):
-        return Path(args.image_path).resolve()
+    img_abs = _abs_no_follow(img)
+    if args.image_path:
+        base_img = Path(args.image_path).resolve()
+        if img_abs.is_relative_to(base_img) or img.resolve().is_relative_to(base_img):
+            return base_img
     return Path(args.video_path).resolve()
+
+
+def _safe_rel_to(img: Path, base_dir: Path) -> Path:
+    """Computes relative path cleanly for both normal files and symlinks inside base_dir."""
+    img_abs = _abs_no_follow(img)
+    if img_abs.is_relative_to(base_dir):
+        return img_abs.relative_to(base_dir)
+    return img.resolve().relative_to(base_dir)
 
 
 def _get_thumbnail_path(img: Path, args) -> Path:
     """Determines the output thumbnail path for a given media file."""
     base_dir = _get_base_dir(img, args)
-    return base_dir / "thumbnails" / img.resolve().relative_to(base_dir)
+    return base_dir / "thumbnails" / _safe_rel_to(img, base_dir)
 
 
 def _matches_blacklist(tag_list: list[str], blacklist_cfg: BlacklistConfig | None) -> list[str]:
@@ -242,7 +259,7 @@ def process_image_result(
         return None, None, None, ("corrupt or unreadable", image.name)
 
     base_path = _get_base_dir(image, args)
-    rel_path = image.resolve().relative_to(base_path)
+    rel_path = _safe_rel_to(image, base_path)
     thumb_path = Path(args.prefix) / "thumbnails" / rel_path if args.thumbnail else ""
     local_thumb = _get_thumbnail_path(image, args)
 

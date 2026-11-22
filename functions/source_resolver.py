@@ -260,6 +260,7 @@ KNOWN_BOORU_NAMES = {
 
 SOURCE_PRIORITY = {
     "pixiv.net": 1,
+    "fanbox.cc": 2,
     "fantia.jp": 2,
     "patreon.com": 3,
     "nijie.info": 4,
@@ -283,6 +284,9 @@ SOURCE_PRIORITY = {
 
 FILENAME_SOURCE_PATTERNS = (
     (re.compile(r"fanbox/(\d+)/(\d+)_"), "https://pawchive.pw/fanbox/user/{0}/post/{1}"),
+    (re.compile(r"fanbox/[^/]+?\((\d+)\)/(\d+)"), "https://pawchive.pw/fanbox/user/{0}/post/{1}"),
+    (re.compile(r"fanbox/([^/\s()]+)/(\d+)"), "https://www.fanbox.cc/@{0}/posts/{1}"),
+    (re.compile(r"fantia/(?:[^/]+/)?(\d+)(?:/|_)"), "https://fantia.jp/posts/{0}"),
     (re.compile(r"gelbooru_(\d+)_"), "https://gelbooru.com/index.php?page=post&s=view&id={}"),
     (re.compile(r"konachan_(\d+)_"), "https://konachan.com/post/show/{}"),
     (re.compile(r"yandere_(\d+)_"), "https://yande.re/post/show/{}"),
