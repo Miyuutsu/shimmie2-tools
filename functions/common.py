@@ -27,6 +27,7 @@ VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
 MD5_REGEX = re.compile(r"[a-fA-F0-9]{32}")
 
 _XATTR_MD5_KEY = "user.shimmie.md5"
+_XATTR_DHASH_KEY = "user.shimmie.dhash"
 _XATTR_SHA256_KEY = "user.shimmie.sha256"
 
 
@@ -78,6 +79,55 @@ def _write_xattr_digest(file_path: Path, key: str, digest: str, st: os.stat_resu
     payload = f"{digest}:{st.st_size}:{st.st_mtime_ns}".encode("ascii")
     with suppress(OSError):
         os.setxattr(file_path, key, payload, follow_symlinks=True)
+
+
+def read_xattr_dhash(
+    file_path: Path, st: os.stat_result | None = None
+) -> tuple[int, int, int] | None:
+    """Reads and validates a cached (width, height, 64-bit dHash) from filesystem xattr."""
+    if not _XATTR.read or not hasattr(os, "getxattr"):
+        return None
+    stat_res = st
+    if stat_res is None:
+        with suppress(OSError):
+            stat_res = file_path.stat()
+    if stat_res is None:
+        return None
+    with suppress(OSError, UnicodeDecodeError, ValueError):
+        raw = os.getxattr(file_path, _XATTR_DHASH_KEY, follow_symlinks=True).decode("ascii")
+        hex_str, w_s, h_s, size_s, mtime_s = raw.split(":", 4)
+        if (
+            len(hex_str) == 16
+            and int(size_s) == stat_res.st_size
+            and int(mtime_s) == stat_res.st_mtime_ns
+        ):
+            w, h = int(w_s), int(h_s)
+            if w > 0 and h > 0:
+                return w, h, int(hex_str, 16)
+    return None
+
+
+def write_xattr_dhash(
+    file_path: Path,
+    width: int,
+    height: int,
+    dhash: int,
+    st: os.stat_result | None = None,
+) -> None:
+    """Writes a validated (width, height, 64-bit dHash) + size + mtime_ns to filesystem xattr."""
+    if not _XATTR.write or width <= 0 or height <= 0 or not hasattr(os, "setxattr"):
+        return
+    stat_res = st
+    if stat_res is None:
+        with suppress(OSError):
+            stat_res = file_path.stat()
+    if stat_res is None:
+        return
+    payload = (
+        f"{dhash:016x}:{width}:{height}:{stat_res.st_size}:{stat_res.st_mtime_ns}"
+    ).encode("ascii")
+    with suppress(OSError):
+        os.setxattr(file_path, _XATTR_DHASH_KEY, payload, follow_symlinks=True)
 
 
 def compute_hashes(

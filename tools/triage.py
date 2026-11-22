@@ -30,6 +30,8 @@ from functions.common import (
     TAG_DB_PATH,
     VIDEO_EXTS,
     extract_or_compute_md5,
+    read_xattr_dhash,
+    write_xattr_dhash,
 )
 from functions.db_cache import (
     get_cache_conn,
@@ -243,9 +245,14 @@ def _load_protected_thumb_paths(target_dir: Path) -> set[str]:
 
 
 def _compute_dhash_and_size(file_path: Path) -> tuple[Path, int, int, int | None]:
-    """Computes (path, width, height, 64-bit dHash) for an image using PIL + NumPy."""
+    """Computes (path, width, height, 64-bit dHash) for an image using PIL + NumPy (or xattr cache)."""
     if file_path.suffix.lower() not in IMAGE_EXTS:
         return file_path, 0, 0, None
+
+    if cached := read_xattr_dhash(file_path):
+        w, h, dhash = cached
+        return file_path, w, h, dhash
+
     try:
         with Image.open(file_path) as im:
             w, h = im.size
@@ -269,6 +276,8 @@ def _compute_dhash_and_size(file_path: Path) -> tuple[Path, int, int, int | None
     dhash = 0
     for bit in diff:
         dhash = (dhash << 1) | int(bit)
+
+    write_xattr_dhash(file_path, w, h, dhash)
     return file_path, w, h, dhash
 
 
