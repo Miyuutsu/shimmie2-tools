@@ -29,6 +29,8 @@ MD5_REGEX = re.compile(r"[a-fA-F0-9]{32}")
 _XATTR_MD5_KEY = "user.shimmie.md5"
 _XATTR_DHASH_KEY = "user.shimmie.dhash"
 _XATTR_SHA256_KEY = "user.shimmie.sha256"
+_XATTR_META_KEY = "user.shimmie.meta"
+_XATTR_META_VERSION = "v1"
 
 
 @dataclass(slots=True)
@@ -123,11 +125,63 @@ def write_xattr_dhash(
             stat_res = file_path.stat()
     if stat_res is None:
         return
-    payload = (
-        f"{dhash:016x}:{width}:{height}:{stat_res.st_size}:{stat_res.st_mtime_ns}"
-    ).encode("ascii")
+    payload = (f"{dhash:016x}:{width}:{height}:{stat_res.st_size}:{stat_res.st_mtime_ns}").encode(
+        "ascii"
+    )
     with suppress(OSError):
         os.setxattr(file_path, _XATTR_DHASH_KEY, payload, follow_symlinks=True)
+
+
+def read_xattr_media_meta(
+    file_path: Path, st: os.stat_result | None = None
+) -> tuple[int, int, str | None] | None:
+    """Reads and validates cached (width, height, camera_exif) from filesystem xattr."""
+    if not _XATTR.read or not hasattr(os, "getxattr"):
+        return None
+    stat_res = st
+    if stat_res is None:
+        with suppress(OSError):
+            stat_res = file_path.stat()
+    if stat_res is None:
+        return None
+    with suppress(OSError, UnicodeDecodeError, ValueError):
+        raw = os.getxattr(file_path, _XATTR_META_KEY, follow_symlinks=True).decode("utf-8")
+        ver, w_s, h_s, size_s, mtime_s, cam_s = raw.split(":", 5)
+        if (
+            ver == _XATTR_META_VERSION
+            and int(size_s) == stat_res.st_size
+            and int(mtime_s) == stat_res.st_mtime_ns
+        ):
+            w, h = int(w_s), int(h_s)
+            if w > 0 and h > 0:
+                return w, h, (cam_s or None)
+    return None
+
+
+def write_xattr_media_meta(
+    file_path: Path,
+    width: int,
+    height: int,
+    camera_info: str | None = None,
+    st: os.stat_result | None = None,
+) -> None:
+    """Writes validated (width, height, camera_exif) + size + mtime_ns to filesystem xattr."""
+    if not _XATTR.write or width <= 0 or height <= 0 or not hasattr(os, "setxattr"):
+        return
+    stat_res = st
+    if stat_res is None:
+        with suppress(OSError):
+            stat_res = file_path.stat()
+    if stat_res is None:
+        return
+    clean_cam = (
+        (camera_info or "").replace("\x00", "").replace("\r", " ").replace("\n", " ").strip()
+    )
+    payload = (
+        f"{_XATTR_META_VERSION}:{width}:{height}:{stat_res.st_size}:{stat_res.st_mtime_ns}:{clean_cam}"
+    ).encode()
+    with suppress(OSError):
+        os.setxattr(file_path, _XATTR_META_KEY, payload, follow_symlinks=True)
 
 
 def compute_hashes(

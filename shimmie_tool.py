@@ -636,7 +636,7 @@ def _add_triage_parser(subparsers) -> None:
     parser.add_argument(
         "--protect-thumbs",
         action="store_true",
-        help="Protect thumbnail_only fallback previews (from staging_state.db) from being routed to -fluff",
+        help="Protect thumbnail_only previews (from staging_state.db) instead of auto-fluffing them in Stage 2",
     )
     parser.add_argument(
         "--mine-reso-fluff",

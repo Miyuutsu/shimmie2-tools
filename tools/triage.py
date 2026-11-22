@@ -31,7 +31,9 @@ from functions.common import (
     VIDEO_EXTS,
     extract_or_compute_md5,
     read_xattr_dhash,
+    read_xattr_media_meta,
     write_xattr_dhash,
+    write_xattr_media_meta,
 )
 from functions.db_cache import (
     get_cache_conn,
@@ -226,7 +228,7 @@ def _hits_protected_reso(w: int, h: int) -> tuple[int, int] | None:
     return None
 
 
-def _load_protected_thumb_paths(target_dir: Path) -> set[str]:
+def _load_thumbnail_only_paths(target_dir: Path) -> set[str]:
     """Loads staged symlink paths marked thumbnail_only in staging_state.db for target_dir."""
     if not STAGING_STATE_DB_PATH.is_file():
         return set()
@@ -692,19 +694,25 @@ def _evaluate_stage2_file(
     reso_fluff: set[tuple[int, int]],
 ) -> tuple[TriageVerdict | None, float]:
     """Single-open header inspection returning (fluff_verdict_or_None, aspect_ratio)."""
-    is_video = file_path.suffix.lower() in VIDEO_EXTS
-    camera_info: str | None = None
-
-    if is_video:
-        width, height = get_video_resolution(file_path)
+    if cached_meta := read_xattr_media_meta(file_path):
+        width, height, camera_info = cached_meta
     else:
-        width, height = None, None
-        try:
-            with Image.open(file_path) as im:
-                width, height = im.size
-                camera_info = _extract_exif_camera(im)
-        except Exception:
-            width, height = get_image_resolution(file_path)
+        is_video = file_path.suffix.lower() in VIDEO_EXTS
+        camera_info = None
+
+        if is_video:
+            width, height = get_video_resolution(file_path)
+        else:
+            width, height = None, None
+            try:
+                with Image.open(file_path) as im:
+                    width, height = im.size
+                    camera_info = _extract_exif_camera(im)
+            except Exception:
+                width, height = get_image_resolution(file_path)
+
+        if width and height:
+            write_xattr_media_meta(file_path, width, height, camera_info)
 
     if not width or not height:
         return (
@@ -1536,9 +1544,9 @@ def run_triage(args) -> None:
         if is_soft_reset:
             return
 
-    protected_thumbs: set[str] = set()
-    if getattr(args, "protect_thumbs", False):
-        protected_thumbs = _load_protected_thumb_paths(base_dir)
+    thumb_only_paths = _load_thumbnail_only_paths(base_dir)
+    protect_thumbs = bool(getattr(args, "protect_thumbs", False))
+    protected_thumbs = thumb_only_paths if protect_thumbs else set()
 
     reso_fluff = _parse_reso_fluff(getattr(args, "reso_fluff", ""))
 
@@ -1559,8 +1567,15 @@ def run_triage(args) -> None:
     print(f"🗑️  Fluff Side-Dir:   {fluff_dir}")
     if is_fast_retriage:
         print("⚡  Mode:             Fast Retriage (re-evaluating cached sidecar scores)")
-    if protected_thumbs:
-        print(f"🛡️  Protected Thumbs: {len(protected_thumbs):,} thumbnail_only preview(s)")
+    if thumb_only_paths:
+        if protect_thumbs:
+            print(
+                f"🛡️  Thumb-Only Mode:  PROTECT ({len(thumb_only_paths):,} thumbnail_only preview(s))"
+            )
+        else:
+            print(
+                f"🗑️  Thumb-Only Mode:  FLUFF ({len(thumb_only_paths):,} thumbnail_only preview(s) -> -fluff)"
+            )
     if reso_fluff:
         print(f"📐  Reso Fluff:       {', '.join(f'{w}x{h}' for w, h in sorted(reso_fluff))}")
     print(f"🔍  Candidates:       {len(candidates):,} files")
@@ -1603,101 +1618,141 @@ def run_triage(args) -> None:
         # --- Stage 2: Single-Open Header Geometry, Fixed Resolution & Camera EXIF ---
         stage3_candidates: list[Path] = []
         if stage2_candidates:
-            downscale_map: dict[Path, tuple[tuple[int, int], Path, tuple[int, int], int]] = {}
-            if getattr(args, "dedup_downscales", False):
-                print("\n[Stage 2/3] Hashing images for downscaled duplicate detection...")
-                master_pool = [f for f in candidates if f.suffix.lower() in IMAGE_EXTS]
-                downscale_map = _find_downscaled_duplicates(master_pool, args.threads)
-
-            print(
-                "\n[Stage 2/3] Running single-open resolution, geometry, and camera EXIF checks..."
-            )
-            with ThreadPoolExecutor(max_workers=args.threads) as pool:
-                s2_iter = pool.map(
-                    lambda f: (
-                        f,
-                        *_evaluate_stage2_file(f, args.min_size, args.max_ratio, reso_fluff),
-                    ),
-                    stage2_candidates,
-                )
-                for f_path, verdict, aspect_ratio in tqdm.tqdm(
-                    s2_iter, total=len(stage2_candidates), desc="Pre-filtering", leave=False
-                ):
-                    is_protected = os.path.abspath(f_path) in protected_thumbs
-                    if verdict is not None and (
-                        verdict.reason == "corrupt_or_unreadable"
-                        or verdict.stage in {"Stage 2 (Resolution)", "Stage 2 (EXIF)"}
-                        or not is_protected
-                    ):
-                        all_verdicts.append(verdict)
-                        if not args.dry_run:
-                            _route_file_and_sidecar(verdict, base_dir, fluff_dir, comic_dir)
-                        continue
-
-                    if hit := downscale_map.get(f_path):
-                        (sw, sh), master_p, (lw, lh), dist = hit
-                        v_dup = TriageVerdict(
+            thumb_fluffed = 0
+            if thumb_only_paths and not protect_thumbs:
+                remaining_s2: list[Path] = []
+                for f_path in stage2_candidates:
+                    if os.path.abspath(f_path) in thumb_only_paths:
+                        cached = _parse_triage_sidecar(f_path) if is_fast_retriage else None
+                        v_thumb = TriageVerdict(
                             f_path,
                             "FLUFF",
-                            "Stage 2 (Downscale)",
-                            f"downscaled_duplicate ({sw}x{sh} < {lw}x{lh}, dhash={dist}, master={master_p.name})",
+                            "Stage 2 (Thumbnail)",
+                            "thumbnail_only_preview",
+                            cached.siglip_scores if cached else {},
+                            cached.raw_char_tags if cached else {},
+                            cached.raw_gen_tags if cached else {},
+                            cached.raw_ratings if cached else {},
+                            cached.import_tags if cached else [],
                         )
-                        all_verdicts.append(v_dup)
+                        all_verdicts.append(v_thumb)
                         if not args.dry_run:
-                            _route_file_and_sidecar(v_dup, base_dir, fluff_dir, comic_dir)
-                        continue
+                            _route_file_and_sidecar(v_thumb, base_dir, fluff_dir, comic_dir)
+                        thumb_fluffed += 1
+                    else:
+                        remaining_s2.append(f_path)
+                stage2_candidates = remaining_s2
+                if thumb_fluffed:
+                    print(
+                        f"\n[Stage 2/3] Routed {thumb_fluffed:,} thumbnail_only preview(s) to fluff "
+                        "(pass --protect-thumbs to keep them)."
+                    )
 
-                    # Fast retriage: re-evaluate cached SigLIP + EVA02 sidecar scores on CPU
-                    if (
-                        is_fast_retriage
-                        and (cached := _parse_triage_sidecar(f_path))
-                        and cached.siglip_scores
+            downscale_map: dict[Path, tuple[tuple[int, int], Path, tuple[int, int], int]] = {}
+            if getattr(args, "dedup_downscales", False) and stage2_candidates:
+                print("\n[Stage 2/3] Hashing images for downscaled duplicate detection...")
+                master_pool = [
+                    f
+                    for f in candidates
+                    if f.suffix.lower() in IMAGE_EXTS
+                    and (protect_thumbs or os.path.abspath(f) not in thumb_only_paths)
+                ]
+                downscale_map = _find_downscaled_duplicates(master_pool, args.threads)
+
+            if stage2_candidates:
+                print(
+                    "\n[Stage 2/3] Running single-open resolution, geometry, and camera EXIF checks..."
+                )
+                with ThreadPoolExecutor(max_workers=args.threads) as pool:
+                    s2_iter = pool.map(
+                        lambda f: (
+                            f,
+                            *_evaluate_stage2_file(f, args.min_size, args.max_ratio, reso_fluff),
+                        ),
+                        stage2_candidates,
+                    )
+                    for f_path, verdict, aspect_ratio in tqdm.tqdm(
+                        s2_iter, total=len(stage2_candidates), desc="Pre-filtering", leave=False
                     ):
-                        fluff_v, sorted_sig = _check_stage3a_siglip_fluff(
-                            f_path, [cached.siglip_scores]
-                        )
-                        if fluff_v is not None and not is_protected:
-                            all_verdicts.append(fluff_v)
+                        is_protected = os.path.abspath(f_path) in protected_thumbs
+                        if verdict is not None and (
+                            verdict.reason == "corrupt_or_unreadable"
+                            or verdict.stage in {"Stage 2 (Resolution)", "Stage 2 (EXIF)"}
+                            or not is_protected
+                        ):
+                            all_verdicts.append(verdict)
                             if not args.dry_run:
-                                _route_file_and_sidecar(fluff_v, base_dir, fluff_dir, comic_dir)
-                            cached_reused += 1
+                                _route_file_and_sidecar(verdict, base_dir, fluff_dir, comic_dir)
                             continue
 
-                        has_eva = bool(
-                            cached.raw_gen_tags or cached.raw_char_tags or cached.raw_ratings
-                        )
-                        if has_eva:
-                            cached_v = _classify_stage3b_verdict(
+                        if hit := downscale_map.get(f_path):
+                            (sw, sh), master_p, (lw, lh), dist = hit
+                            v_dup = TriageVerdict(
                                 f_path,
-                                sorted_sig,
-                                cached.raw_char_tags,
-                                cached.raw_gen_tags,
-                                cached.raw_ratings,
-                                cached.import_tags,
-                                args.gen_threshold,
-                                aspect_ratio=aspect_ratio,
+                                "FLUFF",
+                                "Stage 2 (Downscale)",
+                                f"downscaled_duplicate ({sw}x{sh} < {lw}x{lh}, dhash={dist}, master={master_p.name})",
                             )
-                            if cached_v.category == "FLUFF" and is_protected:
-                                cached_v = TriageVerdict(
-                                    f_path,
-                                    "KEEP",
-                                    "Stage 3B (Protected Thumb)",
-                                    f"protected_thumb (bypassed: {cached_v.stage} - {cached_v.reason})",
-                                    cached_v.siglip_scores,
-                                    cached_v.raw_char_tags,
-                                    cached_v.raw_gen_tags,
-                                    cached_v.raw_ratings,
-                                    cached_v.import_tags,
-                                )
-                            all_verdicts.append(cached_v)
+                            all_verdicts.append(v_dup)
                             if not args.dry_run:
-                                _route_file_and_sidecar(cached_v, base_dir, fluff_dir, comic_dir)
-                            cached_reused += 1
+                                _route_file_and_sidecar(v_dup, base_dir, fluff_dir, comic_dir)
                             continue
 
-                    stage3_candidates.append(f_path)
+                        # Fast retriage: re-evaluate cached SigLIP + EVA02 sidecar scores on CPU
+                        if (
+                            is_fast_retriage
+                            and (cached := _parse_triage_sidecar(f_path))
+                            and cached.siglip_scores
+                        ):
+                            fluff_v, sorted_sig = _check_stage3a_siglip_fluff(
+                                f_path, [cached.siglip_scores]
+                            )
+                            if fluff_v is not None and not is_protected:
+                                all_verdicts.append(fluff_v)
+                                if not args.dry_run:
+                                    _route_file_and_sidecar(fluff_v, base_dir, fluff_dir, comic_dir)
+                                cached_reused += 1
+                                continue
 
-            s2_rejected = len(stage2_candidates) - len(stage3_candidates) - cached_reused
+                            has_eva = bool(
+                                cached.raw_gen_tags or cached.raw_char_tags or cached.raw_ratings
+                            )
+                            if has_eva:
+                                cached_v = _classify_stage3b_verdict(
+                                    f_path,
+                                    sorted_sig,
+                                    cached.raw_char_tags,
+                                    cached.raw_gen_tags,
+                                    cached.raw_ratings,
+                                    cached.import_tags,
+                                    args.gen_threshold,
+                                    aspect_ratio=aspect_ratio,
+                                )
+                                if cached_v.category == "FLUFF" and is_protected:
+                                    cached_v = TriageVerdict(
+                                        f_path,
+                                        "KEEP",
+                                        "Stage 3B (Protected Thumb)",
+                                        f"protected_thumb (bypassed: {cached_v.stage} - {cached_v.reason})",
+                                        cached_v.siglip_scores,
+                                        cached_v.raw_char_tags,
+                                        cached_v.raw_gen_tags,
+                                        cached_v.raw_ratings,
+                                        cached_v.import_tags,
+                                    )
+                                all_verdicts.append(cached_v)
+                                if not args.dry_run:
+                                    _route_file_and_sidecar(
+                                        cached_v, base_dir, fluff_dir, comic_dir
+                                    )
+                                cached_reused += 1
+                                continue
+
+                        stage3_candidates.append(f_path)
+
+            s2_rejected = thumb_fluffed + (
+                len(stage2_candidates) - len(stage3_candidates) - cached_reused
+            )
             print(
                 f"  -> Stage 2 complete: {s2_rejected:,} routed to fluff, "
                 f"{cached_reused:,} re-evaluated from cached sidecars, "

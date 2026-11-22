@@ -20,6 +20,7 @@ from functions.common import (
     expand_tags_for_blacklist,
     extract_or_compute_md5,
     load_blacklist,
+    read_xattr_media_meta,
 )
 from functions.db_cache import (
     Mappings,
@@ -123,11 +124,14 @@ def clean_resolution_tags(tags: list[str], media_path: Path) -> list[str]:
     """Strips stale resolution tags and appends accurate ones based on dimensions and aspect ratio."""
     res_tags = [t for t in tags if t not in RESOLUTION_TAGS]
 
-    width, height = (
-        get_video_resolution(media_path)
-        if media_path.suffix.lower() in VIDEO_EXTS
-        else get_image_resolution(media_path)
-    )
+    if cached_meta := read_xattr_media_meta(media_path):
+        width, height, _ = cached_meta
+    else:
+        width, height = (
+            get_video_resolution(media_path)
+            if media_path.suffix.lower() in VIDEO_EXTS
+            else get_image_resolution(media_path)
+        )
     if not width or not height:
         return res_tags
 
