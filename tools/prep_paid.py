@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -17,6 +18,7 @@ import tqdm
 
 from functions.common import (
     IMAGE_EXTS,
+    ROOT_DIR,
     TIMELINE_DB_PATH,
     VIDEO_EXTS,
     compute_md5,
@@ -743,9 +745,9 @@ def _merge_sidecar_tags(media_path: Path, required_tags: list[str]) -> bool:
 
 
 def _write_cleanup_bundle(out_dir: Path, records: list[StagedRecord], source_root: Path) -> Path:
-    """Writes cleanup_manifest.json and a standalone zero-unlink cleanup_staged.py script."""
+    """Writes cleanup_manifest.json and a thin cleanup_staged.sh wrapper calling shimmie_tool.py."""
     manifest_path = out_dir / "cleanup_manifest.json"
-    script_path = out_dir / "cleanup_staged.py"
+    script_path = out_dir / "cleanup_staged.sh"
 
     manifest_data = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -763,238 +765,14 @@ def _write_cleanup_bundle(out_dir: Path, records: list[StagedRecord], source_roo
     }
     manifest_path.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
 
-    cleanup_script = '''#!/usr/bin/env python3
-"""Safe post-import review mover for staged paid media.
-
-NEVER unlinks source files. Moves only PostgreSQL MD5-verified media into a review directory
-and writes undo_manifest.json so every move can be fully reversed with `undo`.
-"""
-
-import argparse
-import json
-import re
-import shutil
-import sys
-from contextlib import suppress
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
-
-import psycopg2
-
-
-def get_db_config(spath: Path) -> dict:
-    config_path = spath / "data" / "config" / "shimmie.conf.php"
-    if not config_path.is_file():
-        raise FileNotFoundError(f"Could not find Shimmie config at {config_path}")
-    content = config_path.read_text(encoding="utf-8")
-
-    user_m = re.search(r"\\$database_user\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]", content) or re.search(
-        r"define\\s*\\(\\s*['\\\"]DATABASE_USER['\\\"]\\s*,\\s*['\\\"]([^'\\\"]+)['\\\"]\\s*\\)",
-        content,
+    tool_path = shlex.quote(str(ROOT_DIR / "shimmie_tool.py"))
+    manifest_quoted = shlex.quote(str(manifest_path))
+    wrapper = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'exec {tool_path} cleanup-paid --manifest {manifest_quoted} "$@"\n'
     )
-    pass_m = re.search(r"\\$database_pass\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]", content) or re.search(
-        r"define\\s*\\(\\s*['\\\"]DATABASE_PASS['\\\"]\\s*,\\s*['\\\"]([^'\\\"]+)['\\\"]\\s*\\)",
-        content,
-    )
-
-    if uri_m := re.search(r"['\\\"]((?:pgsql|postgres|postgresql)://[^'\\\"]+)['\\\"]", content):
-        parsed = urlparse(uri_m.group(1))
-        q = parse_qs(parsed.query)
-        cfg = {
-            "host": q.get("host", [parsed.hostname or "localhost"])[0],
-            "dbname": parsed.path.lstrip("/") or "shimmie",
-            "user": parsed.username or (user_m.group(1) if user_m else "postgres"),
-            "password": parsed.password or (pass_m.group(1) if pass_m else ""),
-        }
-        if parsed.port:
-            cfg["port"] = parsed.port
-        return cfg
-
-    if dsn_m := re.search(r"['\\\"]pgsql:([^'\\\"]+)['\\\"]", content):
-        parts = dict(p.split("=", 1) for p in dsn_m.group(1).split(";") if "=" in p)
-        cfg = {
-            "host": parts.get("host", "localhost"),
-            "dbname": parts.get("dbname", "shimmie"),
-            "user": parts.get("user") or (user_m.group(1) if user_m else "postgres"),
-            "password": parts.get("password", pass_m.group(1) if pass_m else ""),
-        }
-        if "port" in parts:
-            cfg["port"] = parts["port"]
-        return cfg
-
-    raise RuntimeError("Could not parse PostgreSQL DSN from shimmie.conf.php")
-
-
-def fetch_imported_hashes(md5s: list[str], db_cfg: dict) -> set[str]:
-    found: set[str] = set()
-    with psycopg2.connect(**db_cfg) as conn, conn.cursor() as cur:
-        for i in range(0, len(md5s), 10000):
-            cur.execute("SELECT hash FROM images WHERE hash = ANY(%s)", (md5s[i : i + 10000],))
-            found.update(row[0].strip().lower() for row in cur.fetchall() if row[0])
-    return found
-
-
-def run_move_or_dry_run(args, apply: bool) -> None:
-    manifest_path = Path(args.manifest).resolve()
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_root = Path(data["source_root"]).resolve()
-    staging_dir = Path(data["staging_dir"]).resolve()
-    fluff_dir = staging_dir.with_name(f"{staging_dir.name}-fluff")
-    review_dir = Path(args.review_dir).resolve() if args.review_dir else (staging_dir / "reviewed_originals")
-
-    items = data.get("items", [])
-    db_cfg = get_db_config(Path(args.spath).resolve())
-    imported_hashes = fetch_imported_hashes([it["md5"] for it in items], db_cfg)
-
-    to_move: list[tuple[Path, Path, str, str]] = []
-    skipped_unimported = 0
-    skipped_missing = 0
-
-    for it in items:
-        orig = Path(it["original_path"])
-        md5 = it["md5"].lower()
-        if not orig.is_file():
-            skipped_missing += 1
-            continue
-
-        reason = ""
-        if md5 in imported_hashes:
-            reason = "imported_in_shimmie"
-        elif args.include_fluff:
-            staged_rel = Path(it["staged_path"]).relative_to(staging_dir)
-            if (fluff_dir / staged_rel).exists() or (fluff_dir / staged_rel).is_symlink():
-                reason = "triaged_fluff"
-
-        if not reason:
-            skipped_unimported += 1
-            continue
-
-        try:
-            rel = orig.resolve().relative_to(source_root)
-        except ValueError:
-            rel = Path(orig.name)
-        dest = review_dir / rel
-        to_move.append((orig, dest, md5, reason))
-
-    print(f"Verified ready to move to review dir: {len(to_move):,}")
-    print(f"Left untouched (not yet imported):    {skipped_unimported:,}")
-    print(f"Already absent from original path:    {skipped_missing:,}")
-    print(f"Review directory:                     {review_dir}")
-
-    if not apply:
-        log_path = staging_dir / "cleanup_dry_run.log"
-        with log_path.open("w", encoding="utf-8") as f:
-            for orig, dest, md5, reason in to_move:
-                f.write(f"[{reason}] {orig} -> {dest} ({md5})\\n")
-        print(f"\\n[DRY RUN] No files moved. Detailed plan written to {log_path}")
-        return
-
-    if not to_move:
-        print("\\n[✓] Nothing to move.")
-        return
-
-    review_dir.mkdir(parents=True, exist_ok=True)
-    undo_path = review_dir / "undo_manifest.json"
-    undo_entries: list[dict[str, str]] = []
-    if undo_path.is_file():
-        undo_entries = json.loads(undo_path.read_text(encoding="utf-8"))
-
-    moved = 0
-    try:
-        for orig, dest, md5, reason in to_move:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                print(f"[SKIP] Destination already exists: {dest}")
-                continue
-            shutil.move(str(orig), str(dest))
-            undo_entries.append(
-                {"original": str(orig), "moved_to": str(dest), "md5": md5, "reason": reason}
-            )
-            moved += 1
-    finally:
-        undo_path.write_text(json.dumps(undo_entries, indent=2), encoding="utf-8")
-
-    print(f"\\n[✓] Moved {moved:,} verified files into {review_dir}")
-    print(f"    Undo manifest saved to {undo_path}")
-    print("    Review the folder and delete it manually when satisfied, or run `undo` to restore.")
-
-
-def run_undo(args) -> None:
-    manifest_path = Path(args.manifest).resolve()
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    staging_dir = Path(data["staging_dir"]).resolve()
-    review_dir = Path(args.review_dir).resolve() if args.review_dir else (staging_dir / "reviewed_originals")
-    undo_path = review_dir / "undo_manifest.json"
-
-    if not undo_path.is_file():
-        print(f"[ERROR] Undo manifest not found: {undo_path}")
-        sys.exit(1)
-
-    entries = json.loads(undo_path.read_text(encoding="utf-8"))
-    restored = 0
-    remaining: list[dict[str, str]] = []
-
-    for entry in reversed(entries):
-        src = Path(entry["moved_to"])
-        dst = Path(entry["original"])
-        if not src.exists():
-            continue
-        if dst.exists():
-            print(f"[WARNING] Original path already exists, skipping restore: {dst}")
-            remaining.append(entry)
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dst))
-        restored += 1
-
-    if remaining:
-        undo_path.write_text(json.dumps(list(reversed(remaining)), indent=2), encoding="utf-8")
-    else:
-        undo_path.unlink()
-        for d in sorted((p for p in review_dir.rglob("*") if p.is_dir()), reverse=True):
-            with suppress(OSError):
-                d.rmdir()
-        with suppress(OSError):
-            review_dir.rmdir()
-
-    print(f"[✓] Restored {restored:,} files back to their original paths.")
-
-
-def main() -> None:
-    default_manifest = Path(__file__).resolve().with_name("cleanup_manifest.json")
-    parser = argparse.ArgumentParser(description="Safe review-mover for imported paid media.")
-    sub = parser.add_subparsers(dest="action")
-
-    for name in ("dry-run", "apply"):
-        p = sub.add_parser(name)
-        p.add_argument("--spath", required=True, help="Path to Shimmie2 root")
-        p.add_argument("--manifest", default=str(default_manifest), help="Path to cleanup_manifest.json")
-        p.add_argument("--review-dir", help="Destination review directory")
-        p.add_argument(
-            "--include-fluff",
-            action="store_true",
-            help="Also move files whose staged link was routed to <staging>-fluff",
-        )
-
-    p_undo = sub.add_parser("undo")
-    p_undo.add_argument("--manifest", default=str(default_manifest), help="Path to cleanup_manifest.json")
-    p_undo.add_argument("--review-dir", help="Review directory containing undo_manifest.json")
-
-    args = parser.parse_args()
-    if args.action == "apply":
-        run_move_or_dry_run(args, apply=True)
-    elif args.action == "dry-run":
-        run_move_or_dry_run(args, apply=False)
-    elif args.action == "undo":
-        run_undo(args)
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
-'''
-    script_path.write_text(cleanup_script, encoding="utf-8")
+    script_path.write_text(wrapper, encoding="utf-8")
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return script_path
 

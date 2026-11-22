@@ -152,6 +152,31 @@ def _add_auto_tag_parser(subparsers) -> None:
     )
 
 
+def _add_cleanup_paid_parser(subparsers) -> None:
+    """Adds the cleanup-paid command."""
+    parser = subparsers.add_parser(
+        "cleanup-paid",
+        help="Safely move MD5-verified paid originals to a review directory (with dry-run and undo)",
+        formatter_class=ColorHelpFormatter,
+    )
+    parser.add_argument(
+        "action",
+        choices=["dry-run", "apply", "undo"],
+        help="Action to perform on verified staged originals",
+    )
+    parser.add_argument("--manifest", required=True, help="Path to cleanup_manifest.json")
+    parser.add_argument("--spath", help="Path to Shimmie2 root (required for dry-run and apply)")
+    parser.add_argument(
+        "--review-dir",
+        help="Override review destination (Defaults to <source_root>-reviewed on the source drive)",
+    )
+    parser.add_argument(
+        "--include-fluff",
+        action="store_true",
+        help="Also move originals whose staged symlink was routed to <staging>-fluff",
+    )
+
+
 def _add_csv_parser(subparsers):
     """Adds the make-csv command."""
     parser = subparsers.add_parser(
@@ -764,6 +789,10 @@ def _dispatch(args, parser_csv) -> None:
         from tools import sync_pools
 
         sync_pools.run_sync_pools(args)
+    elif args.command == "cleanup-paid":
+        from tools import cleanup_paid
+
+        cleanup_paid.run_cleanup_paid(args)
 
 
 def _ensure_venv() -> None:
