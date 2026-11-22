@@ -19,7 +19,7 @@ TAG_DB_PATH = DB_DIR / "tag_rating_dominant.db"
 TIMELINE_DB_PATH = DB_DIR / "timeline_index.db"
 STAGING_STATE_DB_PATH = DB_DIR / "staging_state.db"
 
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".jpe", ".png", ".webp"}
 VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
 
 MD5_REGEX = re.compile(r"[a-fA-F0-9]{32}")

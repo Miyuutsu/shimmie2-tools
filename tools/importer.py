@@ -67,7 +67,7 @@ class MediaSpecs:
 def _normalize_ext(suffix: str) -> str:
     """Normalizes a file extension to Shimmie2's 4-char lowercase format (e.g. .jpeg -> jpg)."""
     ext = suffix.lower().lstrip(".")
-    return "jpg" if ext == "jpeg" else ext[:4]
+    return "jpg" if ext == "jpeg" or ext == "jpe" else ext[:4]
 
 
 def _inspect_webp_or_gif(file_path: Path, ext: str) -> tuple[bool, bool, bool, int, int]:

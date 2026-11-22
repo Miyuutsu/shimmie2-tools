@@ -46,6 +46,7 @@ class ManifestSlot:
     ext: str
     sha256: str = ""
     item_id: str = ""
+    is_cover: bool = False
 
 
 @dataclass(slots=True)
@@ -268,15 +269,30 @@ def _parse_kemono_metadata(data: dict[str, Any]) -> ParsedPostMeta:
         raw_entries.extend(a for a in data["attachments"] if isinstance(a, dict))
 
     idx = 0
+    ext_aliases = {".jpe": ".jpg", ".jfif": ".jpg"}
+    idx = 0
     for entry in raw_entries:
         raw_ext = str(entry.get("extension") or "").strip().lower().lstrip(".")
         raw_name = str(entry.get("name") or entry.get("filename") or "").strip()
         ext = f".{raw_ext}" if raw_ext else Path(raw_name).suffix.lower()
+        ext = ext_aliases.get(ext, ext)
         if ext not in MEDIA_EXTS:
-            continue
+            path_ext = Path(str(entry.get("path") or "")).suffix.lower()
+            path_ext = ext_aliases.get(path_ext, path_ext)
+            if path_ext not in MEDIA_EXTS:
+                continue
+            ext = path_ext
         stem = str(entry.get("filename") or Path(raw_name).stem).strip().lower()
         sha256 = str(entry.get("hash") or "").strip().lower()
-        manifest.append(ManifestSlot(index=idx, stem=stem, ext=ext, sha256=sha256))
+        manifest.append(
+            ManifestSlot(
+                index=idx,
+                stem=stem,
+                ext=ext,
+                sha256=sha256,
+                is_cover=(entry.get("type") == "file"),
+            )
+        )
         idx += 1
 
     return ParsedPostMeta(
@@ -739,6 +755,11 @@ def _resolve_thumbnails_with_safeguards(
     if not group.thumb_files:
         return selected
 
+    cover_stems = group.meta.cover_stems
+    thumb_files = [t for t in group.thumb_files if t.stem.lower() not in cover_stems]
+    if not thumb_files:
+        return selected
+
     expected_count = len(group.meta.manifest)
     has_archives = bool(group.archives)
 
@@ -746,34 +767,38 @@ def _resolve_thumbnails_with_safeguards(
         if has_archives and not promote_archive_thumbs:
             review_log.append(
                 f"[ARCHIVE_SHADOW] {group.post_dir} | 0 main media, {len(group.archives)} archive(s), "
-                f"{len(group.thumb_files)} thumb(s) skipped (originals may be inside archive)"
+                f"{len(thumb_files)} thumb(s) skipped (originals may be inside archive)"
             )
             return selected
-        if expected_count > 0 and len(group.thumb_files) > expected_count:
+        if expected_count > 0 and len(thumb_files) > expected_count + 1:
             review_log.append(
                 f"[COUNT_EXCEEDS_MANIFEST] {group.post_dir} | 0 main media, "
-                f"{len(group.thumb_files)} thumb(s) > {expected_count} expected in JSON"
+                f"{len(thumb_files)} thumb(s) > {expected_count} expected in JSON"
             )
             return selected
-        selected.extend((t, True) for t in group.thumb_files)
+        selected.extend((t, True) for t in thumb_files)
         return selected
 
     if expected_count > 0:
-        manifest_hashes = {slot.sha256 for slot in group.meta.manifest if slot.sha256}
-        if manifest_hashes:
+        attachment_hashes = {
+            slot.sha256 for slot in group.meta.manifest if slot.sha256 and not slot.is_cover
+        }
+        all_manifest_hashes = {slot.sha256 for slot in group.meta.manifest if slot.sha256}
+        required_hashes = attachment_hashes or all_manifest_hashes
+        if required_hashes:
             main_hashes: set[str] = set()
             for f in group.main_files:
                 if f not in hash_cache:
                     hash_cache[f] = _compute_hashes(f, need_sha256=True)
                 main_hashes.add(hash_cache[f][1])
-            if manifest_hashes.issubset(main_hashes):
+            if required_hashes.issubset(main_hashes):
                 return selected
         elif len(group.main_files) >= expected_count:
             return selected
 
     main_stems = {f.stem.lower() for f in group.main_files}
-    thumb_stems = {t.stem.lower() for t in group.thumb_files}
-    unmatched_thumbs = [t for t in group.thumb_files if t.stem.lower() not in main_stems]
+    thumb_stems = {t.stem.lower() for t in thumb_files}
+    unmatched_thumbs = [t for t in thumb_files if t.stem.lower() not in main_stems]
 
     if not unmatched_thumbs:
         return selected
@@ -788,11 +813,11 @@ def _resolve_thumbnails_with_safeguards(
     if main_stems.isdisjoint(thumb_stems):
         review_log.append(
             f"[ZERO_OVERLAP_MISMATCH] {group.post_dir} | {len(group.main_files)} main, "
-            f"{len(group.thumb_files)} thumb(s), 0 matching stems (JSON expected={expected_count})"
+            f"{len(thumb_files)} thumb(s), 0 matching stems (JSON expected={expected_count})"
         )
         return selected
 
-    if expected_count > 0 and (len(group.main_files) + len(unmatched_thumbs)) > expected_count:
+    if expected_count > 0 and (len(group.main_files) + len(unmatched_thumbs)) > expected_count + 1:
         review_log.append(
             f"[COUNT_EXCEEDS_MANIFEST] {group.post_dir} | {len(group.main_files)} main + "
             f"{len(unmatched_thumbs)} unmatched thumb(s) > {expected_count} expected in JSON"
