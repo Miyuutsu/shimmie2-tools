@@ -1,6 +1,7 @@
 """High-throughput content identification, 3-way routing (keep / comic / fluff), and sidecar generator."""
 
 import logging
+import os
 import shutil
 import sqlite3
 import warnings
@@ -24,6 +25,7 @@ from torch.nn import functional as F
 from functions.common import (
     CACHE_PATH,
     IMAGE_EXTS,
+    STAGING_STATE_DB_PATH,
     TAG_DB_PATH,
     VIDEO_EXTS,
     extract_or_compute_md5,
@@ -165,7 +167,6 @@ EVA_HARD_FLUFF_TAGS = {
     "text_messaging",
     "ad",
     "logo",
-    "emblem",
     "logo_parody",
     "brand_name_imitation",
     "identity_censor",
@@ -220,6 +221,25 @@ def _hits_protected_reso(w: int, h: int) -> tuple[int, int] | None:
         if abs(w - pw) <= pw * PROTECTED_VARIANCE and abs(h - ph) <= ph * PROTECTED_VARIANCE:
             return (pw, ph)
     return None
+
+
+def _load_protected_thumb_paths(target_dir: Path) -> set[str]:
+    """Loads staged symlink paths marked thumbnail_only in staging_state.db for target_dir."""
+    if not STAGING_STATE_DB_PATH.is_file():
+        return set()
+    target_str = str(target_dir.resolve())
+    with sqlite3.connect(STAGING_STATE_DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT staged_path FROM staged_files
+            WHERE staging_dir = ?
+              AND staged_path != ''
+              AND (',' || extra_tags || ',') LIKE '%,thumbnail_only,%'
+            """,
+            (target_str,),
+        ).fetchall()
+    return {os.path.abspath(r[0]) for r in rows if r[0]}
+
 
 # ==========================================
 # SigLIP Zero-Shot Semantic Prompts
@@ -454,10 +474,7 @@ def _evaluate_stage2_file(
     if not width or not height:
         return TriageVerdict(file_path, "FLUFF", "Stage 2 (Geometry)", "corrupt_or_unreadable")
 
-    if any(
-        abs(width - rw) <= 2 and abs(height - rh) <= 2
-        for rw, rh in reso_fluff
-    ):
+    if any(abs(width - rw) <= 2 and abs(height - rh) <= 2 for rw, rh in reso_fluff):
         return TriageVerdict(
             file_path, "FLUFF", "Stage 2 (Resolution)", f"matched_reso_fluff ({width}x{height})"
         )
@@ -688,9 +705,7 @@ def _check_stage3a_siglip_fluff(
 
     # Only short-circuit in Stage 3A when fluff probability mass is high (>= 0.65) and beats keep & comic;
     # borderline cases advance to Stage 3B so EVA02 can inspect exact tags.
-    irl_is_borderline = (
-        best_fluff_key == "irl_photo" and best_fluff_val < 0.85 and keep_sum >= 0.12
-    )
+    irl_is_borderline = best_fluff_key == "irl_photo" and best_fluff_val < 0.85 and keep_sum >= 0.12
     if (
         fluff_sum >= 0.65
         and best_fluff_val > best_keep_val
@@ -877,8 +892,9 @@ def _classify_stage3b_verdict(
         )
 
     fig_conf = raw_gens.get("figure", 0.0)
+    is_bar_censored = raw_gens.get("bar_censor", 0.0) >= 0.30
     is_censored_cg = (
-        raw_gens.get("bar_censor", 0.0) >= 0.35
+        is_bar_censored
         or raw_gens.get("mosaic_censoring", 0.0) >= 0.35
         or raw_gens.get("censored", 0.0) >= 0.50
     )
@@ -901,6 +917,27 @@ def _classify_stage3b_verdict(
             "FLUFF",
             "Stage 3B (EVA02)",
             f"eva_figure_fluff (figure={fig_conf:.2f}, doll={sorted_siglip.get('doll_or_figurine', 0.0):.2f})",
+            sorted_siglip,
+            raw_chars,
+            raw_gens,
+            raw_ratings,
+            import_tags,
+        )
+
+    # Rough sketch / WIP filter (high threshold to spare finished loose-lineart styles)
+    sketch_conf = raw_gens.get("sketch", 0.0)
+    is_draft_style = (
+        raw_gens.get("lineart", 0.0) >= 0.35
+        or raw_gens.get("monochrome", 0.0) >= 0.50
+        or raw_gens.get("greyscale", 0.0) >= 0.50
+        or raw_gens.get("wip", 0.0) >= 0.25
+    )
+    if sketch_conf >= 0.70 or (sketch_conf >= 0.55 and is_draft_style):
+        return TriageVerdict(
+            src_path,
+            "FLUFF",
+            "Stage 3B (EVA02)",
+            f"eva_sketch_fluff (sketch={sketch_conf:.2f})",
             sorted_siglip,
             raw_chars,
             raw_gens,
@@ -1025,8 +1062,7 @@ def _classify_stage3b_verdict(
         and raw_gens.get("portrait", 0.0) >= 0.55
         and body_framing_conf < 0.20
         and (
-            raw_gens.get("simple_background", 0.0) >= 0.50
-            or raw_gens.get("close-up", 0.0) >= 0.20
+            raw_gens.get("simple_background", 0.0) >= 0.50 or raw_gens.get("close-up", 0.0) >= 0.20
         )
     ):
         return TriageVerdict(
@@ -1045,13 +1081,15 @@ def _classify_stage3b_verdict(
     confident_gen_count = sum(1 for v in raw_gens.values() if v >= gen_threshold)
 
     # 6. SigLIP Combined Fluff vs Keep Balance (for borderline cases that passed Stage 3A)
-    is_strong_cg_override = (
-        best_fluff_key == "irl_photo"
-        and best_fluff_val < 0.85
-        and not has_photo_signal
-        and subject_conf >= 0.80
-        and confident_gen_count >= 12
-        and keep_sum >= 0.20
+    is_strong_cg_override = best_fluff_key == "irl_photo" and (
+        is_bar_censored
+        or (
+            best_fluff_val < 0.85
+            and not has_photo_signal
+            and subject_conf >= 0.80
+            and confident_gen_count >= 12
+            and keep_sum >= 0.20
+        )
     )
     if (
         (fluff_sum >= keep_sum * 0.85 or best_fluff_val > best_keep_val)
@@ -1223,6 +1261,10 @@ def run_triage(args) -> None:
         if getattr(args, "reset", False):
             return
 
+    protected_thumbs: set[str] = set()
+    if getattr(args, "protect_thumbs", False):
+        protected_thumbs = _load_protected_thumb_paths(base_dir)
+
     reso_fluff = _parse_reso_fluff(getattr(args, "reso_fluff", ""))
 
     candidates = _collect_candidate_files(base_dir, IMAGE_EXTS | VIDEO_EXTS, fluff_dir, comic_dir)
@@ -1234,6 +1276,8 @@ def run_triage(args) -> None:
     print(f"📁  Source Path:      {base_dir}")
     print(f"📚  Comic Side-Dir:   {comic_dir}")
     print(f"🗑️  Fluff Side-Dir:   {fluff_dir}")
+    if protected_thumbs:
+        print(f"🛡️  Protected Thumbs: {len(protected_thumbs):,} thumbnail_only preview(s)")
     if reso_fluff:
         print(f"📐  Reso Fluff:       {', '.join(f'{w}x{h}' for w, h in sorted(reso_fluff))}")
     print(f"🔍  Candidates:       {len(candidates):,} files")
@@ -1289,7 +1333,10 @@ def run_triage(args) -> None:
                 for f_path, verdict in tqdm.tqdm(
                     s2_iter, total=len(stage2_candidates), desc="Pre-filtering", leave=False
                 ):
-                    if verdict is not None:
+                    if verdict is not None and (
+                        verdict.reason == "corrupt_or_unreadable"
+                        or os.path.abspath(f_path) not in protected_thumbs
+                    ):
                         all_verdicts.append(verdict)
                         if not args.dry_run:
                             _route_file_and_sidecar(verdict, base_dir, fluff_dir, comic_dir)
@@ -1349,7 +1396,10 @@ def run_triage(args) -> None:
                     for f_path, pil_frames, i_start, i_end in valid_decoded:
                         f_siglip = siglip_out_list[i_start:i_end]
                         fluff_verdict, sorted_siglip = _check_stage3a_siglip_fluff(f_path, f_siglip)
-                        if fluff_verdict is not None:
+                        if (
+                            fluff_verdict is not None
+                            and os.path.abspath(f_path) not in protected_thumbs
+                        ):
                             all_verdicts.append(fluff_verdict)
                             if not args.dry_run:
                                 _route_file_and_sidecar(
@@ -1405,6 +1455,21 @@ def run_triage(args) -> None:
                             args.gen_threshold,
                             aspect_ratio=aspect_ratio,
                         )
+                        if (
+                            verdict.category == "FLUFF"
+                            and os.path.abspath(f_path) in protected_thumbs
+                        ):
+                            verdict = TriageVerdict(
+                                f_path,
+                                "KEEP",
+                                "Stage 3B (Protected Thumb)",
+                                f"protected_thumb (bypassed: {verdict.stage} - {verdict.reason})",
+                                verdict.siglip_scores,
+                                verdict.raw_char_tags,
+                                verdict.raw_gen_tags,
+                                verdict.raw_ratings,
+                                verdict.import_tags,
+                            )
                         all_verdicts.append(verdict)
                         if not args.dry_run:
                             _route_file_and_sidecar(verdict, base_dir, fluff_dir, comic_dir)

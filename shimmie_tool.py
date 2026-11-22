@@ -605,6 +605,11 @@ def _add_triage_parser(subparsers) -> None:
         action="store_true",
         help="Restore files from -fluff/-comic, clear triage (# Verdict:) sidecars, and re-run triage",
     )
+    parser.add_argument(
+        "--protect-thumbs",
+        action="store_true",
+        help="Protect thumbnail_only fallback previews (from staging_state.db) from being routed to -fluff",
+    )
 
 
 def _add_update_ratings_parser(subparsers) -> None:
