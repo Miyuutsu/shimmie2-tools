@@ -175,6 +175,11 @@ def _add_cleanup_paid_parser(subparsers) -> None:
         action="store_true",
         help="Also move originals whose staged symlink was routed to <staging>-fluff",
     )
+    parser.add_argument(
+        "--staging-dir",
+        required=True,
+        help="Path to the staging directory created by prep-paid",
+    )
 
 
 def _add_csv_parser(subparsers):
@@ -415,6 +420,23 @@ def _add_prep_paid_parser(subparsers) -> None:
         "--dry-run",
         action="store_true",
         help="Scan and report anomalies without staging files or writing DB",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=0,
+        help="Stop cleanly at an artist boundary after staging at least N files (Default: 0 = unlimited)",
+    )
+    parser.add_argument(
+        "--max-artists",
+        type=int,
+        default=0,
+        help="Stop after processing N artist folders (Default: 0 = unlimited)",
+    )
+    parser.add_argument(
+        "--rescan",
+        action="store_true",
+        help="Re-scan previously completed artist folders (still skips unchanged files via size/mtime cache)",
     )
 
 

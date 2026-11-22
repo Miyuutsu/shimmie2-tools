@@ -1,28 +1,55 @@
 """Safe post-import review mover for staged paid media.
 
-NEVER unlinks source media files. Moves only PostgreSQL MD5-verified originals into a review
-directory on the source drive and logs every move to undo_manifest.json for full reversal.
+NEVER unlinks source media files. Streams MD5-verified records from database/timeline_index.db,
+moves verified originals into a review directory on the source drive, and appends each move to
+undo_manifest.jsonl for crash-safe full reversal.
 """
 
-import json
 import shutil
+import sqlite3
 import sys
 from contextlib import suppress
 from pathlib import Path
 
+import orjson
 import psycopg2
 
+from functions.common import TIMELINE_DB_PATH
 from functions.db_cache import get_shimmie_db_credentials
 
 
-def _fetch_imported_hashes(md5s: list[str], db_cfg: dict) -> set[str]:
+def _fetch_imported_hashes(md5s: list[str], conn) -> set[str]:
     """Returns the subset of MD5 hashes confirmed present in Shimmie2's images table."""
-    found: set[str] = set()
-    with psycopg2.connect(**db_cfg) as conn, conn.cursor() as cur:
-        for i in range(0, len(md5s), 10000):
-            cur.execute("SELECT hash FROM images WHERE hash = ANY(%s)", (md5s[i : i + 10000],))
-            found.update(row[0].strip().lower() for row in cur.fetchall() if row[0])
-    return found
+    if not md5s:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute("SELECT hash FROM images WHERE hash = ANY(%s)", (md5s,))
+        return {row[0].strip().lower() for row in cur.fetchall() if row[0]}
+
+
+def _lookup_source_root(staging_dir: Path) -> Path:
+    """Looks up the source_root registered for a staging_dir in timeline_index.db."""
+    if not TIMELINE_DB_PATH.is_file():
+        print(f"[ERROR] Timeline DB not found: {TIMELINE_DB_PATH}")
+        sys.exit(1)
+
+    with sqlite3.connect(TIMELINE_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT source_root FROM staging_batches WHERE staging_dir = ?",
+            (str(staging_dir),),
+        ).fetchone()
+        if row and row[0]:
+            return Path(row[0]).resolve()
+
+        fallback = conn.execute(
+            "SELECT source_root FROM timeline_items WHERE staging_dir = ? AND source_root != '' LIMIT 1",
+            (str(staging_dir),),
+        ).fetchone()
+        if fallback and fallback[0]:
+            return Path(fallback[0]).resolve()
+
+    print(f"[ERROR] No staging batch found in {TIMELINE_DB_PATH} for: {staging_dir}")
+    sys.exit(1)
 
 
 def _resolve_review_dir(args, source_root: Path) -> Path:
@@ -37,10 +64,8 @@ def _run_move_or_dry_run(args, apply: bool) -> None:
         print("[ERROR] --spath is required for dry-run and apply.")
         sys.exit(1)
 
-    manifest_path = Path(args.manifest).resolve()
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_root = Path(data["source_root"]).resolve()
-    staging_dir = Path(data["staging_dir"]).resolve()
+    staging_dir = Path(args.staging_dir).resolve()
+    source_root = _lookup_source_root(staging_dir)
     fluff_dir = staging_dir.with_name(f"{staging_dir.name}-fluff")
     review_dir = _resolve_review_dir(args, source_root)
 
@@ -49,111 +74,134 @@ def _run_move_or_dry_run(args, apply: bool) -> None:
         print(f"[ERROR] Could not load DB credentials from {args.spath}")
         sys.exit(1)
 
-    items = data.get("items", [])
-    imported_hashes = _fetch_imported_hashes([it["md5"] for it in items], db_cfg)
-
-    to_move: list[tuple[Path, Path, str, str]] = []
+    ready_count = 0
+    moved_count = 0
     skipped_unimported = 0
     skipped_missing = 0
 
-    for it in items:
-        orig = Path(it["original_path"])
-        md5 = it["md5"].lower()
-        if not orig.is_file():
-            skipped_missing += 1
-            continue
+    dry_log_path = staging_dir / "cleanup_dry_run.log"
+    undo_path = review_dir / "undo_manifest.jsonl"
 
-        reason = ""
-        if md5 in imported_hashes:
-            reason = "imported_in_shimmie"
-        elif args.include_fluff:
-            staged_rel = Path(it["staged_path"]).relative_to(staging_dir)
-            if (fluff_dir / staged_rel).exists() or (fluff_dir / staged_rel).is_symlink():
-                reason = "triaged_fluff"
+    dry_handle = dry_log_path.open("w", encoding="utf-8") if not apply else None
+    undo_handle = None
 
-        if not reason:
-            skipped_unimported += 1
-            continue
+    try:
+        with (
+            sqlite3.connect(TIMELINE_DB_PATH) as sconn,
+            psycopg2.connect(**db_cfg) as pg_conn,
+        ):
+            scur = sconn.execute(
+                "SELECT original_path, staged_path, md5 FROM timeline_items WHERE staging_dir = ?",
+                (str(staging_dir),),
+            )
 
-        try:
-            rel = orig.resolve().relative_to(source_root)
-        except ValueError:
-            rel = Path(orig.name)
-        to_move.append((orig, review_dir / rel, md5, reason))
+            while batch := scur.fetchmany(10000):
+                imported = _fetch_imported_hashes([r[2].lower() for r in batch], pg_conn)
 
-    print(f"Verified ready to move to review dir: {len(to_move):,}")
+                for orig_str, staged_str, md5_raw in batch:
+                    orig = Path(orig_str)
+                    md5 = md5_raw.lower()
+                    if not orig.is_file():
+                        skipped_missing += 1
+                        continue
+
+                    reason = ""
+                    if md5 in imported:
+                        reason = "imported_in_shimmie"
+                    elif args.include_fluff and staged_str:
+                        with suppress(ValueError):
+                            staged_rel = Path(staged_str).relative_to(staging_dir)
+                            fluff_cand = fluff_dir / staged_rel
+                            if fluff_cand.exists() or fluff_cand.is_symlink():
+                                reason = "triaged_fluff"
+
+                    if not reason:
+                        skipped_unimported += 1
+                        continue
+
+                    try:
+                        rel = orig.resolve().relative_to(source_root)
+                    except ValueError:
+                        rel = Path(orig.name)
+                    dest = review_dir / rel
+                    ready_count += 1
+
+                    if not apply:
+                        assert dry_handle is not None
+                        dry_handle.write(f"[{reason}] {orig} -> {dest} ({md5})\n")
+                        continue
+
+                    if undo_handle is None:
+                        review_dir.mkdir(parents=True, exist_ok=True)
+                        undo_handle = undo_path.open("ab")
+
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if dest.exists():
+                        print(f"[SKIP] Destination already exists: {dest}")
+                        continue
+
+                    shutil.move(str(orig), str(dest))
+                    entry = {
+                        "original": str(orig),
+                        "moved_to": str(dest),
+                        "md5": md5,
+                        "reason": reason,
+                    }
+                    undo_handle.write(orjson.dumps(entry) + b"\n")
+                    moved_count += 1
+
+                if undo_handle is not None:
+                    undo_handle.flush()
+    finally:
+        if dry_handle is not None:
+            dry_handle.close()
+        if undo_handle is not None:
+            undo_handle.close()
+
+    print(f"Verified ready to move to review dir: {ready_count:,}")
     print(f"Left untouched (not yet imported):    {skipped_unimported:,}")
     print(f"Already absent from original path:    {skipped_missing:,}")
     print(f"Review directory:                     {review_dir}")
 
     if not apply:
-        log_path = staging_dir / "cleanup_dry_run.log"
-        with log_path.open("w", encoding="utf-8") as f:
-            for orig, dest, md5, reason in to_move:
-                f.write(f"[{reason}] {orig} -> {dest} ({md5})\n")
-        print(f"\n[DRY RUN] No files moved. Detailed plan written to {log_path}")
-        return
-
-    if not to_move:
-        print("\n[✓] Nothing to move.")
-        return
-
-    review_dir.mkdir(parents=True, exist_ok=True)
-    undo_path = review_dir / "undo_manifest.json"
-    undo_entries: list[dict[str, str]] = (
-        json.loads(undo_path.read_text(encoding="utf-8")) if undo_path.is_file() else []
-    )
-
-    moved = 0
-    try:
-        for orig, dest, md5, reason in to_move:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                print(f"[SKIP] Destination already exists: {dest}")
-                continue
-            shutil.move(str(orig), str(dest))
-            undo_entries.append(
-                {"original": str(orig), "moved_to": str(dest), "md5": md5, "reason": reason}
-            )
-            moved += 1
-    finally:
-        undo_path.write_text(json.dumps(undo_entries, indent=2), encoding="utf-8")
-
-    print(f"\n[✓] Moved {moved:,} verified files into {review_dir}")
-    print(f"    Undo manifest saved to {undo_path}")
-    print("    Review the folder and delete it manually when satisfied, or run `undo` to restore.")
+        print(f"\n[DRY RUN] No files moved. Detailed plan written to {dry_log_path}")
+    else:
+        print(f"\n[✓] Moved {moved_count:,} verified files into {review_dir}")
+        if moved_count:
+            print(f"    Undo log saved to {undo_path}")
+            print("    Review and delete manually when satisfied, or run `undo` to restore.")
 
 
 def _run_undo(args) -> None:
-    manifest_path = Path(args.manifest).resolve()
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    source_root = Path(data["source_root"]).resolve()
+    staging_dir = Path(args.staging_dir).resolve()
+    source_root = _lookup_source_root(staging_dir)
     review_dir = _resolve_review_dir(args, source_root)
-    undo_path = review_dir / "undo_manifest.json"
+    undo_path = review_dir / "undo_manifest.jsonl"
 
     if not undo_path.is_file():
-        print(f"[ERROR] Undo manifest not found: {undo_path}")
+        print(f"[ERROR] Undo log not found: {undo_path}")
         sys.exit(1)
 
-    entries = json.loads(undo_path.read_text(encoding="utf-8"))
+    raw_lines = [line for line in undo_path.read_bytes().splitlines() if line.strip()]
     restored = 0
-    remaining: list[dict[str, str]] = []
+    remaining: list[bytes] = []
 
-    for entry in reversed(entries):
+    for line in reversed(raw_lines):
+        entry = orjson.loads(line)
         src = Path(entry["moved_to"])
         dst = Path(entry["original"])
         if not src.exists():
             continue
         if dst.exists():
             print(f"[WARNING] Original path already exists, skipping restore: {dst}")
-            remaining.append(entry)
+            remaining.append(line)
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
         restored += 1
 
     if remaining:
-        undo_path.write_text(json.dumps(list(reversed(remaining)), indent=2), encoding="utf-8")
+        undo_path.write_bytes(b"\n".join(reversed(remaining)) + b"\n")
     else:
         undo_path.unlink()
         for d in sorted((p for p in review_dir.rglob("*") if p.is_dir()), reverse=True):
