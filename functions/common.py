@@ -1,8 +1,10 @@
 """Shared constants, paths, hashing utilities, and blacklist parsing."""
 
 import hashlib
+import os
 import re
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +26,18 @@ VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
 
 MD5_REGEX = re.compile(r"[a-fA-F0-9]{32}")
 
+_XATTR_MD5_KEY = "user.shimmie.md5"
+_XATTR_SHA256_KEY = "user.shimmie.sha256"
+
+
+@dataclass(slots=True)
+class _XattrConfig:
+    read: bool = False
+    write: bool = False
+
+
+_XATTR = _XattrConfig()
+
 
 @dataclass(slots=True)
 class BlacklistConfig:
@@ -35,13 +49,83 @@ class BlacklistConfig:
     prefilter_tags: set[str] = field(default_factory=set)
 
 
-def compute_md5(file_path: Path) -> str:
-    """Calculates the MD5 hash of a file from disk."""
-    hash_md5 = hashlib.md5()
+def set_xattr_mode(read: bool = False, write: bool = False) -> None:
+    """Configures process-wide filesystem xattr hash caching."""
+    _XATTR.read = bool(read)
+    _XATTR.write = bool(write)
+
+
+def _read_xattr_digest(file_path: Path, key: str, expected_len: int, st: os.stat_result) -> str:
+    """Reads and validates a cached hex digest from filesystem xattr against size and mtime_ns."""
+    if not _XATTR.read or not hasattr(os, "getxattr"):
+        return ""
+    with suppress(OSError, UnicodeDecodeError, ValueError):
+        raw = os.getxattr(file_path, key, follow_symlinks=True).decode("ascii")
+        digest, size_s, mtime_s = raw.split(":", 2)
+        if (
+            len(digest) == expected_len
+            and int(size_s) == st.st_size
+            and int(mtime_s) == st.st_mtime_ns
+        ):
+            return digest
+    return ""
+
+
+def _write_xattr_digest(file_path: Path, key: str, digest: str, st: os.stat_result) -> None:
+    """Writes a validated hex digest + size + mtime_ns to the target file's filesystem xattr."""
+    if not _XATTR.write or not digest or not hasattr(os, "setxattr"):
+        return
+    payload = f"{digest}:{st.st_size}:{st.st_mtime_ns}".encode("ascii")
+    with suppress(OSError):
+        os.setxattr(file_path, key, payload, follow_symlinks=True)
+
+
+def compute_hashes(
+    file_path: Path,
+    need_sha256: bool = False,
+    st: os.stat_result | None = None,
+) -> tuple[str, str]:
+    """Computes MD5 (and optionally SHA-256) in one 1 MB-buffered pass with optional xattr caching."""
+    stat_res = st
+    if (_XATTR.read or _XATTR.write) and stat_res is None:
+        with suppress(OSError):
+            stat_res = file_path.stat()
+
+    md5_hex = ""
+    sha_hex = ""
+    if _XATTR.read and stat_res is not None:
+        md5_hex = _read_xattr_digest(file_path, _XATTR_MD5_KEY, 32, stat_res)
+        if need_sha256:
+            sha_hex = _read_xattr_digest(file_path, _XATTR_SHA256_KEY, 64, stat_res)
+        if md5_hex and (not need_sha256 or sha_hex):
+            return md5_hex, sha_hex
+
+    calc_md5 = hashlib.md5() if not md5_hex else None
+    calc_sha = hashlib.sha256() if (need_sha256 and not sha_hex) else None
+
     with file_path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()
+        for chunk in iter(lambda: f.read(1048576), b""):
+            if calc_md5 is not None:
+                calc_md5.update(chunk)
+            if calc_sha is not None:
+                calc_sha.update(chunk)
+
+    if calc_md5 is not None:
+        md5_hex = calc_md5.hexdigest()
+        if _XATTR.write and stat_res is not None:
+            _write_xattr_digest(file_path, _XATTR_MD5_KEY, md5_hex, stat_res)
+
+    if calc_sha is not None:
+        sha_hex = calc_sha.hexdigest()
+        if _XATTR.write and stat_res is not None:
+            _write_xattr_digest(file_path, _XATTR_SHA256_KEY, sha_hex, stat_res)
+
+    return md5_hex, sha_hex
+
+
+def compute_md5(file_path: Path) -> str:
+    """Calculates the MD5 hash of a file (using filesystem xattr cache if enabled)."""
+    return compute_hashes(file_path, need_sha256=False)[0]
 
 
 def extract_or_compute_md5(file_path: Path) -> str:

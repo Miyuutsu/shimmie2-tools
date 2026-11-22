@@ -1,6 +1,5 @@
 """Streaming, checkpointed paid-content scanner, timeline indexer, and thumbnail fallback stager."""
 
-import hashlib
 import os
 import re
 import shlex
@@ -25,6 +24,7 @@ from functions.common import (
     STAGING_STATE_DB_PATH,
     TIMELINE_DB_PATH,
     VIDEO_EXTS,
+    compute_hashes,
 )
 from functions.db_cache import load_mappings
 
@@ -214,18 +214,6 @@ def init_staging_state_db(db_path: Path = STAGING_STATE_DB_PATH) -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_dir ON staged_files(staging_dir)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_staged_unit ON staged_files(unit_path)")
-
-
-def _compute_hashes(file_path: Path, need_sha256: bool = False) -> tuple[str, str]:
-    """Reads file once (1 MB buffer) to compute MD5 and optionally SHA-256."""
-    md5 = hashlib.md5()
-    sha = hashlib.sha256() if need_sha256 else None
-    with file_path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1048576), b""):
-            md5.update(chunk)
-            if sha is not None:
-                sha.update(chunk)
-    return md5.hexdigest(), (sha.hexdigest() if sha is not None else "")
 
 
 def _parse_timestamp(raw_val: Any) -> float | None:
@@ -873,7 +861,7 @@ def _dedup_files_by_md5(
     for f in files:
         if f not in hash_cache:
             try:
-                hash_cache[f] = _compute_hashes(f, need_sha256=False)
+                hash_cache[f] = compute_hashes(f, need_sha256=False)
             except OSError:
                 continue
         md5 = hash_cache[f][0]
@@ -935,7 +923,7 @@ def _resolve_thumbnails_with_safeguards(
             main_hashes: set[str] = set()
             for f in group.main_files:
                 if f not in hash_cache:
-                    hash_cache[f] = _compute_hashes(f, need_sha256=True)
+                    hash_cache[f] = compute_hashes(f, need_sha256=False)
                 main_hashes.add(hash_cache[f][1])
             if required_hashes.issubset(main_hashes):
                 return selected, []
@@ -1511,7 +1499,9 @@ def run_prep_paid(args) -> None:
                             ):
                                 md5, f_sha256 = cached[2], ""
                             else:
-                                md5, f_sha256 = _compute_hashes(file_path, need_sha256=need_sha)
+                                md5, f_sha256 = compute_hashes(
+                                    file_path, need_sha256=need_sha, st=st
+                                )
                                 artist_bytes_read += st.st_size
                                 file_pbar.set_postfix(
                                     read=f"{artist_bytes_read / 1_048_576:.0f}MB",

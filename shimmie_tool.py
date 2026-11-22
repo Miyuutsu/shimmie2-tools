@@ -87,6 +87,20 @@ class ColorHelpFormatter(argparse.RawTextHelpFormatter):
         )
 
 
+def _add_xattr_args(parser: argparse.ArgumentParser) -> None:
+    """Adds rmlint-style --xattr / --xattr-read filesystem hash caching flags."""
+    parser.add_argument(
+        "--xattr",
+        action="store_true",
+        help="Read and write cached MD5/SHA-256 hashes in filesystem xattrs (user.shimmie.*)",
+    )
+    parser.add_argument(
+        "--xattr-read",
+        action="store_true",
+        help="Read cached hashes from filesystem xattrs without writing any xattrs",
+    )
+
+
 def _add_audit_ratings_parser(subparsers) -> None:
     """Adds the audit-ratings command."""
     parser = subparsers.add_parser(
@@ -150,6 +164,7 @@ def _add_auto_tag_parser(subparsers) -> None:
     parser.add_argument(
         "--char-threshold", type=float, default=0.75, help="Character tag threshold (Default: 0.75)"
     )
+    _add_xattr_args(parser)
 
 
 def _add_cleanup_paid_parser(subparsers) -> None:
@@ -245,6 +260,7 @@ def _add_csv_parser(subparsers):
     parser.add_argument(
         "--chunk-size", type=int, default=500, help="Split CSV into chunks (Default: 500 lines)"
     )
+    _add_xattr_args(parser)
     return parser
 
 
@@ -277,6 +293,7 @@ def _add_import_csv_parser(subparsers) -> None:
         default=max(1, (os.cpu_count() or 1) // 2),
         help="Thread count for file copying and thumbnailing",
     )
+    _add_xattr_args(parser)
 
 
 def _add_csv2sqlite_parser(subparsers) -> None:
@@ -437,6 +454,7 @@ def _add_prep_paid_parser(subparsers) -> None:
         action="store_true",
         help="Re-scan previously completed artist folders (still skips unchanged files via size/mtime cache)",
     )
+    _add_xattr_args(parser)
 
 
 def _add_purge_parser(subparsers) -> None:
@@ -620,6 +638,17 @@ def _add_triage_parser(subparsers) -> None:
         action="store_true",
         help="Protect thumbnail_only fallback previews (from staging_state.db) from being routed to -fluff",
     )
+    parser.add_argument(
+        "--mine-reso-fluff",
+        action="store_true",
+        help="Read-only scan: find perceptually identical downscaled copies per artist and print size stats",
+    )
+    parser.add_argument(
+        "--dedup-downscales",
+        action="store_true",
+        help="Route verified downscaled duplicates (same artist, matching ratio & dHash, >=1.25x larger copy exists) to -fluff",
+    )
+    _add_xattr_args(parser)
 
 
 def _add_update_ratings_parser(subparsers) -> None:
@@ -750,6 +779,14 @@ def setup_parser():
 
 def _dispatch(args, parser_csv) -> None:
     """Lazily imports and runs the selected tool command."""
+    xattr_rw = bool(getattr(args, "xattr", False))
+    xattr_ro = bool(getattr(args, "xattr_read", False))
+    if xattr_rw or xattr_ro:
+        from functions.common import set_xattr_mode
+
+        is_dry_run = bool(getattr(args, "dry_run", False))
+        set_xattr_mode(read=True, write=(xattr_rw and not is_dry_run))
+
     if args.command == "make-csv":
         from tools import csv_builder
 
