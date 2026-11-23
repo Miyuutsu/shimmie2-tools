@@ -25,6 +25,7 @@ from functions.ai_tagger import (
     aggregate_frame_predictions,
     pil_ensure_rgb_448,
     prep_tagger_pad_uint8,
+    resolve_torch_device,
 )
 from functions.common import (
     CACHE_PATH,
@@ -810,11 +811,22 @@ def _decode_and_prep_siglip(
 class DualTriageEngine:
     """Holds in-VRAM SigLIP-B-16-256 and SmilingWolf tagger models."""
 
-    def __init__(self, tagger_model_name: str, device: torch.device) -> None:
+    def __init__(
+        self,
+        tagger_model_name: str,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        if device is None or dtype is None:
+            auto_dev, auto_dtype = resolve_torch_device()
+            device = device or auto_dev
+            dtype = dtype or auto_dtype
         self.device = device
-        self.dtype = torch.float16 if device.type == "cuda" else torch.float32
+        self.dtype = dtype
 
-        print(f"[INFO] Loading SigLIP zero-shot classifier ({SIGLIP_REPO}) on {device}...")
+        print(
+            f"[INFO] Loading SigLIP zero-shot classifier ({SIGLIP_REPO}) on {device} ({dtype})..."
+        )
         self.siglip, _ = open_clip.create_model_from_pretrained(SIGLIP_REPO)
         self.siglip = self.siglip.eval().to(device, dtype=self.dtype)
         tokenizer = open_clip.get_tokenizer(SIGLIP_REPO)
@@ -831,7 +843,7 @@ class DualTriageEngine:
             text_feat = self.siglip.encode_text(tokens)
             self.text_features = F.normalize(text_feat, dim=-1)
 
-        self.tagger = SmilingWolfTagger(tagger_model_name, device=device)
+        self.tagger = SmilingWolfTagger(tagger_model_name, device=device, dtype=dtype)
 
     def infer_siglip(
         self, uint8_frames: list[np.ndarray], batch_size: int
@@ -1649,8 +1661,8 @@ def run_triage(args) -> None:
 
         # --- Stage 3: Cascaded SigLIP (3A) -> EVA02 (3B) ---
         if stage3_candidates:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            engine = DualTriageEngine(args.model, device)
+            device, dtype = resolve_torch_device()
+            engine = DualTriageEngine(args.model, device, dtype)
             rating_weights = load_rating_weights()
             child_to_parents, _, _, sex_group_tags = load_tag_groups_metadata()
             group_info = (child_to_parents, sex_group_tags)

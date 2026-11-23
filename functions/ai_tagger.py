@@ -1,6 +1,7 @@
 """Shared in-process SmilingWolf GPU tagger, frame preprocessor, and consensus aggregator."""
 
 import logging
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,15 +101,74 @@ def decode_media_for_tagger(
     return media_path, prep_tagger_pad_uint8(frames)
 
 
-class SmilingWolfTagger:
-    """In-process SmilingWolf v3 tagger with GPU-side uint8 BGR flip and fp16 inference."""
+def resolve_torch_device() -> tuple[torch.device, torch.dtype]:
+    """Auto-detects the best PyTorch accelerator (CUDA/ROCm, XPU, MPS, DirectML, CPU) and dtype.
 
-    def __init__(self, model_name: str, device: torch.device | None = None) -> None:
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+    Optional environment overrides (no code edits needed):
+      - SHIMMIE_DEVICE: 'cuda', 'cuda:0', 'xpu', 'mps', 'dml', or 'cpu'
+      - SHIMMIE_DTYPE:  'fp16', 'bf16', or 'fp32'
+    """
+    override_dev = os.environ.get("SHIMMIE_DEVICE", "").strip().lower()
+    override_dtype = os.environ.get("SHIMMIE_DTYPE", "").strip().lower()
+
+    if override_dev == "dml":
+        import torch_directml  # type: ignore[import-untyped]
+
+        device = torch_directml.device()
+    elif override_dev:
+        device = torch.device(override_dev)
+    elif torch.cuda.is_available():
+        # Covers both NVIDIA CUDA and AMD ROCm (HIP exposes AMD GPUs via torch.cuda)
+        device = torch.device("cuda")
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        device = torch.device("xpu")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        try:
+            import torch_directml  # type: ignore[import-untyped]
+
+            device = torch_directml.device()
+        except ImportError:
+            device = torch.device("cpu")
+
+    dtype_map = {
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    if override_dtype in dtype_map:
+        dtype = dtype_map[override_dtype]
+    elif device.type in {"cuda", "xpu", "mps"}:
+        dtype = torch.float16
+    else:
+        # CPU and DirectML (privateuseone) default to fp32 for stability
+        dtype = torch.float32
+
+    return device, dtype
+
+
+class SmilingWolfTagger:
+    """In-process SmilingWolf v3 tagger with GPU-side uint8 BGR flip and fp16/fp32 inference."""
+
+    def __init__(
+        self,
+        model_name: str,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        if device is None or dtype is None:
+            auto_dev, auto_dtype = resolve_torch_device()
+            device = device or auto_dev
+            dtype = dtype or auto_dtype
+        self.device = device
+        self.dtype = dtype
         repo_id = MODEL_REPO_MAP[model_name]
 
-        print(f"[INFO] Loading SmilingWolf tagger ({repo_id}) on {self.device}...")
+        print(f"[INFO] Loading SmilingWolf tagger ({repo_id}) on {self.device} ({self.dtype})...")
         self.model = timm.create_model(f"hf-hub:{repo_id}", pretrained=True).eval()
         self.model = self.model.to(self.device, dtype=self.dtype)
         self._load_labels(repo_id)

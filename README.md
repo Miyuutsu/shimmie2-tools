@@ -55,7 +55,7 @@ uv pip install -r requirements.txt
 
 ```
 
-*(Install a CUDA-enabled PyTorch wheel matching your driver if `uv` pulls a CPU-only build.)*
+*(GPU setup: install the PyTorch wheel matching your hardware — NVIDIA CUDA, AMD ROCm on Linux via PyTorch's ROCm index, or `torch-directml` on Windows. `shimmie_tool.py` auto-detects CUDA/ROCm, Intel XPU, Apple MPS, DirectML, and CPU, and supports `SHIMMIE_DEVICE=cpu|cuda|dml` and `SHIMMIE_DTYPE=fp32|bf16|fp16` overrides if needed.)*
 
 ### Optional Shell Tab-Completion
 
