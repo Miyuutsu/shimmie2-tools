@@ -1,215 +1,120 @@
-"""Tool to automatically generate missing .txt sidecars for images and videos using AI and DB state."""
+"""Tool to automatically generate missing .txt sidecars for images and videos using in-process AI."""
 
-import json
 import os
-import sqlite3
-import subprocess
-import tempfile
-from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
 import tqdm
-from PIL import Image
 
+from functions.ai_tagger import (
+    SmilingWolfTagger,
+    aggregate_frame_predictions,
+    decode_media_for_tagger,
+)
 from functions.common import (
     CACHE_PATH,
     IMAGE_EXTS,
-    SUBMODULE_PATH,
-    TAG_DB_PATH,
     VIDEO_EXTS,
     extract_or_compute_md5,
+    sort_paths_by_disk_order,
 )
 from functions.db_cache import (
     get_existing_shimmie_hashes,
     get_shimmie_db_credentials,
+    load_rating_weights,
     post_has_tags,
     resolve_post,
 )
-from functions.media import extract_video_frames
 from functions.tags_curation import load_tag_groups_metadata
-
-SMIN_QUESTIONABLE = 51  # Scores > 50 (smax default) fall under questionable/explicit
-TAGGER_NATIVE_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff"}
-
-
-def _load_rating_weights() -> dict[str, int]:
-    """Loads tag rating weights from tag_rating_dominant.db."""
-    weights: dict[str, int] = {}
-    if not TAG_DB_PATH.is_file():
-        return weights
-    with sqlite3.connect(TAG_DB_PATH) as conn:
-        for row in conn.execute("SELECT tag_name, dominant_rating FROM dominant_tag_ratings"):
-            if len(row) >= 2 and row[0]:
-                weights[row[0].strip().lower()] = int(row[1])
-    return weights
-
-
-def _load_verbose_group_parents() -> tuple[dict[str, set[str]], set[str]]:
-    """Loads shared parent expansion rules and sex category tags from tag_groups.json."""
-    child_to_parents, _, _, sex_group_tags = load_tag_groups_metadata()
-    return child_to_parents, sex_group_tags
 
 
 def _collect_missing_sidecars(target_dir: Path, allowed_extensions: set[str]) -> list[Path]:
-    """Finds all valid media files missing a .txt sidecar."""
+    """Finds all valid media files missing a .txt sidecar without touching HDD targets unnecessarily."""
     if not target_dir or not target_dir.is_dir():
         return []
-    all_files = [
-        f
-        for f in target_dir.rglob("*")
-        if f.is_file() and "thumbnails" not in f.parts and f.suffix.lower() in allowed_extensions
-    ]
-    return [
-        f
-        for f in all_files
-        if not f.with_suffix(".txt").exists() and not f.with_name(f"{f.name}.txt").exists()
-    ]
-
-
-def _stage_media_files(
-    media_list: list[Path], stage_dir: Path
-) -> dict[int, dict[str, Path | int | list[str]]]:
-    """Stages symlinks for native static images, converts .avif/.jxl to .jpg, and extracts up to 5 frames for videos/GIFs."""
-    registry: dict[int, dict[str, Path | int | list[str]]] = {}
-    for idx, media_path in enumerate(
-        tqdm.tqdm(media_list, desc=f"Staging {stage_dir.name}", leave=False)
-    ):
-        suffix_lower = media_path.suffix.lower()
-        is_video = suffix_lower in VIDEO_EXTS
-
-        if not is_video:
-            stem = f"item_{idx}_f0"
-            if suffix_lower in TAGGER_NATIVE_IMAGE_EXTS:
-                sym_path = stage_dir / f"{stem}{suffix_lower}"
-                os.symlink(media_path.resolve(), sym_path)
-                registry[idx] = {"source": media_path, "frames": 1, "stems": [stem]}
-            else:
-                try:
-                    with Image.open(media_path) as im:
-                        rgb_img = im.convert("RGB") if im.mode != "RGB" else im
-                        rgb_img.save(stage_dir / f"{stem}.jpg", "JPEG", quality=95)
-                    registry[idx] = {"source": media_path, "frames": 1, "stems": [stem]}
-                except Exception as e:
-                    print(f"\n[WARNING] Could not convert {media_path} for tagger: {e}")
+    missing: list[Path] = []
+    for f in target_dir.rglob("*"):
+        if "thumbnails" in f.parts or f.suffix.lower() not in allowed_extensions:
             continue
-
-        try:
-            extracted = extract_video_frames(media_path, max_frames=5)
-        except Exception as e:
-            print(f"\n[WARNING] Could not extract frames from {media_path}: {e}")
+        if f.with_suffix(".txt").exists() or f.with_name(f"{f.name}.txt").exists():
             continue
-
-        if not extracted:
-            print(f"\n[WARNING] 0 frames decoded for {media_path}. Skipping.")
+        if not f.is_file():
             continue
-
-        stems: list[str] = []
-        for f_idx, pil_img in enumerate(extracted):
-            stem = f"item_{idx}_f{f_idx}"
-            frame_path = stage_dir / f"{stem}.jpg"
-            rgb_img = pil_img.convert("RGB") if pil_img.mode != "RGB" else pil_img
-            rgb_img.save(frame_path, "JPEG", quality=95)
-            stems.append(stem)
-
-        registry[idx] = {"source": media_path, "frames": len(stems), "stems": stems}
-
-    return registry
+        missing.append(f)
+    return missing
 
 
-def _consolidate_and_write_sidecars(
-    stage_dir: Path,
-    registry: dict[int, dict[str, Path | int | list[str]]],
+def _tag_file_group(
+    files: list[Path],
+    tagger: SmilingWolfTagger,
     tag_prefix: str,
-    dir_as_artist: bool,
+    args,
+    threads: int,
     rating_weights: dict[str, int],
     group_info: tuple[dict[str, set[str]], set[str]],
 ) -> int:
-    """Reads JSON outputs from SD-Tag-Editor, applies frame consensus rules, and writes .txt sidecars."""
-    child_to_bases, sex_group_tags = group_info
+    """Runs overlapped CPU/HDD decode + in-process GPU inference and writes .txt sidecars."""
+    if not files:
+        return 0
+
+    chunk_size = max(64, args.batch * 8)
+    char_prefix = tag_prefix or "character:"
     written_count = 0
 
-    for info in registry.values():
-        src_path: Path = info["source"]  # type: ignore[assignment]
-        stems: list[str] = info["stems"]  # type: ignore[assignment]
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        chunk_starts = range(0, len(files), chunk_size)
+        next_futs = [pool.submit(decode_media_for_tagger, p, 5) for p in files[0:chunk_size]]
 
-        char_counts: Counter[str] = Counter()
-        char_max_conf: dict[str, float] = defaultdict(float)
-        gen_counts: Counter[str] = Counter()
-        gen_max_conf: dict[str, float] = defaultdict(float)
-        valid_frames = 0
+        for c_idx in tqdm.tqdm(range(len(chunk_starts)), desc="GPU Chunks"):
+            decoded_items = [fut.result() for fut in next_futs]
 
-        for stem in stems:
-            json_path = stage_dir / f"{stem}.json"
-            if not json_path.is_file():
+            if c_idx + 1 < len(chunk_starts):
+                n_start = chunk_starts[c_idx + 1]
+                next_futs = [
+                    pool.submit(decode_media_for_tagger, p, 5)
+                    for p in files[n_start : n_start + chunk_size]
+                ]
+            else:
+                next_futs = []
+
+            flat_arrays: list[np.ndarray] = []
+            slices: list[tuple[Path, int, int]] = []
+            for src_path, arrays in decoded_items:
+                if not arrays:
+                    print(f"\n[WARNING] Could not decode {src_path}. Skipping.")
+                    continue
+                start_i = len(flat_arrays)
+                flat_arrays.extend(arrays)
+                slices.append((src_path, start_i, len(flat_arrays)))
+
+            if not flat_arrays:
                 continue
 
-            valid_frames += 1
-            with json_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+            probs_list = tagger.infer_batch(flat_arrays, args.batch)
+            for src_path, start_i, end_i in slices:
+                preds = aggregate_frame_predictions(
+                    probs_list[start_i:end_i],
+                    tagger,
+                    gen_threshold=args.gen_threshold,
+                    char_threshold=args.char_threshold,
+                    rating_weights=rating_weights,
+                    group_info=group_info,
+                )
 
-            for c_tag, conf in data.get("character", {}).items():
-                clean_c = c_tag.replace(" ", "_").lower()
-                char_counts[clean_c] += 1
-                char_max_conf[clean_c] = max(char_max_conf[clean_c], float(conf))
+                final_tags: list[str] = []
+                if args.dir_as_artist:
+                    artist_name = src_path.parent.name.lower().replace(" ", "_")
+                    final_tags.append(f"artist:{artist_name}")
 
-            for g_tag, conf in data.get("general", {}).items():
-                clean_g = g_tag.replace(" ", "_").lower()
-                gen_counts[clean_g] += 1
-                gen_max_conf[clean_g] = max(gen_max_conf[clean_g], float(conf))
+                final_tags.extend(f"{char_prefix}{c}" for c in preds.approved_chars)
+                final_tags.extend(f"{tag_prefix}{g}" for g in preds.approved_gens)
 
-        if valid_frames == 0:
-            continue
-
-        char_min_hits = 1 if valid_frames == 1 else min(3, valid_frames)
-        gen_min_hits = 1 if valid_frames == 1 else min(2, valid_frames)
-        qe_min_hits = 1 if valid_frames == 1 else min(2, valid_frames)
-
-        approved_chars = [c for c, cnt in char_counts.items() if cnt >= char_min_hits]
-        approved_chars.sort(key=lambda c: char_max_conf[c], reverse=True)
-
-        approved_gens: set[str] = set()
-        for g, cnt in gen_counts.items():
-            is_qe = rating_weights.get(g, 0) >= SMIN_QUESTIONABLE or g in sex_group_tags
-            required_hits = qe_min_hits if is_qe else gen_min_hits
-
-            if cnt >= required_hits:
-                approved_gens.add(g)
-                for parent_base in child_to_bases.get(g, ()):
-                    approved_gens.add(parent_base)
-                    gen_max_conf[parent_base] = max(gen_max_conf[parent_base], gen_max_conf[g])
-
-        sorted_gens = sorted(approved_gens, key=lambda g: gen_max_conf[g], reverse=True)
-
-        final_tags: list[str] = []
-        if dir_as_artist:
-            artist_name = src_path.resolve().parent.name.lower().replace(" ", "_")
-            final_tags.append(f"artist:{artist_name}")
-
-        char_prefix = tag_prefix or "character:"
-        final_tags.extend(f"{char_prefix}{c}" for c in approved_chars)
-        final_tags.extend(f"{tag_prefix}{g}" for g in sorted_gens)
-
-        sidecar_path = src_path.with_suffix(".txt")
-        sidecar_path.write_text(", ".join(final_tags), encoding="utf-8")
-        written_count += 1
+                sidecar_path = src_path.with_suffix(".txt")
+                sidecar_path.write_text(", ".join(final_tags), encoding="utf-8")
+                written_count += 1
 
     return written_count
-
-
-def _build_tagger_cmd(venv_python: Path, target_dir: Path, args) -> list[str]:
-    """Constructs the SD-Tag-Editor CLI command with the positional path first and explicit boolean flag."""
-    return [
-        str(venv_python),
-        "-u",
-        str(SUBMODULE_PATH / "run.py"),
-        str(target_dir),
-        f"--model={args.model}",
-        f"--batch_size={args.batch}",
-        f"--gen_threshold={args.gen_threshold}",
-        f"--char_threshold={args.char_threshold}",
-        "--output_json",
-        "True",
-    ]
 
 
 def run_auto_tagger(args) -> None:
@@ -221,11 +126,6 @@ def run_auto_tagger(args) -> None:
     if not getattr(args, "images", None) and not getattr(args, "videos", None):
         print("[ERROR] You must provide at least one target path: --path, --images, or --videos")
         return
-
-    venv_python = SUBMODULE_PATH / "venv" / "bin" / "python"
-    if not venv_python.exists():
-        print("[INFO] SD-Tag-Editor venv not found. Running install.sh...")
-        subprocess.run(["bash", "install.sh"], cwd=SUBMODULE_PATH, check=True)
 
     img_dir = Path(args.images).resolve() if getattr(args, "images", None) else None
     vid_dir = Path(args.videos).resolve() if getattr(args, "videos", None) else None
@@ -252,11 +152,20 @@ def run_auto_tagger(args) -> None:
         print("[✓] All target files already have sidecars. No action needed.")
         return
 
+    missing_sidecars = sort_paths_by_disk_order(missing_sidecars)
+    threads = getattr(args, "threads", max(1, (os.cpu_count() or 1) // 2))
+
     print(f"[INFO] Found {len(missing_sidecars):,} files missing sidecars. Checking DB status...")
-    md5_by_file = {
-        f: extract_or_compute_md5(f)
-        for f in tqdm.tqdm(missing_sidecars, desc="Extracting Hashes", leave=False)
-    }
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        md5_list = list(
+            tqdm.tqdm(
+                pool.map(extract_or_compute_md5, missing_sidecars),
+                total=len(missing_sidecars),
+                desc="Extracting Hashes",
+                leave=False,
+            )
+        )
+    md5_by_file = dict(zip(missing_sidecars, md5_list, strict=True))
 
     db_config = get_shimmie_db_credentials(args.spath) if getattr(args, "spath", None) else None
     existing_hashes = get_existing_shimmie_hashes(md5_by_file.values(), db_config)
@@ -264,55 +173,51 @@ def run_auto_tagger(args) -> None:
     known_files: list[Path] = []
     unknown_files: list[Path] = []
 
-    for media_file in tqdm.tqdm(missing_sidecars, desc="Querying Cache & DB"):
-        res = resolve_post(
-            media_file,
-            cache_path=CACHE_PATH,
-            existing_hashes=existing_hashes,
-            precomputed_md5=md5_by_file[media_file],
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        res_iter = pool.map(
+            lambda f: resolve_post(
+                f,
+                cache_path=CACHE_PATH,
+                existing_hashes=existing_hashes,
+                precomputed_md5=md5_by_file[f],
+            ),
+            missing_sidecars,
         )
-        if res.exists == "error":
-            continue
-        if res.exists or post_has_tags(res.post):
-            known_files.append(media_file)
-        else:
-            unknown_files.append(media_file)
+        for media_file, res in zip(
+            missing_sidecars,
+            tqdm.tqdm(res_iter, total=len(missing_sidecars), desc="Querying Cache & DB"),
+            strict=True,
+        ):
+            if res.exists == "error":
+                continue
+            if res.exists or post_has_tags(res.post):
+                known_files.append(media_file)
+            else:
+                unknown_files.append(media_file)
 
     print("\n[INFO] Segregation complete:")
     print(f"  - Known (Receives 'tagai:' shield): {len(known_files):,}")
     print(f"  - Unknown (Fully trusted AI tags):  {len(unknown_files):,}\n")
 
-    rating_weights = _load_rating_weights()
-    group_info = _load_verbose_group_parents()
+    if not known_files and not unknown_files:
+        return
+
+    tagger = SmilingWolfTagger(args.model)
+    rating_weights = load_rating_weights()
+    child_to_parents, _, _, sex_group_tags = load_tag_groups_metadata()
+    group_info = (child_to_parents, sex_group_tags)
     total_created = 0
 
-    with tempfile.TemporaryDirectory(prefix="auto_tag_") as tmpdir:
-        tmp_path = Path(tmpdir)
-        known_dir = tmp_path / "known"
-        unknown_dir = tmp_path / "unknown"
-        known_dir.mkdir()
-        unknown_dir.mkdir()
+    if known_files:
+        print("=== Processing Known Files ===")
+        total_created += _tag_file_group(
+            known_files, tagger, "tagai:", args, threads, rating_weights, group_info
+        )
 
-        if known_files:
-            print("=== Processing Known Files ===")
-            if known_reg := _stage_media_files(known_files, known_dir):
-                subprocess.run(
-                    _build_tagger_cmd(venv_python, known_dir, args), cwd=SUBMODULE_PATH, check=True
-                )
-                total_created += _consolidate_and_write_sidecars(
-                    known_dir, known_reg, "tagai:", args.dir_as_artist, rating_weights, group_info
-                )
-
-        if unknown_files:
-            print("\n=== Processing Unknown Files ===")
-            if unknown_reg := _stage_media_files(unknown_files, unknown_dir):
-                subprocess.run(
-                    _build_tagger_cmd(venv_python, unknown_dir, args),
-                    cwd=SUBMODULE_PATH,
-                    check=True,
-                )
-                total_created += _consolidate_and_write_sidecars(
-                    unknown_dir, unknown_reg, "", args.dir_as_artist, rating_weights, group_info
-                )
+    if unknown_files:
+        print("\n=== Processing Unknown Files ===")
+        total_created += _tag_file_group(
+            unknown_files, tagger, "", args, threads, rating_weights, group_info
+        )
 
     print(f"\n[✓] Sidecar generation complete! Created {total_created:,} new files.")

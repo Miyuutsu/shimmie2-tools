@@ -1,25 +1,35 @@
-"""Bridge script for auditing Shimmie2 images with SD-Tag-Editor and injecting shadow tags."""
+"""In-process AI auditor for Shimmie2 thumbnails that injects tagai:* shadow tags."""
 
-import json
 import os
 import sqlite3
-import subprocess
-import tempfile
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
 import psycopg2
 import psycopg2.extras
 import tqdm
 
-from functions.common import QUARANTINE_DB_PATH, SUBMODULE_PATH, VIDEO_EXTS
-from functions.db_cache import get_shimmie_db_credentials
+from functions.ai_tagger import (
+    SmilingWolfTagger,
+    aggregate_frame_predictions,
+    decode_media_for_tagger,
+)
+from functions.common import QUARANTINE_DB_PATH, VIDEO_EXTS
+from functions.db_cache import (
+    ensure_tags_in_db,
+    get_shimmie_db_credentials,
+    recalculate_tag_counts,
+)
 
 
 def _init_quarantine_db() -> sqlite3.Connection:
     """Initializes the SQLite quarantine database for logging raw AI tag confidences."""
     QUARANTINE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     q_conn = sqlite3.connect(QUARANTINE_DB_PATH)
+    q_conn.execute("PRAGMA journal_mode=WAL;")
+    q_conn.execute("PRAGMA synchronous=NORMAL;")
     q_conn.execute("""
         CREATE TABLE IF NOT EXISTS ai_tags (
             image_hash TEXT,
@@ -34,33 +44,37 @@ def _init_quarantine_db() -> sqlite3.Connection:
 
 def _get_image_batches(
     pg_conn, batch_size: int = 5000
-) -> Iterator[dict[str, dict[str, int | set[str]]]]:
-    """Yields dictionaries of untagged static images using a withhold server-side cursor to prevent OOM."""
+) -> Iterator[dict[str, tuple[int, set[str]]]]:
+    """Yields {md5: (image_id, existing_tags)} for untagged static images via a server-side cursor."""
     excluded_exts = tuple(ext.lstrip(".") for ext in VIDEO_EXTS)
     with pg_conn.cursor(name="audit_cursor", withhold=True) as cur:
         cur.execute(
             """
+            WITH tagai_tags AS MATERIALIZED (
+                SELECT id FROM tags WHERE tag LIKE 'tagai:%%'
+            )
             SELECT i.id, i.hash, array_agg(t.tag)
             FROM images i
             LEFT JOIN image_tags it ON i.id = it.image_id
             LEFT JOIN tags t ON it.tag_id = t.id
             WHERE LOWER(i.ext) NOT IN %s
-                AND NOT EXISTS (
-                SELECT 1
-                FROM image_tags it2
-                JOIN tags t2 ON it2.tag_id = t2.id
-                WHERE it2.image_id = i.id AND t2.tag LIKE 'tagai:%%'
-                )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM image_tags it2
+                  WHERE it2.image_id = i.id
+                    AND it2.tag_id IN (SELECT id FROM tagai_tags)
+              )
             GROUP BY i.id, i.hash
             """,
             (excluded_exts,),
         )
 
         while rows := cur.fetchmany(batch_size):
-            batch_data: dict[str, dict[str, int | set[str]]] = {}
+            batch_data: dict[str, tuple[int, set[str]]] = {}
             for img_id, img_hash, tag_list in rows:
+                clean_h = img_hash.strip().lower()
                 clean_tags = {t for t in (tag_list or ()) if t is not None}
-                batch_data[img_hash] = {"id": img_id, "tags": clean_tags}
+                batch_data[clean_h] = (int(img_id), clean_tags)
             yield batch_data
 
 
@@ -69,114 +83,95 @@ def _resolve_shimmie_thumb_path(base_dir: Path, md5_hash: str) -> Path:
     return base_dir / md5_hash[0:2] / md5_hash[2:4] / md5_hash
 
 
-def _ensure_submodule_installed() -> Path:
-    """Ensures the SD-Tag-Editor virtual environment exists."""
-    venv_python = SUBMODULE_PATH / "venv" / "bin" / "python"
-    if not venv_python.exists():
-        print("[INFO] SD-Tag-Editor venv not found. Running install.sh...")
-        subprocess.run(["bash", "install.sh"], cwd=SUBMODULE_PATH, check=True)
-    return venv_python
-
-
-def _ensure_tag_exists(pg_cur, tag_name: str, tag_id_cache: dict[str, int]) -> int:
-    """Fetches or creates a tag ID in PostgreSQL, caching results across chunks."""
-    if tag_name in tag_id_cache:
-        return tag_id_cache[tag_name]
-
-    pg_cur.execute("SELECT id FROM tags WHERE tag = %s", (tag_name,))
-    if row := pg_cur.fetchone():
-        tag_id_cache[tag_name] = row[0]
-        return row[0]
-
-    pg_cur.execute("INSERT INTO tags (tag, count) VALUES (%s, 0) RETURNING id", (tag_name,))
-    tag_id = pg_cur.fetchone()[0]
-    tag_id_cache[tag_name] = tag_id
-    return tag_id
-
-
 def _run_audit_pipeline(
     args, pg_conn, pg_cur, q_conn: sqlite3.Connection, q_cur: sqlite3.Cursor
 ) -> None:
-    """Streams image chunks from Postgres, runs AI tagger inference, and commits shadow tags per chunk."""
-    venv_python = _ensure_submodule_installed()
+    """Streams image chunks from Postgres, runs in-process GPU inference, and commits shadow tags."""
     thumbs_base_dir = Path(args.thumbs) if args.thumbs else Path(args.spath) / "data" / "thumbs"
-    if not thumbs_base_dir.exists():
+    if not thumbs_base_dir.is_dir():
         print(f"[ERROR] Thumbnails directory not found at {thumbs_base_dir}")
         return
 
+    threads = getattr(args, "threads", max(1, (os.cpu_count() or 1) // 2))
+    tagger = SmilingWolfTagger(args.model)
+
+    print("Loading existing tag map from Postgres...")
+    pg_cur.execute("SELECT tag, id FROM tags")
+    tag_id_map: dict[str, int] = dict(pg_cur.fetchall())
+    affected_tag_ids: set[int] = set()
+
+    gpu_chunk_size = max(64, args.batch * 8)
     print("Initiating streaming database cursor...")
-    tag_id_cache: dict[str, int] = {}
-    tagger_script = SUBMODULE_PATH / "run.py"
 
-    for batch_index, images_data in enumerate(_get_image_batches(pg_conn)):
-        if not images_data:
-            continue
-
-        print(f"\n--- Processing DB Chunk {batch_index + 1} ({len(images_data):,} images) ---")
-
-        with tempfile.TemporaryDirectory(prefix="ai_audit_") as temp_dir_str:
-            staging_dir = Path(temp_dir_str)
-            staged_count = 0
-
-            for img_hash in tqdm.tqdm(images_data, desc="Staging Symlinks"):
-                real_thumb = _resolve_shimmie_thumb_path(thumbs_base_dir, img_hash).resolve()
-                if real_thumb.exists():
-                    os.symlink(real_thumb, staging_dir / f"{img_hash}.jpg")
-                    staged_count += 1
-
-            if staged_count == 0:
-                print("[WARNING] No thumbnails found matching this DB chunk. Skipping.")
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        for batch_index, images_data in enumerate(_get_image_batches(pg_conn)):
+            if not images_data:
                 continue
 
-            cmd = [
-                str(venv_python),
-                "-u",
-                str(tagger_script),
-                str(staging_dir),
-                f"--model={args.model}",
-                f"--batch_size={args.batch}",
-                f"--gen_threshold={args.gen_threshold}",
-                f"--char_threshold={args.char_threshold}",
-                "--output_json",
-                "True",
-            ]
+            # Sort by hash so fanout reads (data/thumbs/p1/p2/hash) are sequential on disk
+            work_items: list[tuple[str, Path]] = []
+            for img_hash in sorted(images_data):
+                thumb_path = _resolve_shimmie_thumb_path(thumbs_base_dir, img_hash)
+                if thumb_path.is_file():
+                    work_items.append((img_hash, thumb_path))
 
-            print("[INFO] Launching Inference...")
-            try:
-                subprocess.run(cmd, cwd=SUBMODULE_PATH, check=True)
-            except subprocess.CalledProcessError as e:
-                print(f"[ERROR] Tagger submodule failed: {e}")
-                return
+            if not work_items:
+                print(f"[WARNING] Chunk {batch_index + 1}: no thumbnails found on disk. Skipping.")
+                continue
 
-            print("[INFO] Resolving tags and updating Postgres...")
-            pg_insert_records: set[tuple[int, int]] = set()
+            print(
+                f"\n--- Processing DB Chunk {batch_index + 1} "
+                f"({len(work_items):,}/{len(images_data):,} thumbnails) ---"
+            )
+
+            pending_tag_pairs: set[tuple[int, str]] = set()
             quarantine_records: list[tuple[str, str, float]] = []
 
-            for json_file in tqdm.tqdm(list(staging_dir.glob("*.json")), desc="Parsing Output"):
-                img_hash = json_file.stem
-                if img_hash not in images_data:
+            chunk_starts = range(0, len(work_items), gpu_chunk_size)
+            next_futs = [
+                (hsh, pool.submit(decode_media_for_tagger, p, 1))
+                for hsh, p in work_items[0:gpu_chunk_size]
+            ]
+
+            for c_idx in tqdm.tqdm(range(len(chunk_starts)), desc="GPU Inference", leave=False):
+                decoded = [(hsh, fut.result()[1]) for hsh, fut in next_futs]
+
+                if c_idx + 1 < len(chunk_starts):
+                    n_start = chunk_starts[c_idx + 1]
+                    next_futs = [
+                        (hsh, pool.submit(decode_media_for_tagger, p, 1))
+                        for hsh, p in work_items[n_start : n_start + gpu_chunk_size]
+                    ]
+                else:
+                    next_futs = []
+
+                flat_arrays: list[np.ndarray] = []
+                valid_hashes: list[str] = []
+                for hsh, arrays in decoded:
+                    if arrays:
+                        flat_arrays.append(arrays[0])
+                        valid_hashes.append(hsh)
+
+                if not flat_arrays:
                     continue
 
-                data = images_data[img_hash]
-                with json_file.open("r", encoding="utf-8") as f:
-                    output = json.load(f)
+                probs_list = tagger.infer_batch(flat_arrays, args.batch)
+                for hsh, probs in zip(valid_hashes, probs_list, strict=True):
+                    preds = aggregate_frame_predictions(
+                        [probs],
+                        tagger,
+                        gen_threshold=args.gen_threshold,
+                        char_threshold=args.char_threshold,
+                    )
+                    img_id, raw_db_tags = images_data[hsh]
+                    base_db_tags = {
+                        (t.split(":", 1)[-1] if ":" in t else t).lower() for t in raw_db_tags
+                    }
 
-                all_tags = {**output.get("character", {}), **output.get("general", {})}
-                raw_db_tags: set[str] = data["tags"]  # type: ignore[assignment]
-                base_db_tags = {
-                    (t.split(":", 1)[-1] if ":" in t else t).lower() for t in raw_db_tags
-                }
-
-                for tag, confidence in all_tags.items():
-                    tag_clean = tag.replace(" ", "_").lower()
-                    quarantine_records.append((img_hash, tag_clean, float(confidence)))
-
-                    if tag_clean in base_db_tags:
-                        continue
-
-                    prefixed_tag = f"tagai:{tag_clean}"
-                    tag_id = _ensure_tag_exists(pg_cur, prefixed_tag, tag_id_cache)
-                    pg_insert_records.add((int(data["id"]), tag_id))
+                    for tag_name, conf in {**preds.char_scores, **preds.gen_scores}.items():
+                        quarantine_records.append((hsh, tag_name, conf))
+                        if tag_name not in base_db_tags:
+                            pending_tag_pairs.add((img_id, f"tagai:{tag_name}"[:255]))
 
             if quarantine_records:
                 q_cur.executemany(
@@ -185,11 +180,19 @@ def _run_audit_pipeline(
                 )
                 q_conn.commit()
 
-            if pg_insert_records:
+            if pending_tag_pairs:
+                new_tag_names = {t_name for _, t_name in pending_tag_pairs}
+                ensure_tags_in_db(pg_cur, new_tag_names, tag_id_map)
+
+                pg_insert_records = [
+                    (img_id, tag_id_map[t_name]) for img_id, t_name in pending_tag_pairs
+                ]
+                affected_tag_ids.update(tid for _, tid in pg_insert_records)
+
                 psycopg2.extras.execute_values(
                     pg_cur,
                     "INSERT INTO image_tags (image_id, tag_id) VALUES %s ON CONFLICT DO NOTHING",
-                    list(pg_insert_records),
+                    pg_insert_records,
                     page_size=10000,
                 )
                 pg_conn.commit()
@@ -197,27 +200,17 @@ def _run_audit_pipeline(
             else:
                 print("No new tags to apply for this chunk.")
 
-    print("\nRecalculating global tagai:* counts...")
-    pg_cur.execute("""
-        UPDATE tags
-        SET count = (
-            SELECT COUNT(image_id)
-            FROM image_tags
-            WHERE tag_id = tags.id
-        )
-        WHERE tag LIKE 'tagai:%'
-    """)
-    pg_conn.commit()
+    if affected_tag_ids:
+        print(f"\nRecalculating tag usage counts for {len(affected_tag_ids):,} tagai:* tags...")
+        recalculate_tag_counts(pg_cur, affected_tag_ids, prune_orphans=False)
+        pg_conn.commit()
+
     print("\n[✓] Global Audit Complete.")
 
 
 def run_auditor(args) -> None:
     """Main CLI entry point for audit-ratings."""
-    if not SUBMODULE_PATH.exists():
-        print("[ERROR] SD-Tag-Editor submodule not found.")
-        return
-
-    print("=== AI Shadow Tag Auditor (Direct Apply) ===")
+    print("=== AI Shadow Tag Auditor (In-Process Direct Apply) ===")
     db_config = get_shimmie_db_credentials(args.spath)
     if not db_config:
         print(f"[ERROR] Could not load DB credentials from {args.spath}")

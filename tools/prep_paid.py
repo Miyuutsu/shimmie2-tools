@@ -822,6 +822,12 @@ def _archives_may_contain_media(archives: list[Path]) -> tuple[bool, bool]:
                 return True, False
             continue
 
+        if suffix in {".7z", ".rar", ".cbr"}:
+            has_media, is_enc = _inspect_with_7z(arc)
+            if has_media:
+                return True, is_enc
+            continue
+
         if suffix in {".tar", ".tgz", ".tbz2", ".txz"} or tarfile.is_tarfile(arc):
             try:
                 with tarfile.open(arc, "r:*") as tf:
@@ -833,12 +839,6 @@ def _archives_may_contain_media(archives: list[Path]) -> tuple[bool, bool]:
                             return True, False
             except (OSError, tarfile.TarError):
                 return True, False
-            continue
-
-        if suffix in {".7z", ".rar", ".cbr"}:
-            has_media, is_enc = _inspect_with_7z(arc)
-            if has_media:
-                return True, is_enc
             continue
 
         return True, False
@@ -921,8 +921,8 @@ def _resolve_thumbnails_with_safeguards(
         if required_hashes:
             main_hashes: set[str] = set()
             for f in group.main_files:
-                if f not in hash_cache:
-                    hash_cache[f] = compute_hashes(f, need_sha256=False)
+                if f not in hash_cache or not hash_cache[f][1]:
+                    hash_cache[f] = compute_hashes(f, need_sha256=True)
                 main_hashes.add(hash_cache[f][1])
             if required_hashes.issubset(main_hashes):
                 return selected, []
@@ -1488,7 +1488,9 @@ def run_prep_paid(args) -> None:
                                 and file_path.stem.lower() not in manifest_stems
                             )
 
-                            if file_path in hash_cache:
+                            if file_path in hash_cache and (
+                                not need_sha or hash_cache[file_path][1]
+                            ):
                                 md5, f_sha256 = hash_cache[file_path]
                             elif (
                                 not need_sha

@@ -105,7 +105,7 @@ def _add_audit_ratings_parser(subparsers) -> None:
     """Adds the audit-ratings command."""
     parser = subparsers.add_parser(
         "audit-ratings",
-        help="Audit images using AI Tagger submodule to inject shadow tags",
+        help="Audit Shimmie2 thumbnails with in-process AI tagger to inject tagai:* shadow tags",
         formatter_class=ColorHelpFormatter,
     )
     parser.add_argument("--spath", required=True, help="Path to Shimmie root")
@@ -131,13 +131,19 @@ def _add_audit_ratings_parser(subparsers) -> None:
         default=0.75,
         help="Character tag confidence threshold (Default: 0.75)",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=max(1, (os.cpu_count() or 1) // 2),
+        help="Thread count for parallel thumbnail decoding",
+    )
 
 
 def _add_auto_tag_parser(subparsers) -> None:
     """Adds the auto-tag command."""
     parser = subparsers.add_parser(
         "auto-tag",
-        help="Auto-generate missing sidecars using AI",
+        help="Auto-generate missing sidecars using in-process AI",
         formatter_class=ColorHelpFormatter,
     )
     parser.add_argument("--path", help="Path to target directory (scans both images and videos)")
@@ -164,6 +170,12 @@ def _add_auto_tag_parser(subparsers) -> None:
     parser.add_argument(
         "--char-threshold", type=float, default=0.75, help="Character tag threshold (Default: 0.75)"
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=max(1, (os.cpu_count() or 1) // 2),
+        help="Thread count for hashing, DB lookup, and media decoding",
+    )
     _add_xattr_args(parser)
 
 
@@ -171,13 +183,13 @@ def _add_cleanup_paid_parser(subparsers) -> None:
     """Adds the cleanup-paid command."""
     parser = subparsers.add_parser(
         "cleanup-paid",
-        help="Safely move MD5-verified paid originals to a review directory (with dry-run and undo)",
+        help="Safely move MD5-verified paid originals to a review directory (dry-run, apply, undo, prune-db)",
         formatter_class=ColorHelpFormatter,
     )
     parser.add_argument(
         "action",
-        choices=["dry-run", "apply", "undo"],
-        help="Action to perform on verified staged originals",
+        choices=["dry-run", "apply", "undo", "prune-db"],
+        help="Action to perform (dry-run, apply, undo, or prune-db to trim staging_state.db)",
     )
     parser.add_argument("--spath", help="Path to Shimmie2 root (required for dry-run and apply)")
     parser.add_argument(

@@ -112,10 +112,6 @@ def run_sync_pools(args) -> None:
             for hsh, img_id in matched_ids.items()
         }
 
-        if not matched_images:
-            print("[!] None of the indexed MD5s exist in Shimmie2 yet.")
-            return
-
         # Group into one pool per artist (preferring the live curated artist:* tag when unique)
         pools_by_artist: dict[str, list[PoolEntry]] = defaultdict(list)
         for hsh, (img_id, live_artists) in matched_images.items():
@@ -155,29 +151,40 @@ def run_sync_pools(args) -> None:
                 print(f"  [DRY RUN] Pool '{title}': {len(ordered_ids):,} posts")
                 continue
 
-            cur.execute(
-                """
-                INSERT INTO pools (user_id, public, title, description, posts)
-                VALUES (%s, %s, %s, %s, 0)
-                ON CONFLICT (title) DO UPDATE SET
-                    lastupdated = CURRENT_TIMESTAMP
-                RETURNING id
-                """,
-                (user_id, is_public, title, f"Chronological archive for artist:{artist}"),
-            )
-            pool_id = int(cur.fetchone()[0])
+            cur.execute("SELECT id, posts FROM pools WHERE title = %s", (title,))
+            existing_pool = cur.fetchone()
 
-            # Preserve any manually added images in the pool that aren't in timeline_index.db
-            cur.execute(
-                "SELECT image_id FROM pool_images WHERE pool_id = %s ORDER BY image_order ASC",
-                (pool_id,),
-            )
-            existing_ids = [int(r[0]) for r in cur.fetchall()]
-            indexed_set = set(ordered_ids)
-            manual_tail = [iid for iid in existing_ids if iid not in indexed_set]
-            final_ids = ordered_ids + list(dict.fromkeys(manual_tail))
+            if existing_pool is not None:
+                pool_id, current_posts = int(existing_pool[0]), int(existing_pool[1])
+                # Preserve any manually added images in the pool that aren't in timeline_index.db
+                cur.execute(
+                    "SELECT image_id FROM pool_images WHERE pool_id = %s ORDER BY image_order ASC",
+                    (pool_id,),
+                )
+                existing_ids = [int(r[0]) for r in cur.fetchall()]
+                indexed_set = set(ordered_ids)
+                manual_tail = [iid for iid in existing_ids if iid not in indexed_set]
+                final_ids = ordered_ids + list(dict.fromkeys(manual_tail))
 
-            cur.execute("DELETE FROM pool_images WHERE pool_id = %s", (pool_id,))
+                if final_ids == existing_ids and current_posts == len(final_ids):
+                    print(
+                        f"  [=] Unchanged pool '{title}' (id={pool_id}): {len(final_ids):,} posts"
+                    )
+                    continue
+
+                cur.execute("DELETE FROM pool_images WHERE pool_id = %s", (pool_id,))
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO pools (user_id, public, title, description, posts)
+                    VALUES (%s, %s, %s, %s, 0)
+                    RETURNING id
+                    """,
+                    (user_id, is_public, title, f"Chronological archive for artist:{artist}"),
+                )
+                pool_id = int(cur.fetchone()[0])
+                final_ids = ordered_ids
+
             psycopg2.extras.execute_values(
                 cur,
                 "INSERT INTO pool_images (pool_id, image_id, image_order) VALUES %s",

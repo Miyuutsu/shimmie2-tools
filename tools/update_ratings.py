@@ -1,29 +1,14 @@
 """Updates existing image ratings in Shimmie2 PostgreSQL based on dominant tag weights."""
 
-import sqlite3
 from collections.abc import Iterable
 
 import psycopg2
 import psycopg2.extras
 import tqdm
 
-from functions.common import TAG_DB_PATH
-from functions.db_cache import get_shimmie_db_credentials
+from functions.db_cache import get_shimmie_db_credentials, load_rating_weights
 from functions.source_resolver import is_recognized_prefix
 from functions.tags_curation import rating_from_score
-
-
-def _load_tag_rating_map() -> dict[str, int]:
-    """Loads tag rating weights from tag_rating_dominant.db."""
-    if not TAG_DB_PATH.is_file():
-        raise FileNotFoundError(f"Tag rating DB not found: {TAG_DB_PATH}")
-
-    with sqlite3.connect(TAG_DB_PATH) as conn:
-        return {
-            t.strip().lower(): int(r)
-            for t, r in conn.execute("SELECT tag_name, dominant_rating FROM dominant_tag_ratings")
-            if t and t.strip()
-        }
 
 
 def _calculate_new_rating(
@@ -55,7 +40,7 @@ def _calculate_new_rating(
 
 def update_ratings(args) -> None:
     """Evaluates and updates existing ratings in Shimmie2's PostgreSQL `images` table."""
-    tag_rating_map = _load_tag_rating_map()
+    tag_rating_map = load_rating_weights(require_file=True)
 
     pg_config = get_shimmie_db_credentials(args.spath)
     if not pg_config:

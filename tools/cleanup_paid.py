@@ -142,6 +142,7 @@ def _run_move_or_dry_run(args, apply: bool) -> None:
 
                     shutil.move(str(orig), str(dest))
                     entry = {
+                        "staging_dir": str(staging_dir),
                         "original": str(orig),
                         "moved_to": str(dest),
                         "md5": md5,
@@ -182,12 +183,17 @@ def _run_undo(args) -> None:
         print(f"[ERROR] Undo log not found: {undo_path}")
         sys.exit(1)
 
+    staging_str = str(staging_dir)
     raw_lines = [line for line in undo_path.read_bytes().splitlines() if line.strip()]
     restored = 0
     remaining: list[bytes] = []
 
     for line in reversed(raw_lines):
         entry = orjson.loads(line)
+        entry_staging = entry.get("staging_dir")
+        if entry_staging and entry_staging != staging_str:
+            remaining.append(line)
+            continue
         src = Path(entry["moved_to"])
         dst = Path(entry["original"])
         if not src.exists():
@@ -213,6 +219,37 @@ def _run_undo(args) -> None:
     print(f"[✓] Restored {restored:,} files back to their original paths.")
 
 
+def _run_prune_db(args) -> None:
+    """Deletes finished batch rows from staging_state.db (retaining completed_units) and VACUUMs."""
+    if not STAGING_STATE_DB_PATH.is_file():
+        print(f"[ERROR] Staging state DB not found: {STAGING_STATE_DB_PATH}")
+        sys.exit(1)
+
+    staging_str = str(Path(args.staging_dir).resolve())
+    size_before = STAGING_STATE_DB_PATH.stat().st_size
+
+    with sqlite3.connect(STAGING_STATE_DB_PATH) as conn:
+        del_files = conn.execute(
+            "DELETE FROM staged_files WHERE staging_dir = ?", (staging_str,)
+        ).rowcount
+        del_empty = conn.execute(
+            "DELETE FROM empty_posts WHERE staging_dir = ?", (staging_str,)
+        ).rowcount
+        del_batch = conn.execute(
+            "DELETE FROM staging_batches WHERE staging_dir = ?", (staging_str,)
+        ).rowcount
+        conn.commit()
+        conn.execute("VACUUM")
+
+    size_after = STAGING_STATE_DB_PATH.stat().st_size
+    print(
+        f"[✓] Pruned staging_state.db for {staging_str}: "
+        f"{del_files:,} staged_files, {del_empty:,} empty_posts, {del_batch:,} staging_batches removed "
+        f"(completed_units preserved)."
+    )
+    print(f"    DB size: {size_before / 1_048_576:.2f} MB -> {size_after / 1_048_576:.2f} MB")
+
+
 def run_cleanup_paid(args) -> None:
     """Main CLI entry point for cleanup-paid."""
     if args.action == "apply":
@@ -221,3 +258,5 @@ def run_cleanup_paid(args) -> None:
         _run_move_or_dry_run(args, apply=False)
     elif args.action == "undo":
         _run_undo(args)
+    elif args.action == "prune-db":
+        _run_prune_db(args)

@@ -12,10 +12,15 @@ import psycopg2.extras
 import tqdm
 from PIL import Image
 
-from functions.common import VIDEO_EXTS, extract_or_compute_md5
-from functions.db_cache import get_shimmie_db_credentials
+from functions.common import VIDEO_EXTS, extract_or_compute_md5, read_xattr_media_meta
+from functions.db_cache import (
+    ensure_tags_in_db,
+    get_shimmie_db_credentials,
+    recalculate_tag_counts,
+)
 from functions.media import get_image_resolution, get_video_resolution, process_webp
 from functions.source_resolver import get_source_score, is_recognized_prefix
+from functions.tags_curation import ensure_tagme_placeholders
 
 MIME_BY_EXT = {
     "avif": "image/avif",
@@ -174,7 +179,10 @@ def probe_media_specs(file_path: Path) -> MediaSpecs | None:
             video_codec=video_codec[:512] if video_codec else None,
         )
 
-    w, h = get_image_resolution(file_path)
+    if cached_meta := read_xattr_media_meta(file_path):
+        w, h, _ = cached_meta
+    else:
+        w, h = get_image_resolution(file_path)
     if not w or not h:
         return None
 
@@ -271,32 +279,8 @@ def _clean_merged_tags(existing_tags: set[str], incoming_tags: list[str]) -> lis
         and not (t.startswith("tagai:") and t.split(":", 1)[1] in real_bases)
     ]
 
-    if len(cleaned) < 15:
-        cleaned.append("tagme")
-    if not any(t.startswith("artist:") for t in cleaned):
-        cleaned.append("artist:tagme")
-    if not any(t.startswith("character:") for t in cleaned):
-        cleaned.append("character:tagme")
-    if not any(t.startswith("series:") for t in cleaned):
-        cleaned.append("series:tagme")
-
+    ensure_tagme_placeholders(cleaned)
     return sorted(set(cleaned))
-
-
-def _ensure_tags_in_db(cur, tag_names: set[str], tag_id_map: dict[str, int]) -> None:
-    """Inserts any new tag strings into public.tags and updates tag_id_map in place."""
-    missing = [t[:255] for t in tag_names if t and t[:255] not in tag_id_map]
-    if not missing:
-        return
-
-    psycopg2.extras.execute_values(
-        cur,
-        "INSERT INTO tags (tag, count) VALUES %s ON CONFLICT (tag) DO NOTHING",
-        [(t, 0) for t in missing],
-        page_size=10000,
-    )
-    cur.execute("SELECT tag, id FROM tags WHERE tag = ANY(%s)", (missing,))
-    tag_id_map.update(dict(cur.fetchall()))
 
 
 def import_items_to_shimmie(
@@ -320,8 +304,7 @@ def import_items_to_shimmie(
     # 1. Ensure MD5s are populated and deduplicate items within the batch by MD5
     by_md5: dict[str, ImportItem] = {}
     for item in tqdm.tqdm(items, desc="Verifying Hashes", leave=False):
-        if not item.md5:
-            item.md5 = extract_or_compute_md5(item.file_path)
+        item.md5 = (item.md5 or extract_or_compute_md5(item.file_path)).lower()
 
         if item.md5 in by_md5:
             prev = by_md5[item.md5]
@@ -356,21 +339,26 @@ def import_items_to_shimmie(
         existing_rows: dict[str, tuple[int, str | None, str | None, set[str]]] = {}
         for idx in range(0, len(all_hashes), 10000):
             chunk = all_hashes[idx : idx + 10000]
-            cur.execute(
-                """
-                SELECT i.hash, i.id, i.source, i.rating, array_agg(t.tag)
-                FROM images i
-                LEFT JOIN image_tags it ON i.id = it.image_id
-                LEFT JOIN tags t ON it.tag_id = t.id
-                WHERE i.hash = ANY(%s)
-                GROUP BY i.hash, i.id, i.source, i.rating
-                """,
-                (chunk,),
-            )
-            for hsh, img_id, src, rating, tag_arr in cur.fetchall():
-                clean_h = hsh.strip()
-                db_tags = {t for t in (tag_arr or ()) if t is not None}
-                existing_rows[clean_h] = (img_id, src, rating, db_tags)
+            if skip_existing:
+                cur.execute("SELECT hash, id FROM images WHERE hash = ANY(%s)", (chunk,))
+                for hsh, img_id in cur.fetchall():
+                    existing_rows[hsh.strip().lower()] = (img_id, None, None, set())
+            else:
+                cur.execute(
+                    """
+                    SELECT i.hash, i.id, i.source, i.rating, array_agg(t.tag)
+                    FROM images i
+                    LEFT JOIN image_tags it ON i.id = it.image_id
+                    LEFT JOIN tags t ON it.tag_id = t.id
+                    WHERE i.hash = ANY(%s)
+                    GROUP BY i.hash, i.id, i.source, i.rating
+                    """,
+                    (chunk,),
+                )
+                for hsh, img_id, src, rating, tag_arr in cur.fetchall():
+                    clean_h = hsh.strip().lower()
+                    db_tags = {t for t in (tag_arr or ()) if t is not None}
+                    existing_rows[clean_h] = (img_id, src, rating, db_tags)
 
         new_candidates = [it for h, it in by_md5.items() if h not in existing_rows]
         existing_candidates = (
@@ -400,7 +388,7 @@ def import_items_to_shimmie(
 
             if staged_results:
                 all_new_tags = {t[:255] for it, _ in staged_results for t in it.tags if t}
-                _ensure_tags_in_db(cur, all_new_tags, tag_id_map)
+                ensure_tags_in_db(cur, all_new_tags, tag_id_map)
 
                 image_insert_rows = [
                     (
@@ -440,7 +428,7 @@ def import_items_to_shimmie(
                     page_size=5000,
                     fetch=True,
                 )
-                hash_to_new_id = {h.strip(): img_id for img_id, h in returned}
+                hash_to_new_id = {h.strip().lower(): img_id for img_id, h in returned}
 
                 new_image_tags: list[tuple[int, int]] = []
                 new_tag_histories: list[tuple[int, int, str, str]] = []
@@ -524,7 +512,7 @@ def import_items_to_shimmie(
                     )
 
             if merge_plans:
-                _ensure_tags_in_db(cur, merge_tags_vocab, tag_id_map)
+                ensure_tags_in_db(cur, merge_tags_vocab, tag_id_map)
 
                 tags_to_add: list[tuple[int, int]] = []
                 tags_to_remove: list[tuple[int, int]] = []
@@ -620,28 +608,7 @@ def import_items_to_shimmie(
         # --- C. Recalculate Affected Tag Counts ---
         if affected_tag_ids:
             print(f"[INFO] Updating tag usage counts for {len(affected_tag_ids):,} touched tags...")
-            cur.execute(
-                "CREATE TEMP TABLE tmp_touched_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP"
-            )
-            psycopg2.extras.execute_values(
-                cur,
-                "INSERT INTO tmp_touched_tags (tag_id) VALUES %s",
-                [(tid,) for tid in affected_tag_ids],
-                page_size=10000,
-            )
-            cur.execute("""
-                WITH new_counts AS (
-                    SELECT ttt.tag_id, COUNT(it.image_id) AS cnt
-                    FROM tmp_touched_tags ttt
-                    LEFT JOIN image_tags it ON ttt.tag_id = it.tag_id
-                    GROUP BY ttt.tag_id
-                )
-                UPDATE tags AS t
-                SET count = nc.cnt
-                FROM new_counts nc
-                WHERE t.id = nc.tag_id
-            """)
-            cur.execute("DELETE FROM tags WHERE count <= 0")
+            recalculate_tag_counts(cur, affected_tag_ids, prune_orphans=True)
 
         conn.commit()
 

@@ -5,11 +5,10 @@ from collections import defaultdict
 from pathlib import Path
 
 import psycopg2
-import psycopg2.extras
 import tqdm
 
 from functions.common import ROOT_DIR, BlacklistConfig, expand_tags_for_blacklist, load_blacklist
-from functions.db_cache import get_shimmie_db_credentials
+from functions.db_cache import get_shimmie_db_credentials, recalculate_tag_counts
 
 SAFE_HASH_RE = re.compile(r"^[a-fA-F0-9]{32,64}$")
 
@@ -213,6 +212,15 @@ def _execute_purge(
     img_ids_to_drop = [img_id for img_id, *_ in trash_images]
 
     print("\n[Step 1/3] Scrubbing PostgreSQL database...")
+    affected_pool_ids: list[int] = []
+    cur.execute("SELECT to_regclass('public.pool_images')")
+    if (reg_row := cur.fetchone()) and reg_row[0] is not None:
+        cur.execute(
+            "SELECT DISTINCT pool_id FROM pool_images WHERE image_id = ANY(%s)",
+            (img_ids_to_drop,),
+        )
+        affected_pool_ids = [int(r[0]) for r in cur.fetchall() if r[0] is not None]
+
     print("  -> Dropping metadata links (image_tags)...")
     cur.execute(
         "DELETE FROM image_tags WHERE image_id = ANY(%s) RETURNING tag_id",
@@ -223,30 +231,24 @@ def _execute_purge(
     print("  -> Dropping core image records (images)...")
     cur.execute("DELETE FROM images WHERE id = ANY(%s)", (img_ids_to_drop,))
 
-    print("\n[Step 2/3] Updating Shimmie tag UI counts...")
-    if affected_tag_ids:
-        cur.execute("CREATE TEMP TABLE tmp_purged_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
-        psycopg2.extras.execute_values(
-            cur,
-            "INSERT INTO tmp_purged_tags (tag_id) VALUES %s",
-            [(tid,) for tid in affected_tag_ids],
-            page_size=10000,
+    if affected_pool_ids:
+        print(f"  -> Syncing post counts for {len(affected_pool_ids):,} affected pool(s)...")
+        cur.execute(
+            """
+            UPDATE pools AS p
+            SET posts = (
+                    SELECT COUNT(*)
+                    FROM pool_images pi
+                    WHERE pi.pool_id = p.id
+                ),
+                lastupdated = CURRENT_TIMESTAMP
+            WHERE p.id = ANY(%s)
+            """,
+            (affected_pool_ids,),
         )
-        cur.execute("""
-            WITH new_counts AS (
-                SELECT tpt.tag_id, COUNT(it.image_id) AS cnt
-                FROM tmp_purged_tags tpt
-                LEFT JOIN image_tags it ON tpt.tag_id = it.tag_id
-                GROUP BY tpt.tag_id
-            )
-            UPDATE tags AS t
-            SET count = nc.cnt
-            FROM new_counts nc
-            WHERE t.id = nc.tag_id
-        """)
 
-    print("  -> Pruning orphaned tags with 0 count...")
-    cur.execute("DELETE FROM tags WHERE count <= 0")
+    print("\n[Step 2/3] Updating Shimmie tag UI counts and pruning orphans...")
+    recalculate_tag_counts(cur, affected_tag_ids, prune_orphans=True)
     conn.commit()
 
     print("\n[Step 3/3] Deleting physical files from disk...")

@@ -14,24 +14,29 @@ from pathlib import Path
 
 import numpy as np
 import open_clip
-import pandas as pd
-import timm
 import torch
 import tqdm
-from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import LocalEntryNotFoundError
 from PIL import Image
 from torch.nn import functional as F
 
+from functions.ai_tagger import (
+    RAW_TAG_FLOOR,
+    SmilingWolfTagger,
+    aggregate_frame_predictions,
+    pil_ensure_rgb_448,
+    prep_tagger_pad_uint8,
+)
 from functions.common import (
     CACHE_PATH,
     IMAGE_EXTS,
     STAGING_STATE_DB_PATH,
-    TAG_DB_PATH,
     VIDEO_EXTS,
+    abs_no_follow,
     extract_or_compute_md5,
+    is_xattr_write_enabled,
     read_xattr_dhash,
     read_xattr_media_meta,
+    sort_paths_by_disk_order,
     write_xattr_dhash,
     write_xattr_media_meta,
 )
@@ -39,6 +44,7 @@ from functions.db_cache import (
     get_cache_conn,
     get_existing_shimmie_hashes,
     get_shimmie_db_credentials,
+    load_rating_weights,
 )
 from functions.media import extract_video_frames, get_image_resolution, get_video_resolution
 from functions.tags_curation import load_tag_groups_metadata
@@ -47,18 +53,8 @@ Image.MAX_IMAGE_PIXELS = None
 warnings.filterwarnings("ignore", message=".*unauthenticated requests.*")
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
-MODEL_REPO_MAP = {
-    "vit": "SmilingWolf/wd-vit-tagger-v3",
-    "vit-large": "SmilingWolf/wd-vit-large-tagger-v3",
-    "swinv2": "SmilingWolf/wd-swinv2-tagger-v3",
-    "convnext": "SmilingWolf/wd-convnext-tagger-v3",
-    "eva02": "SmilingWolf/wd-eva02-large-tagger-v3",
-}
 SIGLIP_REPO = "hf-hub:timm/ViT-B-16-SigLIP-256"
 SIGLIP_SIZE = 256
-EVA_SIZE = 448
-SMIN_QUESTIONABLE = 51
-RAW_TAG_FLOOR = 0.15
 TRIAGE_HEADER_PREFIX = b"# Verdict:"
 
 # EXIF Tag IDs for physical camera detection
@@ -255,11 +251,16 @@ def _compute_dhash_and_size(file_path: Path) -> tuple[Path, int, int, int | None
         w, h, dhash = cached
         return file_path, w, h, dhash
 
+    write_xattr = is_xattr_write_enabled()
+    camera_info: str | None = None
+
     try:
         with Image.open(file_path) as im:
             w, h = im.size
             if w <= 0 or h <= 0:
                 return file_path, 0, 0, None
+            if write_xattr:
+                camera_info = _extract_exif_camera(im)
             if im.mode in ("RGBA", "LA") or "transparency" in im.info:
                 rgba = im.convert("RGBA")
                 canvas = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
@@ -279,7 +280,12 @@ def _compute_dhash_and_size(file_path: Path) -> tuple[Path, int, int, int | None
     for bit in diff:
         dhash = (dhash << 1) | int(bit)
 
-    write_xattr_dhash(file_path, w, h, dhash)
+    if write_xattr:
+        st: os.stat_result | None = None
+        with suppress(OSError):
+            st = file_path.stat()
+        write_xattr_dhash(file_path, w, h, dhash, st=st)
+        write_xattr_media_meta(file_path, w, h, camera_info, st=st)
     return file_path, w, h, dhash
 
 
@@ -351,12 +357,16 @@ def _run_mine_reso_fluff(base_dir: Path, fluff_dir: Path, comic_dir: Path, threa
     res_comic = comic_dir.resolve()
     all_images: list[Path] = []
     for f in base_dir.rglob("*"):
-        if not f.is_file() or "thumbnails" in f.parts or f.suffix.lower() not in IMAGE_EXTS:
+        if "thumbnails" in f.parts or f.suffix.lower() not in IMAGE_EXTS:
             continue
-        resolved = f.resolve()
-        if resolved.is_relative_to(res_fluff) or resolved.is_relative_to(res_comic):
+        f_abs = abs_no_follow(f)
+        if f_abs.is_relative_to(res_fluff) or f_abs.is_relative_to(res_comic):
+            continue
+        if not f.is_file():
             continue
         all_images.append(f)
+
+    all_images = sort_paths_by_disk_order(all_images)
 
     if not all_images:
         print("[!] No images found to mine.")
@@ -615,10 +625,10 @@ def _collect_candidate_files(
     candidates: list[Path] = []
 
     for f in target_dir.rglob("*"):
-        if not f.is_file() or "thumbnails" in f.parts or f.suffix.lower() not in allowed_exts:
+        if "thumbnails" in f.parts or f.suffix.lower() not in allowed_exts:
             continue
-        resolved = f.resolve()
-        if resolved.is_relative_to(res_fluff) or resolved.is_relative_to(res_comic):
+        f_abs = abs_no_follow(f)
+        if f_abs.is_relative_to(res_fluff) or f_abs.is_relative_to(res_comic):
             continue
 
         stem_txt = f.with_suffix(".txt")
@@ -629,9 +639,12 @@ def _collect_candidate_files(
         elif full_txt.exists():
             continue
 
+        if not f.is_file():
+            continue
+
         candidates.append(f)
 
-    return sorted(candidates)
+    return sort_paths_by_disk_order(candidates)
 
 
 def _get_cached_tagged_hashes(
@@ -770,24 +783,6 @@ def _evaluate_stage2_file(
     return None, w_over_h
 
 
-def _pil_ensure_rgb_448(image: Image.Image) -> Image.Image:
-    """Materializes an RGB PIL Image scaled so its longest side is EVA_SIZE (448px)."""
-    if image.mode == "RGBA" or "transparency" in image.info:
-        rgba = image.convert("RGBA")
-        canvas = Image.new("RGBA", rgba.size, (255, 255, 255))
-        canvas.alpha_composite(rgba)
-        rgb = canvas.convert("RGB")
-    else:
-        rgb = image.convert("RGB")
-
-    w, h = rgb.size
-    scale = EVA_SIZE / max(w, h)
-    new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-    if (new_w, new_h) != (w, h):
-        return rgb.resize((new_w, new_h), Image.Resampling.BICUBIC)
-    return rgb
-
-
 def _decode_and_prep_siglip(
     media_path: Path,
 ) -> tuple[Path, list[Image.Image], list[np.ndarray]]:
@@ -795,15 +790,13 @@ def _decode_and_prep_siglip(
     frames: list[Image.Image] = []
     if media_path.suffix.lower() in VIDEO_EXTS:
         try:
-            frames = [
-                _pil_ensure_rgb_448(f) for f in extract_video_frames(media_path, max_frames=5)
-            ]
+            frames = [pil_ensure_rgb_448(f) for f in extract_video_frames(media_path, max_frames=5)]
         except Exception:
             return media_path, [], []
     else:
         try:
             with Image.open(media_path) as im:
-                frames = [_pil_ensure_rgb_448(im)]
+                frames = [pil_ensure_rgb_448(im)]
         except Exception:
             return media_path, [], []
 
@@ -814,27 +807,12 @@ def _decode_and_prep_siglip(
     return media_path, frames, siglip_arrays
 
 
-def _prep_eva_pad_uint8(frames: list[Image.Image]) -> list[np.ndarray]:
-    """Worker function: pads 448-scaled RGB PIL frames onto a 448x448 white square uint8 array for EVA02."""
-    out: list[np.ndarray] = []
-    for image in frames:
-        w, h = image.size
-        if (w, h) == (EVA_SIZE, EVA_SIZE):
-            out.append(np.asarray(image, dtype=np.uint8))
-            continue
-        canvas = Image.new("RGB", (EVA_SIZE, EVA_SIZE), (255, 255, 255))
-        canvas.paste(image, ((EVA_SIZE - w) // 2, (EVA_SIZE - h) // 2))
-        out.append(np.asarray(canvas, dtype=np.uint8))
-    return out
-
-
 class DualTriageEngine:
-    """Holds in-VRAM SigLIP-B-16-256 and EVA02 models with GPU-side uint8 tensor normalization."""
+    """Holds in-VRAM SigLIP-B-16-256 and SmilingWolf tagger models."""
 
     def __init__(self, tagger_model_name: str, device: torch.device) -> None:
         self.device = device
         self.dtype = torch.float16 if device.type == "cuda" else torch.float32
-        repo_id = MODEL_REPO_MAP[tagger_model_name]
 
         print(f"[INFO] Loading SigLIP zero-shot classifier ({SIGLIP_REPO}) on {device}...")
         self.siglip, _ = open_clip.create_model_from_pretrained(SIGLIP_REPO)
@@ -853,26 +831,7 @@ class DualTriageEngine:
             text_feat = self.siglip.encode_text(tokens)
             self.text_features = F.normalize(text_feat, dim=-1)
 
-        print(f"[INFO] Loading SmilingWolf tagger ({repo_id}) on {device}...")
-        self.tagger = timm.create_model(f"hf-hub:{repo_id}", pretrained=True).eval()
-        self.tagger = self.tagger.to(device, dtype=self.dtype)
-        self._load_tagger_labels(repo_id)
-
-    def _load_tagger_labels(self, repo_id: str) -> None:
-        try:
-            csv_path = hf_hub_download(
-                repo_id=repo_id, filename="selected_tags.csv", local_files_only=True
-            )
-        except (LocalEntryNotFoundError, FileNotFoundError):
-            csv_path = hf_hub_download(repo_id=repo_id, filename="selected_tags.csv")
-
-        df = pd.read_csv(csv_path, usecols=["name", "category"])
-        self.clean_names: list[str] = [
-            str(n).replace(" ", "_").lower() for n in df["name"].tolist()
-        ]
-        self.rating_idx: np.ndarray = np.where(df["category"] == 9)[0]
-        self.general_idx: np.ndarray = np.where(df["category"] == 0)[0]
-        self.char_idx: np.ndarray = np.where(df["category"] == 4)[0]
+        self.tagger = SmilingWolfTagger(tagger_model_name, device=device)
 
     def infer_siglip(
         self, uint8_frames: list[np.ndarray], batch_size: int
@@ -906,39 +865,8 @@ class DualTriageEngine:
         return all_siglip_dicts
 
     def infer_eva02(self, uint8_frames: list[np.ndarray], batch_size: int) -> list[np.ndarray]:
-        """Runs batched EVA02 inference on (448, 448, 3) uint8 arrays with GPU BGR flip and normalization."""
-        if not uint8_frames:
-            return []
-
-        all_tag_probs: list[np.ndarray] = []
-        for i in range(0, len(uint8_frames), batch_size):
-            chunk = np.stack(uint8_frames[i : i + batch_size], axis=0)
-            with torch.inference_mode():
-                t_batch = (
-                    torch.from_numpy(chunk)
-                    .to(self.device)
-                    .permute(0, 3, 1, 2)
-                    .flip(1)
-                    .to(self.dtype)
-                )
-                t_batch = t_batch.div_(127.5).sub_(1.0)
-                t_logits = self.tagger(t_batch)
-                t_probs = torch.sigmoid(t_logits).float().cpu().numpy()
-                all_tag_probs.extend(list(t_probs))
-
-        return all_tag_probs
-
-
-def _load_rating_weights() -> dict[str, int]:
-    """Loads tag rating weights from tag_rating_dominant.db."""
-    weights: dict[str, int] = {}
-    if not TAG_DB_PATH.is_file():
-        return weights
-    with sqlite3.connect(TAG_DB_PATH) as conn:
-        for row in conn.execute("SELECT tag_name, dominant_rating FROM dominant_tag_ratings"):
-            if len(row) >= 2 and row[0]:
-                weights[row[0].strip().lower()] = int(row[1])
-    return weights
+        """Runs batched SmilingWolf tagger inference on (448, 448, 3) uint8 arrays."""
+        return self.tagger.infer_batch(uint8_frames, batch_size)
 
 
 def _check_stage3a_siglip_fluff(
@@ -996,73 +924,24 @@ def _build_import_tags_and_raw_maps(
     rating_weights: dict[str, int],
     group_info: tuple[dict[str, set[str]], set[str]],
 ) -> tuple[list[str], dict[str, float], dict[str, float], dict[str, float]]:
-    """Vectorized NumPy aggregation of frame predictions into (import_tags, raw_chars, raw_gens, raw_ratings)."""
-    child_to_bases, sex_group_tags = group_info
-    valid_frames = len(frame_probs)
-    names = engine.clean_names
-
-    probs_2d = np.stack(frame_probs, axis=0)
-    max_probs = probs_2d.max(axis=0)
-
-    # 1. Ratings
-    raw_ratings = {names[idx]: float(max_probs[idx]) for idx in engine.rating_idx}
-    sorted_ratings = dict(sorted(raw_ratings.items(), key=lambda kv: kv[1], reverse=True))
-
-    # 2. Characters (vectorized filter)
-    char_indices = engine.char_idx
-    char_max_arr = max_probs[char_indices]
-    char_hits_arr = (probs_2d[:, char_indices] >= char_threshold).sum(axis=0)
-    char_min_hits = 1 if valid_frames == 1 else min(3, valid_frames)
-
-    raw_char_tags: dict[str, float] = {}
-    approved_chars: list[str] = []
-    for pos in np.flatnonzero(char_max_arr >= RAW_TAG_FLOOR):
-        c_name = names[char_indices[pos]]
-        c_val = float(char_max_arr[pos])
-        raw_char_tags[c_name] = c_val
-        if char_hits_arr[pos] >= char_min_hits:
-            approved_chars.append(c_name)
-
-    sorted_raw_chars = dict(sorted(raw_char_tags.items(), key=lambda kv: kv[1], reverse=True))
-    approved_chars.sort(key=lambda c: raw_char_tags[c], reverse=True)
-
-    # 3. General Tags (vectorized filter)
-    gen_indices = engine.general_idx
-    gen_max_arr = max_probs[gen_indices]
-    gen_hits_arr = (probs_2d[:, gen_indices] >= gen_threshold).sum(axis=0)
-    gen_min_hits = 1 if valid_frames == 1 else min(2, valid_frames)
-    qe_min_hits = 1 if valid_frames == 1 else min(2, valid_frames)
-
-    raw_gen_tags: dict[str, float] = {}
-    gen_max_conf: dict[str, float] = {}
-    approved_gens: set[str] = set()
-
-    for pos in np.flatnonzero(gen_max_arr >= RAW_TAG_FLOOR):
-        g_name = names[gen_indices[pos]]
-        g_val = float(gen_max_arr[pos])
-        raw_gen_tags[g_name] = g_val
-
-        hits = int(gen_hits_arr[pos])
-        if hits > 0:
-            gen_max_conf[g_name] = g_val
-            is_qe = rating_weights.get(g_name, 0) >= SMIN_QUESTIONABLE or g_name in sex_group_tags
-            if hits >= (qe_min_hits if is_qe else gen_min_hits):
-                approved_gens.add(g_name)
-                for parent_base in child_to_bases.get(g_name, ()):
-                    approved_gens.add(parent_base)
-                    gen_max_conf[parent_base] = max(gen_max_conf.get(parent_base, 0.0), g_val)
-
-    sorted_raw_gens = dict(sorted(raw_gen_tags.items(), key=lambda kv: kv[1], reverse=True))
-    sorted_gens = sorted(approved_gens, key=lambda g: gen_max_conf.get(g, 0.0), reverse=True)
-
+    """Aggregates frame predictions into (import_tags, raw_chars, raw_gens, raw_ratings)."""
+    preds = aggregate_frame_predictions(
+        frame_probs,
+        engine.tagger,
+        gen_threshold=gen_threshold,
+        char_threshold=char_threshold,
+        rating_weights=rating_weights,
+        group_info=group_info,
+        raw_floor=RAW_TAG_FLOOR,
+    )
     import_tags: list[str] = []
     if dir_as_artist:
-        artist_name = src_path.resolve().parent.name.lower().replace(" ", "_")
+        artist_name = src_path.parent.name.lower().replace(" ", "_")
         import_tags.append(f"artist:{artist_name}")
-    import_tags.extend(f"character:{c}" for c in approved_chars)
-    import_tags.extend(sorted_gens)
+    import_tags.extend(f"character:{c}" for c in preds.approved_chars)
+    import_tags.extend(preds.approved_gens)
 
-    return import_tags, sorted_raw_chars, sorted_raw_gens, sorted_ratings
+    return import_tags, preds.char_scores, preds.gen_scores, preds.rating_scores
 
 
 def _classify_stage3b_verdict(
@@ -1675,11 +1554,19 @@ def run_triage(args) -> None:
                         s2_iter, total=len(stage2_candidates), desc="Pre-filtering", leave=False
                     ):
                         is_protected = os.path.abspath(f_path) in protected_thumbs
+                        cached = _parse_triage_sidecar(f_path) if is_fast_retriage else None
+
                         if verdict is not None and (
                             verdict.reason == "corrupt_or_unreadable"
                             or verdict.stage in {"Stage 2 (Resolution)", "Stage 2 (EXIF)"}
                             or not is_protected
                         ):
+                            if cached is not None:
+                                verdict.siglip_scores = cached.siglip_scores
+                                verdict.raw_char_tags = cached.raw_char_tags
+                                verdict.raw_gen_tags = cached.raw_gen_tags
+                                verdict.raw_ratings = cached.raw_ratings
+                                verdict.import_tags = cached.import_tags
                             all_verdicts.append(verdict)
                             if not args.dry_run:
                                 _route_file_and_sidecar(verdict, base_dir, fluff_dir, comic_dir)
@@ -1692,6 +1579,11 @@ def run_triage(args) -> None:
                                 "FLUFF",
                                 "Stage 2 (Downscale)",
                                 f"downscaled_duplicate ({sw}x{sh} < {lw}x{lh}, dhash={dist}, master={master_p.name})",
+                                cached.siglip_scores if cached else {},
+                                cached.raw_char_tags if cached else {},
+                                cached.raw_gen_tags if cached else {},
+                                cached.raw_ratings if cached else {},
+                                cached.import_tags if cached else [],
                             )
                             all_verdicts.append(v_dup)
                             if not args.dry_run:
@@ -1699,11 +1591,7 @@ def run_triage(args) -> None:
                             continue
 
                         # Fast retriage: re-evaluate cached SigLIP + EVA02 sidecar scores on CPU
-                        if (
-                            is_fast_retriage
-                            and (cached := _parse_triage_sidecar(f_path))
-                            and cached.siglip_scores
-                        ):
+                        if cached is not None and cached.siglip_scores:
                             fluff_v, sorted_sig = _check_stage3a_siglip_fluff(
                                 f_path, [cached.siglip_scores]
                             )
@@ -1763,7 +1651,7 @@ def run_triage(args) -> None:
         if stage3_candidates:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             engine = DualTriageEngine(args.model, device)
-            rating_weights = _load_rating_weights()
+            rating_weights = load_rating_weights()
             child_to_parents, _, _, sex_group_tags = load_tag_groups_metadata()
             group_info = (child_to_parents, sex_group_tags)
 
@@ -1773,13 +1661,22 @@ def run_triage(args) -> None:
             )
 
             with ThreadPoolExecutor(max_workers=args.threads) as pool:
-                for start in tqdm.tqdm(
-                    range(0, len(stage3_candidates), chunk_size), desc="GPU Chunks"
-                ):
-                    sub_files = stage3_candidates[start : start + chunk_size]
+                chunk_starts = range(0, len(stage3_candidates), chunk_size)
+                next_decode_futs = [
+                    pool.submit(_decode_and_prep_siglip, p) for p in stage3_candidates[0:chunk_size]
+                ]
 
-                    # Parallel decode + 256x256 SigLIP prep
-                    decoded_items = list(pool.map(_decode_and_prep_siglip, sub_files))
+                for idx in tqdm.tqdm(range(len(chunk_starts)), desc="GPU Chunks"):
+                    decoded_items = [fut.result() for fut in next_decode_futs]
+
+                    if idx + 1 < len(chunk_starts):
+                        next_start = chunk_starts[idx + 1]
+                        next_decode_futs = [
+                            pool.submit(_decode_and_prep_siglip, p)
+                            for p in stage3_candidates[next_start : next_start + chunk_size]
+                        ]
+                    else:
+                        next_decode_futs = []
 
                     siglip_flat_arrays: list[np.ndarray] = []
                     valid_decoded: list[tuple[Path, list[Image.Image], int, int]] = []
@@ -1822,10 +1719,8 @@ def run_triage(args) -> None:
                     if not eva_survivors:
                         continue
 
-                    # Stage 3B: Parallel 448x448 pad + EVA02 inference on survivors only
-                    eva_padded_lists = list(
-                        pool.map(lambda item: _prep_eva_pad_uint8(item[1]), eva_survivors)
-                    )
+                    # Stage 3B: 448x448 pad (inline so worker pool stays dedicated to prefetching chunk N+1) + EVA02
+                    eva_padded_lists = [prep_tagger_pad_uint8(item[1]) for item in eva_survivors]
                     eva_flat_arrays: list[np.ndarray] = []
                     eva_slices: list[tuple[Path, dict[str, float], float, int, int]] = []
 

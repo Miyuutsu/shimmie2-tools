@@ -11,10 +11,12 @@ import psycopg2.extras
 
 from functions.common import TAGMAP_DB_PATH
 from functions.db_cache import (
+    ensure_tags_in_db,
     get_shimmie_db_credentials,
     init_tagmap_db,
     load_mappings,
     load_tagmap,
+    recalculate_tag_counts,
     save_tagmap_entries,
 )
 from functions.tags_curation import TagCurationContext, apply_tag_curation, get_curation_context
@@ -32,7 +34,10 @@ def _is_number(val: str) -> bool:
 
 
 def _is_legitimate_history_tag(
-    bad_tag: str, hist_tokens: set[str], ctx: TagCurationContext
+    bad_tag: str,
+    hist_tokens: set[str],
+    ctx: TagCurationContext,
+    raw_expand_cache: dict[str, tuple[str, ...]],
 ) -> bool:
     """Returns True if the image's pre-curation tag_histories genuinely contained bad_tag."""
     bad_lower = bad_tag.lower()
@@ -49,7 +54,16 @@ def _is_legitimate_history_tag(
         if base_s not in ctx.series_set:
             return False
 
-    return any(tok == bad_lower or bad_tag in ctx.expand_single_tag(tok, {}) for tok in hist_tokens)
+    for tok in hist_tokens:
+        if tok == bad_lower:
+            return True
+        expanded = raw_expand_cache.get(tok)
+        if expanded is None:
+            expanded = ctx.expand_single_tag(tok, {})
+            raw_expand_cache[tok] = expanded
+        if bad_tag in expanded:
+            return True
+    return False
 
 
 def _revert_single_tag(
@@ -108,6 +122,7 @@ def _revert_single_tag(
     restore_pairs: list[tuple[int, str]] = []
     touched_tag_names = {bad_tag, "artist:tagme", "character:tagme", "series:tagme"}
     single_cache: dict[str, tuple[str, ...]] = {}
+    raw_expand_cache: dict[str, tuple[str, ...]] = {}
 
     for img_id in affected_ids:
         hist_str = hist_map.get(img_id) or ""
@@ -116,24 +131,26 @@ def _revert_single_tag(
         if (
             not explicit_restore
             and hist_tokens
-            and _is_legitimate_history_tag(bad_tag, hist_tokens, ctx)
+            and _is_legitimate_history_tag(bad_tag, hist_tokens, ctx, raw_expand_cache)
         ):
             continue
 
         poisoned_ids.append(img_id)
         if explicit_restore:
             for r_tok in explicit_restore.split():
-                restore_pairs.append((img_id, r_tok))
-                touched_tag_names.add(r_tok)
+                clean_r = r_tok[:255]
+                restore_pairs.append((img_id, clean_r))
+                touched_tag_names.add(clean_r)
         elif hist_tokens:
             curated_hist = list(hist_tokens)
             apply_tag_curation(curated_hist, merged_map, context=ctx, single_tag_cache=single_cache)
             for c_tok in curated_hist:
                 if c_tok != bad_tag and not c_tok.startswith(("source:", "rating:")):
-                    restore_pairs.append((img_id, c_tok))
-                    touched_tag_names.add(c_tok)
+                    clean_c = c_tok[:255]
+                    restore_pairs.append((img_id, clean_c))
+                    touched_tag_names.add(clean_c)
         elif ":" in bad_tag:
-            fallback_base = bad_tag.split(":", 1)[1]
+            fallback_base = bad_tag.split(":", 1)[1][:255]
             if fallback_base in ctx.known_general:
                 restore_pairs.append((img_id, fallback_base))
                 touched_tag_names.add(fallback_base)
@@ -151,14 +168,8 @@ def _revert_single_tag(
         f"    -> Reverting '{bad_tag}' on {len(poisoned_ids):,} poisoned images (keeping {keep_count:,} legitimate)..."
     )
 
-    psycopg2.extras.execute_values(
-        cur,
-        "INSERT INTO tags (tag, count) VALUES %s ON CONFLICT (tag) DO NOTHING",
-        [(t_name, 0) for t_name in touched_tag_names],
-        page_size=5000,
-    )
-    cur.execute("SELECT tag, id FROM tags WHERE tag = ANY(%s)", (list(touched_tag_names),))
-    local_tag_ids = dict(cur.fetchall())
+    local_tag_ids: dict[str, int] = {}
+    ensure_tags_in_db(cur, touched_tag_names, local_tag_ids)
 
     cur.execute("CREATE TEMP TABLE tmp_rev_fix (img_id INT PRIMARY KEY) ON COMMIT DROP")
     psycopg2.extras.execute_values(
@@ -206,15 +217,7 @@ def _revert_single_tag(
             (tagme_tid, f"{ns_prefix}:%"),
         )
 
-    touched_ids = list(local_tag_ids.values())
-    cur.execute(
-        """
-        UPDATE tags t
-        SET count = (SELECT COUNT(it.image_id) FROM image_tags it WHERE it.tag_id = t.id)
-        WHERE t.id = ANY(%s)
-        """,
-        (touched_ids,),
-    )
+    recalculate_tag_counts(cur, local_tag_ids.values(), prune_orphans=False)
     cur.execute("DELETE FROM tags WHERE id = %s AND count <= 0", (bad_id,))
     cur.execute("DROP TABLE tmp_rev_fix")
     print(f"[✓] Successfully reverted '{bad_tag}' on {len(poisoned_ids):,} images!")

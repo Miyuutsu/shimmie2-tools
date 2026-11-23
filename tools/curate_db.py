@@ -6,9 +6,20 @@ import psycopg2
 import psycopg2.extras
 import tqdm
 
-from functions.db_cache import get_shimmie_db_credentials, load_mappings, load_tagmap
-from functions.source_resolver import get_source_score
-from functions.tags_curation import TagCurationContext, apply_tag_curation, get_curation_context
+from functions.db_cache import (
+    ensure_tags_in_db,
+    get_shimmie_db_credentials,
+    load_mappings,
+    load_tagmap,
+    recalculate_tag_counts,
+)
+from functions.source_resolver import convert_cdn_url, get_source_score
+from functions.tags_curation import (
+    TagCurationContext,
+    apply_tag_curation,
+    ensure_tagme_placeholders,
+    get_curation_context,
+)
 
 RATING_PRIORITY = {"e": 3, "q": 2, "s": 1}
 CANONICAL_RATING_TAGS = {"rating:e", "rating:q", "rating:s"}
@@ -104,29 +115,22 @@ def _evaluate_curation_changes(
 
             clean_curr_src = current_source.strip() if current_source else ""
             candidate_urls = {
-                t.split(":", 1)[1].strip()
+                convert_cdn_url(t.split(":", 1)[1].strip())
                 for t in curated_tags
                 if t.lower().startswith("source:") and len(t) > 7 and t.split(":", 1)[1].strip()
             }
             if clean_curr_src:
-                candidate_urls.add(clean_curr_src)
+                candidate_urls.add(convert_cdn_url(clean_curr_src))
 
             if candidate_urls:
                 best_url = min(candidate_urls, key=lambda u: (get_source_score(u), u))[:255]
                 if best_url != clean_curr_src:
                     changeset.source_updates.append((img_id, best_url))
 
-            if len(curated_tags) < 15:
-                curated_tags.append("tagme")
-            if not any(t.startswith("artist:") for t in curated_tags):
-                curated_tags.append("artist:tagme")
-            if not any(t.startswith("character:") for t in curated_tags):
-                curated_tags.append("character:tagme")
-            if not any(t.startswith("series:") for t in curated_tags):
-                curated_tags.append("series:tagme")
+            ensure_tagme_placeholders(curated_tags)
 
             curr_set = set(current_tags)
-            cur_set = set(curated_tags)
+            cur_set = {t[:255] for t in curated_tags if t}
 
             for t in cur_set - curr_set:
                 changeset.tags_to_add.append((img_id, t))
@@ -134,7 +138,8 @@ def _evaluate_curation_changes(
                     changeset.new_unique_tags.add(t)
 
             for t in curr_set - cur_set:
-                changeset.tags_to_remove.append((img_id, tag_id_map[t]))
+                if t in tag_id_map:
+                    changeset.tags_to_remove.append((img_id, tag_id_map[t]))
 
     return changeset
 
@@ -181,16 +186,7 @@ def _apply_curation_updates(
         print(
             f"Injecting {len(changeset.new_unique_tags):,} entirely new tags into the database..."
         )
-        psycopg2.extras.execute_values(
-            cur,
-            "INSERT INTO tags (tag, count) VALUES %s ON CONFLICT (tag) DO NOTHING",
-            [(t, 0) for t in changeset.new_unique_tags],
-            page_size=10000,
-        )
-        cur.execute(
-            "SELECT tag, id FROM tags WHERE tag = ANY(%s)", (list(changeset.new_unique_tags),)
-        )
-        tag_id_map.update(dict(cur.fetchall()))
+        ensure_tags_in_db(cur, changeset.new_unique_tags, tag_id_map)
 
     if changeset.tags_to_remove:
         print("Purging old tag links...")
@@ -219,29 +215,12 @@ def _apply_curation_updates(
         | {tid for _, tid in changeset.tags_to_remove}
     )
     if affected_tag_ids:
-        print(f"Recalculating UI tag counts for {len(affected_tag_ids):,} affected tags...")
-        cur.execute("CREATE TEMP TABLE tmp_affected_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
-        psycopg2.extras.execute_values(
-            cur,
-            "INSERT INTO tmp_affected_tags (tag_id) VALUES %s",
-            [(tid,) for tid in affected_tag_ids],
-            page_size=10000,
+        print(
+            f"Recalculating UI tag counts for {len(affected_tag_ids):,} affected tags "
+            "and pruning orphans..."
         )
-        cur.execute("""
-            WITH new_counts AS (
-                SELECT tat.tag_id, COUNT(it.image_id) AS cnt
-                FROM tmp_affected_tags tat
-                LEFT JOIN image_tags it ON tat.tag_id = it.tag_id
-                GROUP BY tat.tag_id
-            )
-            UPDATE tags AS t
-            SET count = nc.cnt
-            FROM new_counts nc
-            WHERE t.id = nc.tag_id
-        """)
+        recalculate_tag_counts(cur, affected_tag_ids, prune_orphans=True)
 
-    print("Dropping orphaned tags...")
-    cur.execute("DELETE FROM tags WHERE count <= 0")
     conn.commit()
 
     print("Running VACUUM ANALYZE on tags, image_tags, and images to rebuild visibility maps...")

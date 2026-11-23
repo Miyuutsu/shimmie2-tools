@@ -82,13 +82,13 @@ def _write_tag_dump_log(
     if dumped_ids:
         cur.execute(
             """
-			WITH target_dumped_tags AS (
+			WITH target_dumped_tags AS MATERIALIZED (
 				SELECT id, count AS global_tag_count
 				FROM tags
 				WHERE id = ANY(%s)
 				AND tag NOT LIKE 'booru:%%'
 			),
-			booru_tags AS (
+			booru_tags AS MATERIALIZED (
 				SELECT id, tag, count AS total_images
 				FROM tags
 				WHERE tag LIKE 'booru:%%' AND count > 0
@@ -128,7 +128,7 @@ def _write_tag_dump_log(
     if drop_ids:
         cur.execute(
             """
-			WITH target_drop_tags AS (
+			WITH target_drop_tags AS MATERIALIZED (
 				SELECT id
 				FROM tags
 				WHERE id = ANY(%s)

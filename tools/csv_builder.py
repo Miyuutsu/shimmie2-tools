@@ -1,7 +1,6 @@
 """Batch CSV generator, thumbnailer, and direct importer for Shimmie2."""
 
 import csv
-import os
 import warnings
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -17,10 +16,12 @@ from functions.common import (
     TAGMAP_DB_PATH,
     VIDEO_EXTS,
     BlacklistConfig,
+    abs_no_follow,
     expand_tags_for_blacklist,
     extract_or_compute_md5,
     load_blacklist,
     read_xattr_media_meta,
+    sort_paths_by_disk_order,
 )
 from functions.db_cache import (
     Mappings,
@@ -40,6 +41,7 @@ from functions.source_resolver import resolve_best_source
 from functions.tags_curation import (
     apply_tag_curation,
     calculate_rating,
+    ensure_tagme_placeholders,
     get_curation_context,
     get_sidecar_tags,
 )
@@ -116,13 +118,7 @@ def collect_files(
                 f"[WARNING] Skipping {stem}.* - Ambiguous multiple formats without unique sidecar."
             )
 
-    def _disk_order_key(path: Path) -> str:
-        try:
-            return os.readlink(path) if path.is_symlink() else str(path)
-        except OSError:
-            return str(path)
-
-    final_files.sort(key=_disk_order_key)
+    final_files = sort_paths_by_disk_order(final_files)
 
     batch_size = max(1, batch_size)
     batches = [final_files[i : i + batch_size] for i in range(0, len(final_files), batch_size)]
@@ -197,27 +193,15 @@ def compile_metadata(
     rating = calculate_rating(tags, post.get("rating"), mappings.rating, args.smax, args.qmax)
     tags = [t for t in tags if t.lower() not in {"rating:e", "rating:q", "rating:s"}]
 
-    if len(tags) < 15:
-        tags.append("tagme")
-    if not any(tag.startswith("artist:") for tag in tags):
-        tags.append("artist:tagme")
-    if not any(tag.startswith("character:") for tag in tags):
-        tags.append("character:tagme")
-    if not any(tag.startswith("series:") for tag in tags):
-        tags.append("series:tagme")
+    ensure_tagme_placeholders(tags)
 
     sorted_unique = sorted(set(tags))
     return ", ".join(sorted_unique), rating, sorted_unique, best_source
 
 
-def _abs_no_follow(path: Path) -> Path:
-    """Normalizes a path without resolving a symlinked file target."""
-    return Path(os.path.abspath(path))
-
-
 def _get_base_dir(img: Path, args) -> Path:
     """Returns the matching root input directory for a media file."""
-    img_abs = _abs_no_follow(img)
+    img_abs = abs_no_follow(img)
     if args.image_path:
         base_img = Path(args.image_path).resolve()
         if img_abs.is_relative_to(base_img) or img.resolve().is_relative_to(base_img):
@@ -227,7 +211,7 @@ def _get_base_dir(img: Path, args) -> Path:
 
 def _safe_rel_to(img: Path, base_dir: Path) -> Path:
     """Computes relative path cleanly for both normal files and symlinks inside base_dir."""
-    img_abs = _abs_no_follow(img)
+    img_abs = abs_no_follow(img)
     if img_abs.is_relative_to(base_dir):
         return img_abs.relative_to(base_dir)
     return img.resolve().relative_to(base_dir)
@@ -284,7 +268,12 @@ def process_image_result(
         return None, None, str(local_thumb), None
 
     tag_str, rating, tag_list, best_source = compile_metadata(
-        image, res_data.post, mappings, args, dynamic_mappings
+        image,
+        res_data.post,
+        mappings,
+        args,
+        dynamic_mappings,
+        single_tag_cache=single_tag_cache,
     )
 
     if matched_rules := _matches_blacklist(tag_list, blacklist_cfg):
@@ -446,6 +435,7 @@ def run(args) -> None:
                 conns=(db_conn, sqlite_conn),
                 output_path=args.create_map_csv,
                 mappings=mappings,
+                threads=args.threads,
             )
         print("Mining complete. Exiting before standard import processing.")
         return
@@ -454,10 +444,16 @@ def run(args) -> None:
     existing_hashes: set[str] = set()
     if getattr(args, "spath", None):
         print("[INFO] Extracting MD5 hashes to check against Shimmie PostgreSQL database...")
-        md5_by_file = {
-            f: extract_or_compute_md5(f)
-            for f in tqdm.tqdm(files, desc="Hashing Files", leave=False)
-        }
+        with ThreadPoolExecutor(max_workers=args.threads) as pool:
+            md5_list = list(
+                tqdm.tqdm(
+                    pool.map(extract_or_compute_md5, files),
+                    total=len(files),
+                    desc="Hashing Files",
+                    leave=False,
+                )
+            )
+        md5_by_file = dict(zip(files, md5_list, strict=True))
         db_config = get_shimmie_db_credentials(args.spath)
         existing_hashes = get_existing_shimmie_hashes(md5_by_file.values(), db_config)
         action_label = "skip" if args.skip_existing else "tag-merge (skipping thumb generation)"
