@@ -10,7 +10,6 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).parent.parent.resolve()
 DB_DIR = ROOT_DIR / "database"
-SUBMODULE_PATH = ROOT_DIR / "SD-Tag-Editor"
 
 ADB_PATH = DB_DIR / "artists.db"
 CACHE_PATH = DB_DIR / "posts_cache.db"

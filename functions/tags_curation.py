@@ -9,7 +9,7 @@ from pathlib import Path
 
 import orjson
 
-from functions.common import ROOT_DIR, SUBMODULE_PATH
+from functions.common import ROOT_DIR
 from functions.db_cache import load_char_and_artist_maps
 from functions.source_resolver import is_recognized_prefix, resolve_prefixed_tag
 
@@ -138,9 +138,8 @@ def load_tag_groups_metadata() -> tuple[dict[str, set[str]], set[str], set[str],
     copyright_series: set[str] = set()
     sex_group_tags: set[str] = set()
 
-    candidates = (ROOT_DIR / "tag_groups.json", SUBMODULE_PATH / "tag_groups.json")
-    group_file = next((p for p in candidates if p.is_file()), None)
-    if not group_file:
+    group_file = ROOT_DIR / "tag_groups.json"
+    if not group_file.is_file():
         return child_to_parents, known_general, copyright_series, sex_group_tags
 
     data = orjson.loads(group_file.read_bytes())

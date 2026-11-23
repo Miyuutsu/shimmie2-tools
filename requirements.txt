@@ -6,9 +6,7 @@ orjson>=3.10.0
 pandas>=2.2.0
 pillow>=9.0.0
 psycopg2-binary>=2.9.5
-pydantic>=2.7.1
 pyvips>=2.2
-simple_parsing
 timm>=1.0.7
 torch>=2.3.0
 torchvision>=0.18.0

@@ -1,5 +1,25 @@
+# Local & large SQLite databases (WAL/SHM/journal included)
+database/*.db-journal
+database/*.db-shm
+database/*.db-wal
+database/ai_audit_staging.db*
+database/ai_quarantine_cache.db*
+database/ai_revert_log.db*
+database/danbooru_wiki_cache.db*
+database/posts_cache.db*
+database/staging_state.db*
+database/timeline_index.db*
+
+# Logs and backup snapshots
+*.bak
 *.csv
 *.json
+!tag_groups.json
+*.log
+purge_dry_run.txt
+skipped_files.txt
+
+# Python files and environment stuff
 *.pyc
 *.pyd
 *.pyo
@@ -11,14 +31,4 @@
 .vscode/
 Thumbs.db
 __pycache__/
-cookies.txt
-database/*.db-shm
-database/*.db-wal
-database/ai_audit_staging.db
-database/ai_quarantine_cache.db
-database/ai_revert_log.db
-database/danbooru_wiki_cache.db
-database/posts_cache.db
-database/staging_state.db
-purge_dry_run.txt
 venv/
