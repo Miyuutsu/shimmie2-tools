@@ -1,5 +1,34 @@
-database/danbooru_wiki_cache.db
-database/posts_cache.db
-__pycache__
-scripts/functions/__pycache__
-scripts/venv
+# Local & large SQLite databases (WAL/SHM/journal included)
+database/*.db-journal
+database/*.db-shm
+database/*.db-wal
+database/ai_audit_staging.db*
+database/ai_quarantine_cache.db*
+database/ai_revert_log.db*
+database/danbooru_wiki_cache.db*
+database/posts_cache.db*
+database/staging_state.db*
+database/timeline_index.db*
+
+# Logs and backup snapshots
+*.bak
+*.csv
+*.json
+!tag_groups.json
+*.log
+*.txt
+!requirements.txt
+
+# Python files and environment stuff
+*.pyc
+*.pyd
+*.pyo
+.*.kate-swp
+.DS_Store
+.env
+.idea/
+.ruff_cache/
+.vscode/
+Thumbs.db
+__pycache__/
+venv/
