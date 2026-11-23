@@ -1,6 +1,6 @@
 [project]
 name = "shimmie2-tools"
-version = "0.2.0"
+version = "0.5.0"
 requires-python = ">=3.10"
 dependencies = [
     "av>=10.0.0",
