@@ -24,7 +24,7 @@ STAGING_STATE_DB_PATH = DB_DIR / "staging_state.db"
 IMAGE_EXTS = {".jpg", ".jpeg", ".jpe", ".png", ".webp"}
 VIDEO_EXTS = {".gif", ".webm", ".mp4", ".flv", ".m4v", ".f4v", ".f4p", ".ogv"}
 
-MD5_REGEX = re.compile(r"[a-fA-F0-9]{32}")
+MD5_REGEX = re.compile(r"(?<![a-fA-F0-9])[a-fA-F0-9]{32}(?![a-fA-F0-9])")
 
 _XATTR_MD5_KEY = "user.shimmie.md5"
 _XATTR_DHASH_KEY = "user.shimmie.dhash"
@@ -59,6 +59,28 @@ def set_xattr_mode(read: bool = False, write: bool = False) -> None:
     _XATTR.write = bool(write)
 
 
+def is_xattr_write_enabled() -> bool:
+    """Returns True if xattr writing is currently enabled."""
+    return _XATTR.write and hasattr(os, "setxattr")
+
+
+def _resolve_xattr_stat(
+    file_path: Path, st: os.stat_result | None, *, write: bool = False
+) -> os.stat_result | None:
+    """Checks xattr availability and returns os.stat_result (or None if disabled/unreadable)."""
+    if write:
+        if not _XATTR.write or not hasattr(os, "setxattr"):
+            return None
+    elif not _XATTR.read or not hasattr(os, "getxattr"):
+        return None
+
+    if st is not None:
+        return st
+    with suppress(OSError):
+        return file_path.stat()
+    return None
+
+
 def _read_xattr_digest(file_path: Path, key: str, expected_len: int, st: os.stat_result) -> str:
     """Reads and validates a cached hex digest from filesystem xattr against size and mtime_ns."""
     if not _XATTR.read or not hasattr(os, "getxattr"):
@@ -88,12 +110,7 @@ def read_xattr_dhash(
     file_path: Path, st: os.stat_result | None = None
 ) -> tuple[int, int, int] | None:
     """Reads and validates a cached (width, height, 64-bit dHash) from filesystem xattr."""
-    if not _XATTR.read or not hasattr(os, "getxattr"):
-        return None
-    stat_res = st
-    if stat_res is None:
-        with suppress(OSError):
-            stat_res = file_path.stat()
+    stat_res = _resolve_xattr_stat(file_path, st)
     if stat_res is None:
         return None
     with suppress(OSError, UnicodeDecodeError, ValueError):
@@ -118,12 +135,9 @@ def write_xattr_dhash(
     st: os.stat_result | None = None,
 ) -> None:
     """Writes a validated (width, height, 64-bit dHash) + size + mtime_ns to filesystem xattr."""
-    if not _XATTR.write or width <= 0 or height <= 0 or not hasattr(os, "setxattr"):
+    if width <= 0 or height <= 0:
         return
-    stat_res = st
-    if stat_res is None:
-        with suppress(OSError):
-            stat_res = file_path.stat()
+    stat_res = _resolve_xattr_stat(file_path, st, write=True)
     if stat_res is None:
         return
     payload = (f"{dhash:016x}:{width}:{height}:{stat_res.st_size}:{stat_res.st_mtime_ns}").encode(
@@ -137,16 +151,11 @@ def read_xattr_media_meta(
     file_path: Path, st: os.stat_result | None = None
 ) -> tuple[int, int, str | None] | None:
     """Reads and validates cached (width, height, camera_exif) from filesystem xattr."""
-    if not _XATTR.read or not hasattr(os, "getxattr"):
-        return None
-    stat_res = st
-    if stat_res is None:
-        with suppress(OSError):
-            stat_res = file_path.stat()
+    stat_res = _resolve_xattr_stat(file_path, st)
     if stat_res is None:
         return None
     with suppress(OSError, UnicodeDecodeError, ValueError):
-        raw = os.getxattr(file_path, _XATTR_META_KEY, follow_symlinks=True).decode("utf-8")
+        raw = os.getxattr(file_path, _XATTR_META_KEY, follow_symlinks=True).decode()
         ver, w_s, h_s, size_s, mtime_s, cam_s = raw.split(":", 5)
         if (
             ver == _XATTR_META_VERSION
@@ -167,12 +176,9 @@ def write_xattr_media_meta(
     st: os.stat_result | None = None,
 ) -> None:
     """Writes validated (width, height, camera_exif) + size + mtime_ns to filesystem xattr."""
-    if not _XATTR.write or width <= 0 or height <= 0 or not hasattr(os, "setxattr"):
+    if width <= 0 or height <= 0:
         return
-    stat_res = st
-    if stat_res is None:
-        with suppress(OSError):
-            stat_res = file_path.stat()
+    stat_res = _resolve_xattr_stat(file_path, st, write=True)
     if stat_res is None:
         return
     clean_cam = (
@@ -187,12 +193,7 @@ def write_xattr_media_meta(
 
 def read_xattr_pxhash(file_path: Path, st: os.stat_result | None = None) -> str:
     """Reads and validates a cached Danbooru pixel hash from filesystem xattr."""
-    if not _XATTR.read or not hasattr(os, "getxattr"):
-        return ""
-    stat_res = st
-    if stat_res is None:
-        with suppress(OSError):
-            stat_res = file_path.stat()
+    stat_res = _resolve_xattr_stat(file_path, st)
     if stat_res is None:
         return ""
     with suppress(OSError, UnicodeDecodeError, ValueError):
@@ -209,12 +210,9 @@ def read_xattr_pxhash(file_path: Path, st: os.stat_result | None = None) -> str:
 
 def write_xattr_pxhash(file_path: Path, px_hash: str, st: os.stat_result | None = None) -> None:
     """Writes a validated Danbooru pixel hash + size + mtime_ns to filesystem xattr."""
-    if not _XATTR.write or not px_hash or not hasattr(os, "setxattr"):
+    if not px_hash:
         return
-    stat_res = st
-    if stat_res is None:
-        with suppress(OSError):
-            stat_res = file_path.stat()
+    stat_res = _resolve_xattr_stat(file_path, st, write=True)
     if stat_res is None:
         return
     _write_xattr_digest(file_path, _XATTR_PXHASH_KEY, px_hash, stat_res)
@@ -273,6 +271,24 @@ def extract_or_compute_md5(file_path: Path) -> str:
     if match := MD5_REGEX.search(file_path.stem):
         return match.group(0).lower()
     return compute_md5(file_path)
+
+
+def abs_no_follow(path: Path) -> Path:
+    """Normalizes a path without resolving a symlink target."""
+    return Path(os.path.abspath(path))
+
+
+def disk_order_key(path: Path) -> str:
+    """Returns the symlink target string (without touching the target drive) for sequential HDD ordering."""
+    try:
+        return os.readlink(path) if path.is_symlink() else str(path)
+    except OSError:
+        return str(path)
+
+
+def sort_paths_by_disk_order(paths: Iterable[Path]) -> list[Path]:
+    """Returns a new list of paths ordered by their underlying physical path to minimize HDD seeks."""
+    return sorted(paths, key=disk_order_key)
 
 
 def load_blacklist(blacklist_path: Path) -> BlacklistConfig:

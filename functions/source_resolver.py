@@ -311,6 +311,27 @@ YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 YEAR_TAG_RE = re.compile(r"((?:19|20)\d{2})_\(year\)")
 E621_ID_TAG_RE = re.compile(r"\d+_\(e621\)")
 RATING_ARTIST_TAG_RE = re.compile(r"rating_[a-z_]+_\(artist\)")
+TUMBLR_PROFILE_RE = re.compile(r"https?://[\w-]+\.tumblr\.com/?")
+FANTIA_CDN_RE = re.compile(r"c\.fantia\.jp/uploads/post/file/(\d+)/")
+TUMBLR_POST_RE = re.compile(r"([\w-]+)\.tumblr\.com/post/(\d+)")
+GELBOORU_CDN_RE = re.compile(r"gelbooru_(\d+)_")
+YANDERE_CDN_RE = re.compile(r"files\.yande\.re/.*?/yande\.re(?:%20|\s|\+)(\d+)")
+ARCHIVE_MIRROR_RE = re.compile(
+    r"https?://(?:www\.)?(?:kemono\.(?:cr|su|party)|pawchive\.st)(/.*)",
+    re.IGNORECASE,
+)
+PIXIV_LEGACY_ILLUST_RE = re.compile(
+    r"pixiv\.net/(?:en/)?member_illust\.php\?(?:[^#]*&)?illust_id=(\d+)"
+)
+PIXIV_LEGACY_USER_RE = re.compile(r"pixiv\.net/(?:en/)?member\.php\?id=(\d+)")
+DOMAIN_TLD_RE = re.compile(
+    r"\.(?:ninja|com|net|org|moe|us|jp|cc|io|cr|re|xxx|tv|me|co|info|ru|de|pl|to)$"
+)
+PIXIV_USER_TAG_RE = re.compile(r"pixiv_(?:user_id|user|profile|artist_id|id)_?(\d+)")
+PIXIV_ILLUST_TAG_RE = re.compile(r"pixiv_(?:illust_id|illust|illustration|work)_?(\d+)")
+PIXIV_BARE_TAG_RE = re.compile(r"pixiv_(\d+)")
+SERIES_SUFFIX_PAREN_RE = re.compile(r"_series\)$")
+SERIES_PAREN_RE = re.compile(r"_\(series\)$")
 
 
 _ALLOW_LEADING_UNDERSCORE_PREFIXES = (
@@ -342,7 +363,7 @@ def get_source_score(url: str | None) -> tuple[int, int]:
         "/users/" in url_lower
         or "member.php?id=" in url_lower
         or "/i/user/" in url_lower
-        or bool(re.fullmatch(r"https?://[\w-]+\.tumblr\.com/?", url_lower))
+        or ("tumblr.com" in url_lower and bool(TUMBLR_PROFILE_RE.fullmatch(url_lower)))
     )
     profile_penalty = 1 if is_profile else 0
 
@@ -370,25 +391,19 @@ def convert_cdn_url(image_url: str) -> str:
 
     if match := PIXIV_CDN_RE.search(image_url):
         return f"https://www.pixiv.net/en/artworks/{match.group(1)}"
-    if match := re.search(r"c\.fantia\.jp/uploads/post/file/(\d+)/", image_url):
+    if match := FANTIA_CDN_RE.search(image_url):
         return f"https://fantia.jp/posts/{match.group(1)}"
-    if match := re.search(r"([\w-]+)\.tumblr\.com/post/(\d+)", image_url):
+    if match := TUMBLR_POST_RE.search(image_url):
         return f"https://{match.group(1)}.tumblr.com/post/{match.group(2)}"
-    if match := re.search(r"gelbooru_(\d+)_", image_url):
+    if match := GELBOORU_CDN_RE.search(image_url):
         return f"https://gelbooru.com/index.php?page=post&s=view&id={match.group(1)}"
-    if match := re.search(r"files\.yande\.re/.*?/yande\.re(?:%20|\s|\+)(\d+)", image_url):
+    if match := YANDERE_CDN_RE.search(image_url):
         return f"https://yande.re/post/show/{match.group(1)}"
-    if match := re.search(
-        r"https?://(?:www\.)?(?:kemono\.(?:cr|su|party)|pawchive\.st)(/.*)",
-        image_url,
-        re.IGNORECASE,
-    ):
+    if match := ARCHIVE_MIRROR_RE.search(image_url):
         return f"https://pawchive.pw{match.group(1)}"
-    if match := re.search(
-        r"pixiv\.net/(?:en/)?member_illust\.php\?(?:[^#]*&)?illust_id=(\d+)", image_url
-    ):
+    if match := PIXIV_LEGACY_ILLUST_RE.search(image_url):
         return f"https://www.pixiv.net/en/artworks/{match.group(1)}"
-    if match := re.search(r"pixiv\.net/(?:en/)?member\.php\?id=(\d+)", image_url):
+    if match := PIXIV_LEGACY_USER_RE.search(image_url):
         return f"https://www.pixiv.net/en/users/{match.group(1)}"
     return image_url
 
@@ -448,11 +463,7 @@ def _resolve_website_prefix(val_lower: str) -> str:
         return "booru:yandere"
     if clean.startswith("danbooru."):
         return "booru:danbooru"
-    base_domain = re.sub(
-        r"\.(?:ninja|com|net|org|moe|us|jp|cc|io|cr|re|xxx|tv|me|co|info|ru|de|pl|to)$",
-        "",
-        clean,
-    )
+    base_domain = DOMAIN_TLD_RE.sub("", clean)
     if "booru" in base_domain or base_domain in KNOWN_BOORU_NAMES:
         return f"booru:{base_domain}"
     return f"site:{base_domain}"
@@ -543,7 +554,7 @@ def _resolve_suffix_tag(tag_clean: str, tag_lower: str) -> tuple[bool, str | Non
             return True, f"character:{base_cos} cosplay"
         return True, None
 
-    if match := YEAR_TAG_RE.fullmatch(tag_lower):
+    if tag_lower.endswith("_(year)") and (match := YEAR_TAG_RE.fullmatch(tag_lower)):
         return True, f"meta:{match.group(1)}"
 
     return False, None
@@ -553,14 +564,17 @@ def _resolve_unprefixed_tag(tag_lower: str) -> str | None:
     """Handles unprefixed language, container/year meta, and bare pixiv_* tags."""
     if lang_tag := _resolve_language_token(tag_lower):
         return lang_tag
-    if tag_lower in UNPREFIXED_CONTAINER_META or YEAR_RE.fullmatch(tag_lower):
+    if tag_lower in UNPREFIXED_CONTAINER_META or (
+        len(tag_lower) == 4 and tag_lower.startswith(("19", "20")) and tag_lower.isdigit()
+    ):
         return f"meta:{tag_lower}"
-    if match := re.fullmatch(r"pixiv_(?:user_id|user|profile|artist_id|id)_?(\d+)", tag_lower):
-        return f"source:https://www.pixiv.net/en/users/{match.group(1)}"
-    if match := re.fullmatch(r"pixiv_(?:illust_id|illust|illustration|work)_?(\d+)", tag_lower):
-        return f"source:https://www.pixiv.net/en/artworks/{match.group(1)}"
-    if match := re.fullmatch(r"pixiv_(\d+)", tag_lower):
-        return f"source:https://www.pixiv.net/en/artworks/{match.group(1)}"
+    if tag_lower.startswith("pixiv_"):
+        if match := PIXIV_USER_TAG_RE.fullmatch(tag_lower):
+            return f"source:https://www.pixiv.net/en/users/{match.group(1)}"
+        if match := PIXIV_ILLUST_TAG_RE.fullmatch(tag_lower):
+            return f"source:https://www.pixiv.net/en/artworks/{match.group(1)}"
+        if match := PIXIV_BARE_TAG_RE.fullmatch(tag_lower):
+            return f"source:https://www.pixiv.net/en/artworks/{match.group(1)}"
     return None
 
 
@@ -599,7 +613,9 @@ def resolve_prefixed_tag(tag: str) -> str | None:
     tag_clean = tag.strip()
     tag_lower = tag_clean.lower()
 
-    if E621_ID_TAG_RE.fullmatch(tag_lower) or RATING_ARTIST_TAG_RE.fullmatch(tag_lower):
+    if (tag_lower.endswith("_(e621)") and E621_ID_TAG_RE.fullmatch(tag_lower)) or (
+        tag_lower.startswith("rating_") and RATING_ARTIST_TAG_RE.fullmatch(tag_lower)
+    ):
         return "_DROP_"
     if tag_lower in {"original", "original_(series)"}:
         return "series:original"
@@ -700,8 +716,8 @@ def resolve_prefixed_tag(tag: str) -> str | None:
             return "series:original"
         if val_lower == "tagme":
             return "series:tagme" if prefix_lower != "series" else None
-        clean_series = re.sub(r"_series\)$", ")", val_lower)
-        clean_series = re.sub(r"_\(series\)$", "", clean_series)
+        clean_series = SERIES_SUFFIX_PAREN_RE.sub(")", val_lower)
+        clean_series = SERIES_PAREN_RE.sub("", clean_series)
         target_series = f"series:{clean_series}"
         return target_series if target_series != tag_clean else None
 

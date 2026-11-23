@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import psycopg2
 import psycopg2.extras
@@ -286,7 +286,7 @@ def get_existing_shimmie_hashes(md5_iterable: Iterable[str], db_config: dict | N
             for idx in range(0, len(md5_list), 10000):
                 chunk = md5_list[idx : idx + 10000]
                 cur.execute("SELECT hash FROM images WHERE hash = ANY(%s)", (chunk,))
-                existing.update(row[0] for row in cur.fetchall() if row[0])
+                existing.update(row[0].strip().lower() for row in cur.fetchall() if row[0])
     except Exception as e:
         print(f"\n[WARNING] Could not query existing hashes from PostgreSQL: {e}")
 
@@ -300,7 +300,7 @@ def resolve_post(
     precomputed_md5: str | None = None,
 ) -> ResolutionData:
     """Resolves post metadata from posts_cache.db by MD5 or Danbooru pixel hash."""
-    md5 = precomputed_md5 or extract_or_compute_md5(image)
+    md5 = (precomputed_md5 or extract_or_compute_md5(image)).lower()
     is_video = image.suffix.lower() in VIDEO_EXTS
     post: dict[str, str | list[str]] | None = None
     px_hash: str | None = None
@@ -368,8 +368,16 @@ def get_shimmie_db_credentials(spath: str | Path | None) -> dict[str, str | int]
         res: dict[str, str | int] = {
             "host": host,
             "dbname": parsed.path.lstrip("/") or "shimmie",
-            "user": parsed.username or (user_match.group(1) if user_match else "postgres"),
-            "password": parsed.password or (pass_match.group(1) if pass_match else ""),
+            "user": (
+                unquote(parsed.username)
+                if parsed.username
+                else (user_match.group(1) if user_match else "postgres")
+            ),
+            "password": (
+                unquote(parsed.password)
+                if parsed.password
+                else (pass_match.group(1) if pass_match else "")
+            ),
         }
         if parsed.port:
             res["port"] = parsed.port
@@ -475,48 +483,112 @@ def get_bulk_canonical_tags(
     return results
 
 
-def load_mappings() -> Mappings:
-    """Loads character, artist, and dominant tag rating dictionaries from SQLite."""
-    for db_file, label in (
-        (CDB_PATH, "Character DB"),
-        (ADB_PATH, "Artist DB"),
-        (TAG_DB_PATH, "Tag Rating DB"),
-    ):
-        if not db_file.is_file():
-            raise FileNotFoundError(f"{label} not found: {db_file}")
+def load_char_and_artist_maps(require_files: bool = False) -> tuple[dict[str, str], dict[str, str]]:
+    """Loads character->series and artist->canonical_artist mappings from SQLite."""
+    if require_files:
+        for db_file, label in ((CDB_PATH, "Character DB"), (ADB_PATH, "Artist DB")):
+            if not db_file.is_file():
+                raise FileNotFoundError(f"{label} not found: {db_file}")
 
     char_map: dict[str, str] = {}
-    with sqlite3.connect(CDB_PATH) as conn:
-        for row in conn.execute("SELECT * FROM data"):
-            if not row or not row[0] or not row[0].strip():
-                continue
-            c_raw = row[0].strip()
-            s_raw = row[1].strip() if len(row) >= 2 and row[1] else ""
-            char_map[c_raw] = s_raw
-            c_unquoted = c_raw.strip("\"'")
-            if c_unquoted and c_unquoted not in char_map:
-                char_map[c_unquoted] = s_raw
+    if CDB_PATH.is_file():
+        with sqlite3.connect(CDB_PATH) as conn:
+            for row in conn.execute("SELECT * FROM data"):
+                if not row or not row[0] or not row[0].strip():
+                    continue
+                c_raw = row[0].strip()
+                s_raw = row[1].strip() if len(row) >= 2 and row[1] else ""
+                char_map[c_raw] = s_raw
+                c_unquoted = c_raw.strip("\"'")
+                if c_unquoted and c_unquoted not in char_map:
+                    char_map[c_unquoted] = s_raw
 
     artist_map: dict[str, str] = {}
-    with sqlite3.connect(ADB_PATH) as conn:
-        for row in conn.execute("SELECT * FROM data"):
-            if not row or not row[0] or not row[0].strip():
-                continue
-            a_raw = row[0].strip()
-            a_fixed = row[1].strip() if len(row) >= 2 and row[1] and row[1].strip() else a_raw
-            artist_map[a_raw] = a_fixed
-            artist_map[a_fixed] = a_fixed
+    if ADB_PATH.is_file():
+        with sqlite3.connect(ADB_PATH) as conn:
+            for row in conn.execute("SELECT * FROM data"):
+                if not row or not row[0] or not row[0].strip():
+                    continue
+                a_raw = row[0].strip()
+                a_fixed = row[1].strip() if len(row) >= 2 and row[1] and row[1].strip() else a_raw
+                artist_map[a_raw] = a_fixed
+                artist_map[a_fixed] = a_fixed
+
+    return char_map, artist_map
+
+
+def load_rating_weights(require_file: bool = False) -> dict[str, int]:
+    """Loads dominant tag rating weights from tag_rating_dominant.db."""
+    if not TAG_DB_PATH.is_file():
+        if require_file:
+            raise FileNotFoundError(f"Tag Rating DB not found: {TAG_DB_PATH}")
+        return {}
 
     rating_map: dict[str, int] = {}
     with sqlite3.connect(TAG_DB_PATH) as conn:
         for row in conn.execute("SELECT tag_name, dominant_rating FROM dominant_tag_ratings"):
-            if len(row) >= 2 and row[0]:
+            if len(row) >= 2 and row[0] and row[0].strip():
                 rating_map[row[0].strip().lower()] = int(row[1])
+    return rating_map
 
+
+def load_mappings() -> Mappings:
+    """Loads character, artist, and dominant tag rating dictionaries from SQLite."""
+    char_map, artist_map = load_char_and_artist_maps(require_files=True)
+    rating_map = load_rating_weights(require_file=True)
     print(
         f"[INFO] Loaded {len(char_map):,} chars, {len(artist_map):,} artists, {len(rating_map):,} rating weights."
     )
     return Mappings(char_map, artist_map, rating_map)
+
+
+def ensure_tags_in_db(cur, tag_names: Iterable[str], tag_id_map: dict[str, int]) -> None:
+    """Inserts any missing tags (truncated to VARCHAR(255)) into public.tags and updates tag_id_map."""
+    missing = list({t[:255] for t in tag_names if t and t[:255] not in tag_id_map})
+    if not missing:
+        return
+
+    psycopg2.extras.execute_values(
+        cur,
+        "INSERT INTO tags (tag, count) VALUES %s ON CONFLICT (tag) DO NOTHING",
+        [(t, 0) for t in missing],
+        page_size=10000,
+    )
+    cur.execute("SELECT tag, id FROM tags WHERE tag = ANY(%s)", (missing,))
+    tag_id_map.update(dict(cur.fetchall()))
+
+
+def recalculate_tag_counts(
+    cur,
+    affected_tag_ids: Iterable[int],
+    prune_orphans: bool = True,
+) -> None:
+    """Recalculates public.tags.count for affected tag IDs and optionally deletes 0-count orphans."""
+    unique_ids = list(set(affected_tag_ids))
+    if unique_ids:
+        cur.execute("CREATE TEMP TABLE tmp_recalc_tags (tag_id INT PRIMARY KEY) ON COMMIT DROP")
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO tmp_recalc_tags (tag_id) VALUES %s",
+            [(tid,) for tid in unique_ids],
+            page_size=10000,
+        )
+        cur.execute("""
+            WITH new_counts AS (
+                SELECT trt.tag_id, COUNT(it.image_id) AS cnt
+                FROM tmp_recalc_tags trt
+                LEFT JOIN image_tags it ON trt.tag_id = it.tag_id
+                GROUP BY trt.tag_id
+            )
+            UPDATE tags AS t
+            SET count = nc.cnt
+            FROM new_counts nc
+            WHERE t.id = nc.tag_id
+        """)
+        cur.execute("DROP TABLE tmp_recalc_tags")
+
+    if prune_orphans:
+        cur.execute("DELETE FROM tags WHERE count <= 0")
 
 
 # ==========================================

@@ -5,18 +5,22 @@ import re
 import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import psycopg2
 import tqdm
 
-from functions.common import extract_or_compute_md5
+from functions.common import extract_or_compute_md5, sort_paths_by_disk_order
 from functions.db_cache import Mappings, get_bulk_canonical_tags, save_tagmap_entries
 from functions.tags_curation import get_sidecar_tags, load_tag_groups_metadata
 
 E621_NUMERIC_TAG_RE = re.compile(r"^\d+_\(e621\)$")
 TRAILING_PAREN_RE = re.compile(r"_\([^)]+\)$")
+PAREN_STRIP_RE = re.compile(r"\([^)]+\)")
+PUNCT_STRIP_RE = re.compile(r"[_()-]")
+VALID_NORM_GENERAL_RE = re.compile(r"[a-z0-9_()-]{3,}")
 WORD_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -51,12 +55,13 @@ class TagCategoryGuard:
         _, self.known_general, copyright_series, _ = load_tag_groups_metadata()
         self.series.update(copyright_series)
 
-        self.norm_general_map = {
-            re.sub(r"[_()-]", "", t.lower()): t
-            for t in self.known_general
-            if re.fullmatch(r"[a-z0-9_()-]{3,}", t.lower())
-            and len(re.sub(r"[_()-]", "", t.lower())) >= 3
-        }
+        self.norm_general_map: dict[str, str] = {}
+        for t in self.known_general:
+            t_lower = t.lower()
+            if VALID_NORM_GENERAL_RE.fullmatch(t_lower):
+                norm_k = PUNCT_STRIP_RE.sub("", t_lower)
+                if len(norm_k) >= 3:
+                    self.norm_general_map[norm_k] = t
 
     def get_category(self, tag: str) -> str:
         """Determines the category of a given tag based on prefix or loaded DB mappings."""
@@ -75,8 +80,8 @@ class TagCategoryGuard:
         """Returns True if two tags share at least one 3+ character alphanumeric word outside parentheses."""
         b1 = tag1.split(":", 1)[-1]
         b2 = tag2.split(":", 1)[-1]
-        w1 = {w for w in WORD_TOKEN_RE.findall(re.sub(r"\([^)]+\)", "", b1)) if len(w) > 2}
-        w2 = {w for w in WORD_TOKEN_RE.findall(re.sub(r"\([^)]+\)", "", b2)) if len(w) > 2}
+        w1 = {w for w in WORD_TOKEN_RE.findall(PAREN_STRIP_RE.sub("", b1)) if len(w) > 2}
+        w2 = {w for w in WORD_TOKEN_RE.findall(PAREN_STRIP_RE.sub("", b2)) if len(w) > 2}
         return bool(w1 & w2)
 
     def is_normalized_alias(self, tag1: str, tag2: str) -> bool:
@@ -134,15 +139,26 @@ class TagCategoryGuard:
         return not (cat_s in self.strict and cat_c == "general")
 
 
-def _extract_hashes(image_list: Iterable[Path]) -> tuple[dict[Path, str], set[str]]:
-    """Extracts MD5s for all media files using filename regex or file hashing fallback."""
+def _extract_hashes(
+    image_list: Iterable[Path], threads: int = 4
+) -> tuple[dict[Path, str], set[str]]:
+    """Extracts MD5s in disk order using filename regex or threaded file hashing fallback."""
+    ordered = sort_paths_by_disk_order(image_list)
+    if not ordered:
+        return {}, set()
+
     img_to_md5: dict[Path, str] = {}
     md5_set: set[str] = set()
-
-    for img_path in tqdm.tqdm(image_list, desc="1/2: Extracting Hashes", unit="img"):
-        md5 = extract_or_compute_md5(img_path)
-        img_to_md5[img_path] = md5
-        md5_set.add(md5)
+    with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
+        hashes = tqdm.tqdm(
+            pool.map(extract_or_compute_md5, ordered),
+            total=len(ordered),
+            desc="1/2: Extracting Hashes",
+            unit="img",
+        )
+        for img_path, md5 in zip(ordered, hashes, strict=True):
+            img_to_md5[img_path] = md5
+            md5_set.add(md5)
 
     return img_to_md5, md5_set
 
@@ -184,9 +200,10 @@ def build_tag_frequencies(
     image_list: list[Path],
     db_conn: dict | None,
     sqlite_conn: sqlite3.Connection | None,
+    threads: int = 4,
 ) -> TagFrequencies:
     """Builds tag frequency and co-occurrence tables across a media list."""
-    img_to_md5, md5_set = _extract_hashes(image_list)
+    img_to_md5, md5_set = _extract_hashes(image_list, threads=threads)
     print(f"\n[INFO] Fetching database tags for {len(md5_set):,} unique files...")
     bulk_tags = get_bulk_canonical_tags(md5_set, db_conn, sqlite_conn)
     return _calculate_co_occurrences(image_list, img_to_md5, bulk_tags)
@@ -387,11 +404,12 @@ def mine_tag_equivalencies(
     output_path: str | Path,
     mappings: Mappings,
     thresholds: tuple[int, float] = (10, 0.5),
+    threads: int = 4,
 ) -> None:
     """Scans images to discover 1:1 tag mappings using Jaccard similarity."""
     print(f"\n[⛏️ MINING MODE] Analyzing {len(image_list):,} images for 1:1 equivalencies...")
     db_conn, sqlite_conn = conns
-    freqs = build_tag_frequencies(image_list, db_conn, sqlite_conn)
+    freqs = build_tag_frequencies(image_list, db_conn, sqlite_conn, threads=threads)
 
     missing = len(image_list) - freqs.valid_pairs
     if image_list and (missing / len(image_list)) >= 0.5:

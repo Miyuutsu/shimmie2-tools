@@ -1,15 +1,24 @@
 """Database-driven tag normalization, enrichment, parent expansion, and rating calculation."""
 
 import html
-import json
 import re
-import sqlite3
 from collections import defaultdict
 from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import Path
 
-from functions.common import ADB_PATH, CDB_PATH, ROOT_DIR, SUBMODULE_PATH
+import orjson
+
+from functions.common import ROOT_DIR, SUBMODULE_PATH
+from functions.db_cache import load_char_and_artist_maps
 from functions.source_resolver import is_recognized_prefix, resolve_prefixed_tag
+
+WHITESPACE_RE = re.compile(r"\s+")
+PUNCT_STRIP_RE = re.compile(r"[_()-]")
+VALID_NORM_GENERAL_RE = re.compile(r"[a-z0-9_()-]{3,}")
+SERIES_SUFFIX_PAREN_RE = re.compile(r"_series\)$")
+SERIES_PAREN_RE = re.compile(r"_\(series\)$")
+PAREN_QUAL_RE = re.compile(r"_\(([^()]+)\)")
 
 EXPLICIT_GROUP_PARENTS = {
     "eyewear",
@@ -69,7 +78,7 @@ def calculate_rating(
             total_score = 1
 
     calc_rating: str | None = None
-    if 0 < total_score <= smax and "tagme" in tag_list:
+    if 0 < total_score <= smax and ("tagme" in tag_list or real_tag_count < 15):
         calc_rating = "?"
     elif total_score > 0:
         calc_rating = rating_from_score(total_score, smax, qmax)
@@ -116,6 +125,7 @@ def _is_plural_variant(tag1: str, tag2: str) -> bool:
     return w1 == w2
 
 
+@lru_cache(maxsize=1)
 def load_tag_groups_metadata() -> tuple[dict[str, set[str]], set[str], set[str], set[str]]:
     """Parses tag_groups.json to build:
     1. child_to_parents: maps specific tags to all ancestor base/type tags (transitively closed).
@@ -128,13 +138,12 @@ def load_tag_groups_metadata() -> tuple[dict[str, set[str]], set[str], set[str],
     copyright_series: set[str] = set()
     sex_group_tags: set[str] = set()
 
-    candidates = (SUBMODULE_PATH / "tag_groups.json", ROOT_DIR / "tag_groups.json")
+    candidates = (ROOT_DIR / "tag_groups.json", SUBMODULE_PATH / "tag_groups.json")
     group_file = next((p for p in candidates if p.is_file()), None)
     if not group_file:
         return child_to_parents, known_general, copyright_series, sex_group_tags
 
-    with group_file.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    data = orjson.loads(group_file.read_bytes())
 
     for category, subgroups in data.items():
         if not isinstance(subgroups, dict):
@@ -247,12 +256,13 @@ class TagCurationContext:
         for char_name in list(self.char_map):
             self._index_qualified_character(char_name)
 
-        self.norm_general_map = {
-            re.sub(r"[_()-]", "", t.lower()): t
-            for t in self.known_general
-            if re.fullmatch(r"[a-z0-9_()-]{3,}", t.lower())
-            and len(re.sub(r"[_()-]", "", t.lower())) >= 3
-        }
+        self.norm_general_map: dict[str, str] = {}
+        for t in self.known_general:
+            t_lower = t.lower()
+            if VALID_NORM_GENERAL_RE.fullmatch(t_lower):
+                norm_k = PUNCT_STRIP_RE.sub("", t_lower)
+                if len(norm_k) >= 3:
+                    self.norm_general_map[norm_k] = t
 
         self.bogus_prefixed_tags: set[str] = set()
 
@@ -322,39 +332,15 @@ class TagCurationContext:
 
     @staticmethod
     def _clean_series_name(name: str) -> str:
-        clean = re.sub(r"\s+", "_", name.strip().strip("\"'"))
-        clean = re.sub(r"_series\)$", ")", clean)
-        return re.sub(r"_\(series\)$", "", clean)
+        clean = name.strip().strip("\"'")
+        if " " in clean or "\t" in clean:
+            clean = WHITESPACE_RE.sub("_", clean)
+        clean = SERIES_SUFFIX_PAREN_RE.sub(")", clean)
+        return SERIES_PAREN_RE.sub("", clean)
 
     @classmethod
     def _load_char_and_artist_dbs(cls) -> tuple[dict[str, str], dict[str, str]]:
-        char_map: dict[str, str] = {}
-        if CDB_PATH.is_file():
-            with sqlite3.connect(CDB_PATH) as conn:
-                for row in conn.execute("SELECT * FROM data"):
-                    if not row or not row[0] or not row[0].strip():
-                        continue
-                    c_raw = row[0].strip()
-                    s_raw = row[1].strip() if len(row) >= 2 and row[1] else ""
-                    char_map[c_raw] = s_raw
-                    c_unquoted = c_raw.strip("\"'")
-                    if c_unquoted and c_unquoted not in char_map:
-                        char_map[c_unquoted] = s_raw
-
-        artist_map: dict[str, str] = {}
-        if ADB_PATH.is_file():
-            with sqlite3.connect(ADB_PATH) as conn:
-                for row in conn.execute("SELECT * FROM data"):
-                    if not row or not row[0] or not row[0].strip():
-                        continue
-                    a_raw = row[0].strip()
-                    a_fixed = (
-                        row[1].strip() if len(row) >= 2 and row[1] and row[1].strip() else a_raw
-                    )
-                    artist_map[a_raw] = a_fixed
-                    artist_map[a_fixed] = a_fixed
-
-        return char_map, artist_map
+        return load_char_and_artist_maps(require_files=False)
 
     def is_safe_mapping(self, sidecar_tag: str, canonical_tag: str) -> bool:
         """Guards against poisoned dynamic mappings like 'eyes -> mizumizuni' or 'kohaku -> _DROP_'."""
@@ -390,10 +376,11 @@ class TagCurationContext:
             for s_name in self._iter_series_values(self.char_map[base_c]):
                 extra.append(f"series:{s_name}")
 
-        for paren_match in re.findall(r"_\(([^()]+)\)", base_c):
-            qual_clean = self._clean_series_name(paren_match.lower())
-            if qual_clean in self.series_set:
-                extra.append(f"series:{qual_clean}")
+        if "_(" in base_c:
+            for paren_match in PAREN_QUAL_RE.findall(base_c):
+                qual_clean = self._clean_series_name(paren_match.lower())
+                if qual_clean in self.series_set:
+                    extra.append(f"series:{qual_clean}")
 
         return extra
 
@@ -445,7 +432,10 @@ class TagCurationContext:
 
     def expand_single_tag(self, raw_tag: str, lookup_map: dict[str, str]) -> tuple[str, ...]:
         """Normalizes via tagmap.db, enriches from characters.db/artists.db, and expands tag_groups.json parents."""
-        tag = re.sub(r"\s+", "_", raw_tag.strip())
+        stripped = raw_tag.strip()
+        tag = (
+            WHITESPACE_RE.sub("_", stripped) if (" " in stripped or "\t" in stripped) else stripped
+        )
         if not tag or tag in {"tagme", "artist:tagme", "character:tagme", "series:tagme", "_DROP_"}:
             return ()
 
@@ -571,7 +561,12 @@ def apply_tag_curation(
 
     if image_qualifiers and ctx.qualified_char_map:
         for raw_t in tags:
-            clean_raw = re.sub(r"\s+", "_", raw_t.strip())
+            stripped_t = raw_t.strip()
+            clean_raw = (
+                WHITESPACE_RE.sub("_", stripped_t)
+                if (" " in stripped_t or "\t" in stripped_t)
+                else stripped_t
+            )
             base_cand: str | None = None
             if not is_recognized_prefix(clean_raw):
                 base_cand = clean_raw
@@ -645,6 +640,19 @@ def apply_tag_curation(
     tags[:] = final_tags
 
 
+def ensure_tagme_placeholders(tags: list[str]) -> list[str]:
+    """Appends tagme / artist:tagme / character:tagme / series:tagme placeholders where missing."""
+    if len(tags) < 15 and "tagme" not in tags:
+        tags.append("tagme")
+    if not any(t.startswith("artist:") for t in tags):
+        tags.append("artist:tagme")
+    if not any(t.startswith("character:") for t in tags):
+        tags.append("character:tagme")
+    if not any(t.startswith("series:") for t in tags):
+        tags.append("series:tagme")
+    return tags
+
+
 def get_sidecar_tags(image_path: Path) -> list[str]:
     """Scans for .txt sidecar files associated with the media file and parses tags."""
     extra_tags: list[str] = []
@@ -662,6 +670,19 @@ def get_sidecar_tags(image_path: Path) -> list[str]:
                 line_clean = html.unescape(line.strip())
                 if not line_clean or line_clean.startswith("#"):
                     continue
-                parts = [t.strip().lower() for t in line_clean.split(",") if t.strip()]
-                extra_tags.extend(re.sub(r"\s+", "_", t) for t in parts if t)
+                for raw_part in line_clean.split(","):
+                    part = raw_part.strip()
+                    if not part:
+                        continue
+                    part_lower = part.lower()
+                    if part_lower.startswith("source:"):
+                        url_val = part.split(":", 1)[1].strip()
+                        if url_val:
+                            extra_tags.append(f"source:{url_val}")
+                    elif part_lower.startswith(("http://", "https://")):
+                        extra_tags.append(part)
+                    elif " " in part_lower or "\t" in part_lower:
+                        extra_tags.append(WHITESPACE_RE.sub("_", part_lower))
+                    else:
+                        extra_tags.append(part_lower)
     return extra_tags

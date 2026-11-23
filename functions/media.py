@@ -26,6 +26,10 @@ def compute_danbooru_pixel_hash(image_path: Path) -> str:
         image = image.colourspace("srgb")
     if not image.hasalpha():
         image = image.addalpha()
+    if image.format == "ushort":
+        image = (image >> 8).cast("uchar")
+    elif image.format != "uchar":
+        image = image.cast("uchar")
 
     header = (
         b"P7\n"
@@ -101,7 +105,7 @@ def fallback_to_webp(src_path: Path, dst_path: Path) -> None:
     with Image.open(src_path) as im:
         im.load()
         im.thumbnail((512, 512), Image.Resampling.LANCZOS)
-        im.save(dst_path, "webp", quality=92, method=6)
+        im.save(dst_path, "webp", quality=92, method=4)
 
 
 def magick_to_webp(src_path: Path, dst_path: Path) -> None:
@@ -223,7 +227,7 @@ def extract_video_thumbnail(src_path: Path, dst_path: Path) -> None:
         if frames:
             im = frames[0]
             im.thumbnail((512, 512), Image.Resampling.LANCZOS)
-            im.save(dst_path, "webp", quality=92, method=6)
+            im.save(dst_path, "webp", quality=92, method=4)
             return
     except Exception:
         pass
