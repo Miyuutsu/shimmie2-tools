@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import psycopg2
 import psycopg2.extras
+import tqdm
 
 from functions.common import TIMELINE_DB_PATH
 from functions.db_cache import get_shimmie_db_credentials
@@ -65,27 +66,51 @@ def run_sync_pools(args) -> None:
         user_id = _resolve_user_id(cur, effective_user)
 
         # Fetch matching imported images and their current live artist:* tags
-        matched_images: dict[str, tuple[int, list[str]]] = {}
-        for i in range(0, len(md5_list), 10000):
+        matched_ids: dict[str, int] = {}
+        for i in tqdm.tqdm(
+            range(0, len(md5_list), 10000),
+            desc="Matching MD5s in Shimmie2",
+            leave=False,
+        ):
             chunk = md5_list[i : i + 10000]
+            cur.execute("SELECT hash, id FROM images WHERE hash = ANY(%s)", (chunk,))
+            for hsh, img_id in cur.fetchall():
+                matched_ids[hsh.strip().lower()] = int(img_id)
+
+        if not matched_ids:
+            print("[!] None of the indexed MD5s exist in Shimmie2 yet.")
+            return
+
+        # 2. Fetch ONLY artist:* tags for matched image IDs
+        artist_tags_by_img: dict[int, set[str]] = defaultdict(set)
+        id_list = list(matched_ids.values())
+        for i in tqdm.tqdm(
+            range(0, len(id_list), 10000),
+            desc="Loading artist tags",
+            leave=False,
+        ):
+            chunk = id_list[i : i + 10000]
             cur.execute(
                 """
-                SELECT i.hash, i.id,
-                       array_agg(t.tag) FILTER (
-                           WHERE t.tag LIKE 'artist:%%' AND t.tag != 'artist:tagme'
-                       )
-                FROM images i
-                LEFT JOIN image_tags it ON i.id = it.image_id
-                LEFT JOIN tags t ON it.tag_id = t.id
-                WHERE i.hash = ANY(%s)
-                GROUP BY i.hash, i.id
+                WITH artist_tags AS MATERIALIZED (
+                    SELECT id, tag
+                    FROM tags
+                    WHERE tag LIKE 'artist:%%' AND tag != 'artist:tagme'
+                )
+                SELECT it.image_id, at.tag
+                FROM image_tags it
+                JOIN artist_tags at ON at.id = it.tag_id
+                WHERE it.image_id = ANY(%s)
                 """,
                 (chunk,),
             )
-            for hsh, img_id, artist_tags in cur.fetchall():
-                clean_h = hsh.strip().lower()
-                live_artists = sorted({t.split(":", 1)[1] for t in (artist_tags or ()) if t})
-                matched_images[clean_h] = (int(img_id), live_artists)
+            for img_id, tag in cur.fetchall():
+                artist_tags_by_img[int(img_id)].add(tag.split(":", 1)[1])
+
+        matched_images: dict[str, tuple[int, list[str]]] = {
+            hsh: (img_id, sorted(artist_tags_by_img.get(img_id, ())))
+            for hsh, img_id in matched_ids.items()
+        }
 
         if not matched_images:
             print("[!] None of the indexed MD5s exist in Shimmie2 yet.")

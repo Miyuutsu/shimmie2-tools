@@ -207,9 +207,7 @@ def read_xattr_pxhash(file_path: Path, st: os.stat_result | None = None) -> str:
     return ""
 
 
-def write_xattr_pxhash(
-    file_path: Path, px_hash: str, st: os.stat_result | None = None
-) -> None:
+def write_xattr_pxhash(file_path: Path, px_hash: str, st: os.stat_result | None = None) -> None:
     """Writes a validated Danbooru pixel hash + size + mtime_ns to filesystem xattr."""
     if not _XATTR.write or not px_hash or not hasattr(os, "setxattr"):
         return

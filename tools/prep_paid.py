@@ -151,7 +151,6 @@ def init_timeline_db(db_path: Path = TIMELINE_DB_PATH) -> None:
                 extra_tags TEXT NOT NULL DEFAULT ''
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_timeline_artist ON timeline_items(artist)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_timeline_sort "
             "ON timeline_items(artist, published_ts, post_id_num, page_index)"
