@@ -17,7 +17,6 @@ database/timeline_index.db*
 !tag_groups.json
 *.log
 *.txt
-!blacklist.txt
 !requirements.txt
 
 # Python files and environment stuff
