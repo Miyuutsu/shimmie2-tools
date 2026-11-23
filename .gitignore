@@ -16,8 +16,9 @@ database/timeline_index.db*
 *.json
 !tag_groups.json
 *.log
-purge_dry_run.txt
-skipped_files.txt
+*.txt
+!blacklist.txt
+!requirements.txt
 
 # Python files and environment stuff
 *.pyc
